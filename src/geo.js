@@ -152,3 +152,138 @@ function shortestPath(graph, startName, goalName) {
     }
     return path;
 }
+
+// Stable identity string for a directed edge (from/to/route uniquely
+// identify one direction of travel on a route segment). Used by the
+// traffic system to track AI vehicles independent of any render frame.
+function edgeId(edge) {
+    return edge.from + "|" + edge.to + "|" + edge.route;
+}
+
+// ---------------------------------------------------------------------
+// Road geometry: deterministic per-edge "ribbon" (a gently curving arcade
+// road path in its own local 2D space, x=lateral, y=forward). Shared
+// globally (not just by game.js) so the traffic system can sample AI
+// vehicle positions the same way the player's own position is sampled.
+// ---------------------------------------------------------------------
+const graph = buildGraph();
+const ribbonCache = new Map();
+
+function ribbonKey(a, b, route) {
+    const pair = [a, b].sort();
+    return `${route}::${pair[0]}|${pair[1]}`;
+}
+
+// Catmull-Rom evaluation for one interior segment (p1->p2) given neighbours.
+function catmullRom(p0, p1, p2, p3, t) {
+    const t2 = t * t, t3 = t2 * t;
+    const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+    const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+    return { x, y };
+}
+
+function buildRibbon(edge) {
+    const key = ribbonKey(edge.from, edge.to, edge.route);
+    let cached = ribbonCache.get(key);
+    if (!cached) {
+        const rnd = mulberry32(hashStr(key));
+        const len = Math.min(4200, Math.max(600, 320 + edge.miles * 1.55));
+        const nMid = Math.max(1, Math.min(6, Math.round(len / 650)));
+        const ctrl = [{ x: 0, y: 0 }];
+        ctrl.push({ x: 0, y: len * 0.1 });
+        const curviness = len * (0.05 + rnd() * 0.05);
+        for (let i = 1; i <= nMid; i++) {
+            const t = i / (nMid + 1);
+            const sway = Math.sin(t * Math.PI) * curviness * (rnd() * 2 - 1);
+            ctrl.push({ x: sway, y: len * (0.1 + t * 0.8) });
+        }
+        ctrl.push({ x: 0, y: len * 0.9 });
+        ctrl.push({ x: 0, y: len });
+
+        const ext = [ctrl[0], ...ctrl, ctrl[ctrl.length - 1]];
+        const dense = [];
+        const stepsPerSeg = 14;
+        for (let i = 0; i < ext.length - 3; i++) {
+            for (let s = 0; s < stepsPerSeg; s++) {
+                const t = s / stepsPerSeg;
+                dense.push(catmullRom(ext[i], ext[i + 1], ext[i + 2], ext[i + 3], t));
+            }
+        }
+        dense.push(ctrl[ctrl.length - 1]);
+
+        const cum = [0];
+        for (let i = 1; i < dense.length; i++) {
+            const dx = dense[i].x - dense[i - 1].x, dy = dense[i].y - dense[i - 1].y;
+            cum.push(cum[i - 1] + Math.hypot(dx, dy));
+        }
+        cached = { points: dense, cum, length: cum[cum.length - 1], forwardKeyStartsAt: [edge.from, edge.to].sort()[0] };
+        ribbonCache.set(key, cached);
+    }
+    // Orient the shared geometry to this edge's travel direction.
+    const forward = cached.forwardKeyStartsAt === edge.from;
+    return { ...cached, reversed: !forward };
+}
+
+function ribbonSample(ribbon, s) {
+    s = Math.max(0, Math.min(ribbon.length, s));
+    const sQuery = ribbon.reversed ? ribbon.length - s : s;
+    const cum = ribbon.cum, pts = ribbon.points;
+    // binary search
+    let lo = 0, hi = cum.length - 1;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (cum[mid] < sQuery) lo = mid + 1; else hi = mid;
+    }
+    const i = Math.max(1, lo);
+    const segLen = Math.max(1e-6, cum[i] - cum[i - 1]);
+    const t = (sQuery - cum[i - 1]) / segLen;
+    const a = pts[i - 1], b = pts[i];
+    let x = a.x + (b.x - a.x) * t;
+    let y = a.y + (b.y - a.y) * t;
+    if (ribbon.reversed) x = -x;
+    return { x, y };
+}
+
+// Arcade world-units of road traveled per mph per second — shared so the
+// player and AI traffic move at consistent relative speeds.
+const UNITS_PER_MPH = 5.2;
+
+// Multi-lane road geometry (world units). Interstates are divided,
+// multi-lane; US highways are undivided, one lane each way. Shared by the
+// renderer (road polygon + lane markings), the player's steering clamp,
+// and the traffic system (lane slots + lane-change-to-pass logic).
+const LANE_WIDTH = 34;
+const SHOULDER = 20;
+const LANES_PER_DIR = { interstate: 2, highway: 1 };
+const MEDIAN_WIDTH = { interstate: 26, highway: 0 };
+
+function laneCount(kind) { return LANES_PER_DIR[kind] || 1; }
+function ownLaneX(kind, i) { return MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * i + LANE_WIDTH / 2; }
+function roadHalfWidth(kind) { return MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * laneCount(kind) + SHOULDER; }
+function laneRange(kind) {
+    const min = MEDIAN_WIDTH[kind] / 2 - 6;
+    const max = MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * laneCount(kind) + SHOULDER * 0.6;
+    return [min, max];
+}
+
+function ribbonPose(ribbon, s) {
+    const eps = 8;
+    const p0 = ribbonSample(ribbon, s - eps);
+    const p1 = ribbonSample(ribbon, s + eps);
+    const dx = p1.x - p0.x, dy = p1.y - p0.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const mid = ribbonSample(ribbon, s);
+    return { x: mid.x, y: mid.y, headingX: dx / len, headingY: dy / len };
+}
+
+// Position at arclength s, offset sideways by `offset` local units
+// (positive = the driver's right, i.e. the own-direction side of the
+// road in right-hand traffic). Follows curves correctly because the
+// offset is applied perpendicular to the ribbon's tangent at s, not as a
+// flat world-space nudge. Used for lane centers, lane markings, and both
+// the player's and AI vehicles' rendered position.
+function ribbonLateral(ribbon, s, offset) {
+    const pose = ribbonPose(ribbon, s);
+    const px = pose.headingY, py = -pose.headingX;
+    return { x: pose.x + px * offset, y: pose.y + py * offset };
+}

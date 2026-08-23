@@ -7,20 +7,30 @@
 // ---------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------
-const UNITS_PER_MPH = 5.2;       // arcade world-units of road per mph per second
+// UNITS_PER_MPH and all lane-geometry constants/helpers (LANE_WIDTH,
+// LANES_PER_DIR, MEDIAN_WIDTH, laneCount, ownLaneX, roadHalfWidth,
+// laneRange) now live in geo.js so the traffic system can share the exact
+// same road/physics model without reaching into this module's closure.
 const DECISION_TRIGGER = 1300;    // world-units before a node to reveal the choice panel
 const STOP_ZONE = 1000;           // world-units over which speed tapers down for a real junction
 const DECISION_TIMEOUT = 11;      // seconds before auto-picking a default route
 const ACCEL = 20;                 // mph/sec
 const BRAKE = 42;                 // mph/sec
 const COAST_DRAG = 4.5;           // mph/sec natural deceleration
-const LANE_HALF_WIDTH = 46;       // world-units, how far the truck can drift laterally
 const STEER_SPEED = 130;          // world-units/sec lateral, at full input
 const TANK_CAPACITY = 150;        // gallons
 const MPG = 6.4;
 const FUEL_PRICE = 3.85;          // $/gallon
 const STARTING_CASH = 600;
 const START_CITY = "Chicago";
+const MAX_BRANCHES = 4;           // cap on ranked junction options, both for the decision panel and the rendered fan-out
+
+// Look-ahead rendering: how far the "visible network" fans out beyond the
+// current edge so the road ahead reads continuously through junctions,
+// like a real nav map, instead of stopping dead at the edge boundary.
+const MAX_TREE_DEPTH = 3;
+const MAX_PREVIEW_BUDGET = 6000;  // world units of branch ribbon, shared across the whole tree
+const MAX_TREE_NODES = 40;        // defensive hard stop on dense junctions
 
 const driver = new DriverDNA();
 
@@ -64,96 +74,63 @@ window.addEventListener("error", (e) => {
   el.fatal.classList.remove("hidden");
 });
 
+// graph, buildRibbon, ribbonSample, ribbonPose, edgeId all now live in
+// geo.js so the traffic system can share them without reaching into this
+// module's closure.
+
 // ---------------------------------------------------------------------
-// Graph + ribbon geometry
+// Visible network: a small tree of edges stitched into the CURRENT edge's
+// local coordinate frame, so the road renders continuously through
+// upcoming junctions instead of stopping dead at the edge boundary. Built
+// once per edge-entry (see enterEdge). Every edge's ribbon is generated in
+// its own local space with a ~vertical tangent at both ends (by
+// construction in buildRibbon), so a node's rotation relative to the root
+// is just the delta between its own true compass bearing and the root
+// edge's bearing — no hop-by-hop rotation composition needed. Only the
+// translation accumulates, edge by edge, out from the root.
 // ---------------------------------------------------------------------
-const graph = buildGraph();
-const ribbonCache = new Map();
-
-function ribbonKey(a, b, route) {
-  const pair = [a, b].sort();
-  return `${route}::${pair[0]}|${pair[1]}`;
+function nodeToRoot(node, lx, ly) {
+  return {
+    x: node.tx + lx * node.cos - ly * node.sin,
+    y: node.ty + lx * node.sin + ly * node.cos,
+  };
 }
 
-// Catmull-Rom evaluation for one interior segment (p1->p2) given neighbours.
-function catmullRom(p0, p1, p2, p3, t) {
-  const t2 = t * t, t3 = t2 * t;
-  const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-  const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-  return { x, y };
-}
-
-function buildRibbon(edge) {
-  const key = ribbonKey(edge.from, edge.to, edge.route);
-  let cached = ribbonCache.get(key);
-  if (!cached) {
-    const rnd = mulberry32(hashStr(key));
-    const len = Math.min(4200, Math.max(600, 320 + edge.miles * 1.55));
-    const nMid = Math.max(1, Math.min(6, Math.round(len / 650)));
-    const ctrl = [{ x: 0, y: 0 }];
-    ctrl.push({ x: 0, y: len * 0.1 });
-    const curviness = len * (0.05 + rnd() * 0.05);
-    for (let i = 1; i <= nMid; i++) {
-      const t = i / (nMid + 1);
-      const sway = Math.sin(t * Math.PI) * curviness * (rnd() * 2 - 1);
-      ctrl.push({ x: sway, y: len * (0.1 + t * 0.8) });
-    }
-    ctrl.push({ x: 0, y: len * 0.9 });
-    ctrl.push({ x: 0, y: len });
-
-    const ext = [ctrl[0], ...ctrl, ctrl[ctrl.length - 1]];
-    const dense = [];
-    const stepsPerSeg = 14;
-    for (let i = 0; i < ext.length - 3; i++) {
-      for (let s = 0; s < stepsPerSeg; s++) {
-        const t = s / stepsPerSeg;
-        dense.push(catmullRom(ext[i], ext[i + 1], ext[i + 2], ext[i + 3], t));
-      }
-    }
-    dense.push(ctrl[ctrl.length - 1]);
-
-    const cum = [0];
-    for (let i = 1; i < dense.length; i++) {
-      const dx = dense[i].x - dense[i - 1].x, dy = dense[i].y - dense[i - 1].y;
-      cum.push(cum[i - 1] + Math.hypot(dx, dy));
-    }
-    cached = { points: dense, cum, length: cum[cum.length - 1], forwardKeyStartsAt: [edge.from, edge.to].sort()[0] };
-    ribbonCache.set(key, cached);
+function growBranches(node, rootBearing, budgetLeft, nodeCounter) {
+  if (node.depth >= MAX_TREE_DEPTH || budgetLeft <= 0 || nodeCounter.n >= MAX_TREE_NODES) return;
+  const nextCity = node.edge.to;
+  if (nextCity === state.destination) return; // don't fan out past the delivery point
+  const options = rankAndCapOptions(pickEdgesFrom(nextCity, node.edge));
+  const parentEnd = nodeToRoot(node, 0, node.ribbon.length);
+  for (const candidateEdge of options) {
+    if (nodeCounter.n >= MAX_TREE_NODES) break;
+    const childRibbon = buildRibbon(candidateEdge);
+    // Negated: compass bearing increases clockwise on a y-up map, but our
+    // local space is (x=driver's-right, y=forward) which is the opposite
+    // handedness — verified empirically (a well-west branch was rendering
+    // to the right of a more-northward one) before flipping this sign.
+    const deltaRad = toRad(rootBearing - candidateEdge.bearing);
+    const child = {
+      edge: candidateEdge, ribbon: childRibbon, depth: node.depth + 1,
+      tx: parentEnd.x, ty: parentEnd.y,
+      cos: Math.cos(deltaRad), sin: Math.sin(deltaRad),
+      children: [],
+    };
+    node.children.push(child);
+    nodeCounter.n++;
+    growBranches(child, rootBearing, budgetLeft - childRibbon.length, nodeCounter);
   }
-  // Orient the shared geometry to this edge's travel direction.
-  const forward = cached.forwardKeyStartsAt === edge.from;
-  return { ...cached, reversed: !forward };
 }
 
-function ribbonSample(ribbon, s) {
-  s = Math.max(0, Math.min(ribbon.length, s));
-  const sQuery = ribbon.reversed ? ribbon.length - s : s;
-  const cum = ribbon.cum, pts = ribbon.points;
-  // binary search
-  let lo = 0, hi = cum.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (cum[mid] < sQuery) lo = mid + 1; else hi = mid;
-  }
-  const i = Math.max(1, lo);
-  const segLen = Math.max(1e-6, cum[i] - cum[i - 1]);
-  const t = (sQuery - cum[i - 1]) / segLen;
-  const a = pts[i - 1], b = pts[i];
-  let x = a.x + (b.x - a.x) * t;
-  let y = a.y + (b.y - a.y) * t;
-  if (ribbon.reversed) x = -x;
-  return { x, y };
+function buildVisibleTree(rootEdge, rootRibbon) {
+  const root = { edge: rootEdge, ribbon: rootRibbon, depth: 0, tx: 0, ty: 0, cos: 1, sin: 0, children: [] };
+  growBranches(root, rootEdge.bearing, MAX_PREVIEW_BUDGET, { n: 0 });
+  return root;
 }
 
-// simpler + correct tangent helper (avoids the confusing inline expr above)
-function ribbonPose(ribbon, s) {
-  const eps = 8;
-  const p0 = ribbonSample(ribbon, s - eps);
-  const p1 = ribbonSample(ribbon, s + eps);
-  const dx = p1.x - p0.x, dy = p1.y - p0.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const mid = ribbonSample(ribbon, s);
-  return { x: mid.x, y: mid.y, headingX: dx / len, headingY: dy / len };
+function walkTree(node, visit) {
+  visit(node);
+  for (const child of node.children) walkTree(child, visit);
 }
 
 // ---------------------------------------------------------------------
@@ -164,6 +141,7 @@ const state = {
   currentNode: START_CITY,
   edge: null,
   ribbon: null,
+  visibleTree: null,
   s: 0,
   lane: 0,
   laneInput: 0,
@@ -181,6 +159,8 @@ const state = {
   inputGas: false,
   inputBrake: false,
   toastTimer: 0,
+  simTime: 0,
+  trafficMaintainAcc: 0,
 };
 
 function canRefuel(city) {
@@ -233,6 +213,9 @@ function enterEdge(edge) {
   state.pendingDelivery = false;
   state.decisionEvaluated = false;
   state.mode = "drive";
+  state.visibleTree = buildVisibleTree(edge, state.ribbon);
+  const [laneMin, laneMax] = laneRange(edge.kind);
+  state.lane = Math.max(laneMin, Math.min(laneMax, state.lane));
 }
 
 function beginDrive() {
@@ -282,10 +265,16 @@ function refuelAt(node) {
   }
 }
 
-function presentDecision(options) {
-  // cap the panel to the most meaningful choices
+// Ranks junction options by how major their control city is and caps the
+// list. Shared by the decision panel AND the rendered branch fan-out so
+// what you see on screen always matches what you can actually pick.
+function rankAndCapOptions(options) {
   const ranked = [...options].sort((a, b) => (graph.nodes[b.control] ? graph.nodes[b.control].w : 0) - (graph.nodes[a.control] ? graph.nodes[a.control].w : 0));
-  const shown = ranked.slice(0, 4);
+  return ranked.slice(0, MAX_BRANCHES);
+}
+
+function presentDecision(options) {
+  const shown = rankAndCapOptions(options);
   state.mode = "decision";
   state.decisionOptions = shown;
   state.decisionTimer = DECISION_TIMEOUT;
@@ -454,7 +443,23 @@ function speedCap() {
   return cap;
 }
 
+const TRAFFIC_MAINTAIN_INTERVAL = 0.4;
+
+function updateTraffic(dt) {
+  state.simTime += dt;
+  Traffic.update(dt);
+  state.trafficMaintainAcc += dt;
+  if (state.trafficMaintainAcc >= TRAFFIC_MAINTAIN_INTERVAL && state.visibleTree) {
+    state.trafficMaintainAcc = 0;
+    const edges = [];
+    walkTree(state.visibleTree, (n) => edges.push(n.edge));
+    window.__lastTreeChildren = edges.length;
+    Traffic.maintain(edges, state.simTime);
+  }
+}
+
 function update(dt) {
+  updateTraffic(dt);
   if (state.mode === "intro" || state.mode === "delivered" || state.mode === "gameover") return;
 
   evaluateAhead();
@@ -471,7 +476,8 @@ function update(dt) {
 
   const steer = readSteerInput();
   state.lane += steer * STEER_SPEED * driver.handling * dt;
-  state.lane = Math.max(-LANE_HALF_WIDTH, Math.min(LANE_HALF_WIDTH, state.lane));
+  const [laneMin, laneMax] = laneRange(state.edge.kind);
+  state.lane = Math.max(laneMin, Math.min(laneMax, state.lane));
 
   if (state.mode === "decision") {
     state.decisionTimer -= dt;
@@ -548,143 +554,273 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
-function projectPoint(localX, localY, anchorX, anchorY, zoom) {
+// projectPoint takes coordinates ALREADY relative to the truck's current
+// forward reference point (see projectWorld) so the camera stays centered
+// on the truck no matter how far state.s has advanced along the ribbon.
+function projectPoint(dx, dy, anchorX, anchorY, zoom) {
   const hx = state.camHeading.x, hy = state.camHeading.y;
-  // rotate (localX,localY) by the inverse of heading so heading maps to (0,-1) (up)
+  // rotate (dx,dy) by the inverse of heading so heading maps to (0,-1) (up)
   const rightX = hy, rightY = -hx;
-  const u = localX * rightX + localY * rightY;   // lateral (screen x)
-  const v = localX * hx + localY * hy;            // forward distance (positive ahead)
-  const depth = v;
-  const persp = Math.max(0.45, Math.min(1.25, 1 - depth * 0.00016));
+  const u = dx * rightX + dy * rightY;   // lateral (screen x)
+  const v = dx * hx + dy * hy;           // forward distance (positive ahead)
+  const persp = Math.max(0.45, Math.min(1.25, 1 - v * 0.00016));
   const sx = anchorX + u * zoom * persp;
   const sy = anchorY - v * zoom * persp * 0.72;
-  return { x: sx, y: sy, scale: persp, depth };
+  return { x: sx, y: sy, scale: persp, depth: v };
+}
+
+// Takes a point in some tree node's OWN local ribbon space, stitches it
+// into the root (current-edge) frame, then projects it camera-relative.
+function projectWorld(node, lx, ly, cam) {
+  const root = nodeToRoot(node, lx, ly);
+  return projectPoint(root.x - cam.ref.x, root.y - cam.ref.y, cam.anchorX, cam.anchorY, cam.zoom);
 }
 
 function drawBackground() {
-  const grad = sceneCtx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, "#3a4a3f");
-  grad.addColorStop(0.55, "#2c3830");
-  grad.addColorStop(1, "#20281f");
-  sceneCtx.fillStyle = grad;
+  sceneCtx.fillStyle = "#33402f";
   sceneCtx.fillRect(0, 0, W, H);
 }
 
-function roadColor(kind) {
-  return kind === "interstate" ? "#4b4f57" : "#57524a";
+function roadFillColor(kind) { return kind === "interstate" ? "#585c64" : "#6b6156"; }
+function roadLineColor(kind) { return kind === "interstate" ? "#ffd35c" : "#f2ead8"; }
+
+function strokeLateralLine(node, ribbon, ss, offset, cam, width) {
+  sceneCtx.lineWidth = width;
+  sceneCtx.beginPath();
+  for (let i = 0; i < ss.length; i++) {
+    const p = ribbonLateral(ribbon, ss[i], offset);
+    const proj = projectWorld(node, p.x, p.y, cam);
+    if (i === 0) sceneCtx.moveTo(proj.x, proj.y); else sceneCtx.lineTo(proj.x, proj.y);
+  }
+  sceneCtx.stroke();
 }
 
-function drawRoad(ribbon, anchorX, anchorY, zoom, currentS) {
-  const visibleBehind = 900, visibleAhead = 3600;
-  const roadWidth = 120;
-  sceneCtx.lineJoin = "round";
-  sceneCtx.lineCap = "round";
+// Draws one tree node's road as a filled pavement polygon (offset left/right
+// from the centerline by the road's real lane geometry) plus lane markings,
+// instead of the old stroked-centerline approximation. `alpha` fades branch
+// previews the player hasn't reached yet so the road actually being driven
+// always reads as the most prominent thing on screen.
+function drawRoadSegment(node, cam, sFrom, sTo, alpha) {
+  const ribbon = node.ribbon, kind = node.edge.kind;
+  const halfW = roadHalfWidth(kind);
+  const step = 44;
+  const ss = [];
+  for (let s = sFrom; s < sTo; s += step) ss.push(s);
+  ss.push(sTo);
+  if (ss.length < 2) return;
 
-  // sample along cumulative arclength range relative to currentS
-  const samples = [];
-  const step = 26;
-  for (let s = currentS - visibleBehind; s <= currentS + visibleAhead; s += step) {
-    if (s < 0 || s > ribbon.length) continue;
-    const p = ribbonSample(ribbon, s);
-    samples.push(p);
+  const leftPts = [], rightPts = [];
+  for (const s of ss) {
+    const lp = ribbonLateral(ribbon, s, -halfW);
+    const rp = ribbonLateral(ribbon, s, halfW);
+    leftPts.push(projectWorld(node, lp.x, lp.y, cam));
+    rightPts.push(projectWorld(node, rp.x, rp.y, cam));
   }
-  if (samples.length < 2) return;
 
-  const proj = samples.map((p) => projectPoint(p.x, p.y, anchorX, anchorY, zoom));
+  sceneCtx.globalAlpha = alpha;
+  sceneCtx.fillStyle = roadFillColor(kind);
+  sceneCtx.beginPath();
+  sceneCtx.moveTo(leftPts[0].x, leftPts[0].y);
+  for (let i = 1; i < leftPts.length; i++) sceneCtx.lineTo(leftPts[i].x, leftPts[i].y);
+  for (let i = rightPts.length - 1; i >= 0; i--) sceneCtx.lineTo(rightPts[i].x, rightPts[i].y);
+  sceneCtx.closePath();
+  sceneCtx.fill();
 
-  // road bed
-  sceneCtx.strokeStyle = roadColor(state.edge.kind);
-  for (let i = 1; i < proj.length; i++) {
-    sceneCtx.lineWidth = Math.max(4, roadWidth * proj[i].scale);
-    sceneCtx.beginPath();
-    sceneCtx.moveTo(proj[i - 1].x, proj[i - 1].y);
-    sceneCtx.lineTo(proj[i].x, proj[i].y);
-    sceneCtx.stroke();
-  }
-  // shoulders
-  sceneCtx.strokeStyle = "rgba(255,255,255,0.35)";
-  for (let i = 1; i < proj.length; i++) {
-    sceneCtx.lineWidth = Math.max(1, 3 * proj[i].scale);
-    sceneCtx.beginPath();
-    sceneCtx.moveTo(proj[i - 1].x, proj[i - 1].y);
-    sceneCtx.lineTo(proj[i].x, proj[i].y);
-    sceneCtx.stroke();
-  }
-  // dashed centerline
-  sceneCtx.setLineDash([14, 16]);
-  sceneCtx.strokeStyle = state.edge.kind === "interstate" ? "#ffd35c" : "#e9e5da";
-  for (let i = 1; i < proj.length; i++) {
-    sceneCtx.lineWidth = Math.max(1, 3 * proj[i].scale);
-    sceneCtx.beginPath();
-    sceneCtx.moveTo(proj[i - 1].x, proj[i - 1].y);
-    sceneCtx.lineTo(proj[i].x, proj[i].y);
-    sceneCtx.stroke();
+  const n = laneCount(kind);
+  sceneCtx.strokeStyle = "rgba(255,255,255,0.55)";
+  sceneCtx.setLineDash([16, 18]);
+  for (let i = 1; i < n; i++) {
+    const off = MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * i;
+    strokeLateralLine(node, ribbon, ss, off, cam, 2);
+    strokeLateralLine(node, ribbon, ss, -off, cam, 2);
   }
   sceneCtx.setLineDash([]);
+
+  sceneCtx.strokeStyle = roadLineColor(kind);
+  if (MEDIAN_WIDTH[kind] > 0) {
+    strokeLateralLine(node, ribbon, ss, MEDIAN_WIDTH[kind] / 2, cam, 2.5);
+    strokeLateralLine(node, ribbon, ss, -MEDIAN_WIDTH[kind] / 2, cam, 2.5);
+  } else {
+    sceneCtx.setLineDash([20, 16]);
+    strokeLateralLine(node, ribbon, ss, 0, cam, 2.5);
+    sceneCtx.setLineDash([]);
+  }
+  sceneCtx.globalAlpha = 1;
 }
 
-function drawCityBlock(localX, localY, anchorX, anchorY, zoom, city) {
-  const p = projectPoint(localX, localY, anchorX, anchorY, zoom);
-  if (p.scale < 0.4) return;
-  const rnd = mulberry32(hashStr(city.name));
-  const count = Math.max(2, Math.min(9, Math.round(city.w)));
-  const spread = 170;
-  for (let i = 0; i < count; i++) {
-    const ox = (rnd() * 2 - 1) * spread;
-    const oy = (rnd() * 2 - 1) * spread * 0.6;
-    const bp = projectPoint(localX + ox, localY + oy, anchorX, anchorY, zoom);
-    const h = (14 + rnd() * 46) * bp.scale * (city.w / 6 + 0.6);
-    const w = (18 + rnd() * 22) * bp.scale;
-    sceneCtx.fillStyle = `hsl(${210 + rnd() * 30}, 12%, ${18 + rnd() * 14}%)`;
-    sceneCtx.fillRect(bp.x - w / 2, bp.y - h, w, h);
-    sceneCtx.fillStyle = "rgba(255, 220, 140, 0.55)";
-    sceneCtx.fillRect(bp.x - w / 2, bp.y - h, w, Math.max(2, h * 0.12));
+const BUILDING_PALETTE = ["#4a5568", "#586178", "#3f4a5c", "#5b6b57", "#5a5248"];
+
+// Simplified, deterministic (per-city-seeded) settlement marker: a small
+// flat cluster of solid-color blocks sized by the city's tier/weight,
+// instead of the old fully-random scattered rectangles. Tier-0 "Junction"
+// filler nodes aren't real settlements, so they just get a small dot.
+function drawCityBlock(node, lx, ly, cam, city) {
+  const origin = projectWorld(node, lx, ly, cam);
+  if (origin.scale < 0.35) return;
+
+  if (city.t === 0) {
+    sceneCtx.fillStyle = "rgba(255,255,255,0.5)";
+    sceneCtx.beginPath();
+    sceneCtx.arc(origin.x, origin.y, Math.max(1.5, 3 * origin.scale), 0, Math.PI * 2);
+    sceneCtx.fill();
+    return;
   }
+
+  const rnd = mulberry32(hashStr(city.name));
+  const count = city.t <= 2 ? 5 + Math.round(rnd() * 3) : city.t === 3 ? 3 + Math.round(rnd() * 2) : 2;
+  const tallest = city.t <= 2 ? 60 : city.t === 3 ? 36 : 22;
+  const cols = Math.min(3, count);
+  for (let i = 0; i < count; i++) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const side = i % 2 === 0 ? 1 : -1;
+    const offX = side * (110 + col * 46 + rnd() * 14);
+    const offY = (row - 0.5) * 70 + (rnd() * 20 - 10);
+    const p = projectWorld(node, lx + offX, ly + offY, cam);
+    if (p.scale < 0.3) continue;
+    const h = tallest * (0.55 + rnd() * 0.45) * p.scale;
+    const w = (26 + rnd() * 16) * p.scale;
+    sceneCtx.fillStyle = BUILDING_PALETTE[Math.floor(rnd() * BUILDING_PALETTE.length)];
+    sceneCtx.fillRect(p.x - w / 2, p.y - h, w, h);
+    sceneCtx.strokeStyle = "rgba(0,0,0,0.35)";
+    sceneCtx.lineWidth = 1;
+    sceneCtx.strokeRect(p.x - w / 2, p.y - h, w, h);
+  }
+
   sceneCtx.fillStyle = "#fff";
-  sceneCtx.font = `700 ${Math.max(10, 15 * p.scale)}px sans-serif`;
+  sceneCtx.beginPath();
+  sceneCtx.arc(origin.x, origin.y, Math.max(2, 4 * origin.scale), 0, Math.PI * 2);
+  sceneCtx.fill();
+  sceneCtx.font = `700 ${Math.max(10, 15 * origin.scale)}px sans-serif`;
   sceneCtx.textAlign = "center";
   sceneCtx.shadowColor = "rgba(0,0,0,0.8)";
   sceneCtx.shadowBlur = 4;
-  sceneCtx.fillText(city.name, p.x, p.y + 14);
+  sceneCtx.fillText(city.name, origin.x, origin.y + 16);
   sceneCtx.shadowBlur = 0;
 }
 
-function drawTruck(anchorX, anchorY) {
+// Every distinct city touched by the visible tree, deduped by name (a
+// node's `to` city is usually the next node's `from`, so this only walks
+// each junction once) plus the root's own `from` city (still visible
+// behind the truck for a while after departing it).
+function collectCityMarkers(tree) {
+  const seen = new Map();
+  seen.set(tree.edge.from, { node: tree, lx: 0, ly: 0, city: graph.nodes[tree.edge.from] });
+  walkTree(tree, (node) => {
+    if (!seen.has(node.edge.to)) {
+      seen.set(node.edge.to, { node, lx: 0, ly: node.ribbon.length, city: graph.nodes[node.edge.to] });
+    }
+  });
+  return [...seen.values()];
+}
+
+// Draws either a simple truck (cab + trailer) or a smaller single-body
+// car, both flat-shaded, sized by the point's projected perspective scale.
+function drawVehicle(screenX, screenY, scale, opts) {
   sceneCtx.save();
-  sceneCtx.translate(anchorX + state.lane * 0.55, anchorY);
-  const cabW = 34, cabH = 26, trailerW = 30, trailerH = 58;
-  sceneCtx.fillStyle = "#c1272d";
-  sceneCtx.fillRect(-trailerW / 2, -8, trailerW, trailerH);
-  sceneCtx.fillStyle = "#eef1f5";
-  sceneCtx.fillRect(-trailerW / 2 + 3, -4, trailerW - 6, trailerH - 10);
-  sceneCtx.fillStyle = "#22252a";
-  sceneCtx.fillRect(-cabW / 2, -trailerH * 0.55, cabW, cabH);
-  sceneCtx.fillStyle = "#9fd3ff";
-  sceneCtx.fillRect(-cabW / 2 + 4, -trailerH * 0.55 + 4, cabW - 8, 8);
+  sceneCtx.translate(screenX, screenY);
+  if (opts.kind === "car") {
+    const w = 20 * scale, h = 34 * scale;
+    sceneCtx.fillStyle = opts.cab;
+    sceneCtx.fillRect(-w / 2, -h / 2, w, h);
+    if (opts.windshield) {
+      sceneCtx.fillStyle = opts.windshield;
+      sceneCtx.fillRect(-w / 2 + 3 * scale, -h * 0.12, w - 6 * scale, h * 0.32);
+    }
+  } else {
+    const cabW = 30 * scale, cabH = 22 * scale, trailerW = 26 * scale, trailerH = 50 * scale;
+    sceneCtx.fillStyle = opts.trailer;
+    sceneCtx.fillRect(-trailerW / 2, -8 * scale, trailerW, trailerH);
+    if (opts.trailerAccent) {
+      sceneCtx.fillStyle = opts.trailerAccent;
+      sceneCtx.fillRect(-trailerW / 2 + 3 * scale, -4 * scale, trailerW - 6 * scale, trailerH - 10 * scale);
+    }
+    sceneCtx.fillStyle = opts.cab;
+    sceneCtx.fillRect(-cabW / 2, -trailerH * 0.55, cabW, cabH);
+    if (opts.windshield) {
+      sceneCtx.fillStyle = opts.windshield;
+      sceneCtx.fillRect(-cabW / 2 + 4 * scale, -trailerH * 0.55 + 4 * scale, cabW - 8 * scale, 8 * scale);
+    }
+  }
   sceneCtx.restore();
 }
 
-function nearbyCities(currentS, ribbon, edge) {
-  const list = [];
-  if (currentS < 1600) list.push({ name: edge.from, localX: 0, localY: 0 });
-  if (ribbon.length - currentS < 1600) list.push({ name: edge.to, localX: 0, localY: ribbon.length });
-  return list;
+const PLAYER_COLORS = { kind: "truck", trailer: "#c1272d", trailerAccent: "#eef1f5", cab: "#22252a", windshield: "#9fd3ff" };
+const AI_TRUCK_PALETTES = [
+  { trailer: "#3a6ea5", trailerAccent: "#dfe8f2", cab: "#22252a", windshield: "#bcd9ff" },
+  { trailer: "#8a8f96", trailerAccent: "#eceff1", cab: "#2a2d31", windshield: "#bcd9ff" },
+  { trailer: "#4c7a4c", trailerAccent: "#e4efe0", cab: "#22252a", windshield: "#bcd9ff" },
+];
+const AI_CAR_PALETTES = [
+  { cab: "#b0392f", windshield: "#cfd8dc" },
+  { cab: "#2f3b52", windshield: "#cfd8dc" },
+  { cab: "#c9a227", windshield: "#cfd8dc" },
+  { cab: "#5b5f66", windshield: "#cfd8dc" },
+];
+function aiPalette(v) {
+  const list = v.kind === "car" ? AI_CAR_PALETTES : AI_TRUCK_PALETTES;
+  return list[Math.floor(v.paletteSeed * list.length) % list.length];
+}
+
+// Player + every AI vehicle whose edge is currently part of the visible
+// tree (directly, or as the exact reverse edge — oncoming traffic reuses
+// the same shared ribbon geometry, mirrored; see the empirically-verified
+// note on ribbonLateral/edge-reversal in geo.js). Vehicles on edges that
+// have scrolled out of view are simply skipped for this frame.
+function collectVehicleDrawables(cam) {
+  const edgeNodeMap = new Map();
+  walkTree(state.visibleTree, (n) => edgeNodeMap.set(edgeId(n.edge), n));
+
+  const drawables = [];
+
+  const pp = ribbonLateral(state.ribbon, state.s, state.lane);
+  const pProj = projectWorld(state.visibleTree, pp.x, pp.y, cam);
+  drawables.push({ proj: pProj, opts: PLAYER_COLORS });
+
+  for (const v of Traffic.getVehicles()) {
+    let node = edgeNodeMap.get(edgeId(v.edge));
+    let mirrored = false;
+    if (!node) {
+      node = edgeNodeMap.get(v.edge.to + "|" + v.edge.from + "|" + v.edge.route);
+      mirrored = true;
+    }
+    if (!node) continue;
+    const p = ribbonLateral(v.ribbon, v.s, ownLaneX(v.edge.kind, v.lane));
+    const proj = projectWorld(node, mirrored ? -p.x : p.x, p.y, cam);
+    if (proj.scale < 0.25) continue;
+    drawables.push({ proj, opts: { kind: v.kind, ...aiPalette(v) } });
+  }
+
+  return drawables;
 }
 
 function renderScene() {
   drawBackground();
-  if (!state.edge || !state.ribbon) return;
-  const anchorX = W / 2, anchorY = H * 0.68;
-  const zoom = Math.max(0.28, Math.min(0.62, 520 / Math.max(300, state.ribbon.length * 0.001 + 400))) * (W / 900);
+  if (!state.edge || !state.ribbon || !state.visibleTree) return;
+  const cam = {
+    anchorX: W / 2, anchorY: H * 0.7,
+    zoom: 0.46 * (W / 900),
+    ref: ribbonSample(state.ribbon, state.s),
+  };
 
-  drawRoad(state.ribbon, anchorX, anchorY, zoom, state.s);
+  const treeNodes = [];
+  walkTree(state.visibleTree, (n) => treeNodes.push(n));
+  treeNodes.sort((a, b) => b.depth - a.depth); // deepest/farthest first, root drawn last (on top)
 
-  for (const c of nearbyCities(state.s, state.ribbon, state.edge)) {
-    const city = graph.nodes[c.name];
-    if (city) drawCityBlock(c.localX, c.localY, anchorX, anchorY, zoom, city);
+  for (const node of treeNodes) {
+    const alpha = node.depth <= 1 ? 1 : node.depth === 2 ? 0.6 : 0.35;
+    const sFrom = node.depth === 0 ? Math.max(0, state.s - 700) : 0;
+    drawRoadSegment(node, cam, sFrom, node.ribbon.length, alpha);
   }
 
-  drawTruck(anchorX, anchorY);
+  for (const marker of collectCityMarkers(state.visibleTree)) {
+    drawCityBlock(marker.node, marker.lx, marker.ly, cam, marker.city);
+  }
+
+  const vehicles = collectVehicleDrawables(cam);
+  vehicles.sort((a, b) => b.proj.depth - a.proj.depth); // far first, near last
+  for (const v of vehicles) {
+    drawVehicle(v.proj.x, v.proj.y, Math.max(0.35, v.proj.scale), v.opts);
+  }
 }
 
 function renderMinimap() {
