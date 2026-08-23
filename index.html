@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Interstate Hauler</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="hud">
+    <div id="hud-top">
+      <div id="road-sign">
+        <div id="route-shield" class="shield interstate">I-00</div>
+        <div id="route-info">
+          <div id="route-dir">— MERGING —</div>
+          <div id="route-control">Loading route data…</div>
+        </div>
+      </div>
+      <div id="hud-right">
+        <canvas id="minimap"></canvas>
+        <div id="job-panel">
+          <div id="job-dest">Destination: —</div>
+          <div id="job-cargo">Cargo: —</div>
+          <div id="job-dist">— mi remaining</div>
+          <div id="job-pay">Payout: $0</div>
+        </div>
+        <div id="driver-badge">
+          <span id="driver-label">DRIVER</span>
+          <span id="driver-desc"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="hud-bottom">
+      <div class="gauge" id="speed-gauge">
+        <div class="gauge-value" id="speed-value">0</div>
+        <div class="gauge-label">MPH</div>
+      </div>
+      <div class="bars">
+        <div class="bar-row">
+          <span class="bar-label">Fuel</span>
+          <div class="bar"><div class="bar-fill" id="fuel-fill"></div></div>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Cash</span>
+          <span id="cash-value">$0</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="touch-controls">
+    <button id="btn-brake" class="pedal" aria-label="Brake">BRAKE</button>
+    <button id="btn-gas" class="pedal" aria-label="Accelerate">GAS</button>
+  </div>
+
+  <div id="decision-overlay" class="hidden">
+    <div id="decision-title">Junction Ahead — Pick Your Route</div>
+    <div id="decision-options"></div>
+    <div id="decision-timer"><div id="decision-timer-fill"></div></div>
+  </div>
+
+  <div id="modal" class="hidden">
+    <div id="modal-box">
+      <h2 id="modal-title"></h2>
+      <div id="modal-body"></div>
+      <button id="modal-btn">Continue</button>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <div id="boot" >
+    <div id="boot-title">INTERSTATE HAULER</div>
+    <div id="boot-sub">Loading the highway network…</div>
+  </div>
+  <div id="fatal-error" class="hidden"></div>
+
+  <script src="src/data.js"></script>
+  <script src="src/geo.js"></script>
+  <script src="src/driver.js"></script>
+  <script src="src/economy.js"></script>
+  <script src="src/game.js"></script>
+</body>
+</html>
