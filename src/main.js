@@ -4,7 +4,7 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, renderOverview, renderFleetTab } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, renderOverview, renderFleetTab } from "./ui.js";
 
 const FLEET_SIZE = 150;
 const DECISION_TIMEOUT = 11; // seconds
@@ -122,7 +122,9 @@ function showDecisionPanel(truck) {
     const btn = document.createElement("button");
     btn.className = "decision-btn";
     const isStraight = opt.route === truck.edge.route;
-    btn.innerHTML = `<span class="route-id">${shieldLabel(opt.route)}</span>
+    const isInterstate = opt.route.startsWith("I-");
+    const label = shieldLabel(opt.route);
+    btn.innerHTML = `<div class="shield${isInterstate ? "" : " hwy"}"><span class="shield-num">${label.replace(/^I-/, "")}</span></div>
       <span class="dcity">${isStraight ? "Continue " : "Turn to "}${opt.control}</span>
       <span class="ddist">${opt.dirLabel} &middot; ${Math.round(opt.miles)} mi to ${opt.to}</span>
       <span class="dkey">[${idx + 1}]</span>`;
@@ -162,10 +164,10 @@ function formatClock(gameSeconds) {
   m = m % 60;
   const ampm = h >= 12 ? "PM" : "AM";
   h = h % 12 || 12;
-  return `Day ${day} • ${h}:${m < 10 ? "0" + m : m} ${ampm}`;
+  return `DAY ${day} ${h}:${m < 10 ? "0" + m : m} ${ampm}`;
 }
 
-el.fleetCount.textContent = `${trucks.length} trucks`;
+el.fleetCount.textContent = `${trucks.length} UNITS`;
 
 // ---------------------------------------------------------------------
 // UI wiring + main loop
@@ -204,11 +206,17 @@ function frame(now) {
     drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, followed);
     el.clock.textContent = formatClock(state.gameSeconds);
 
-    if (now - lastUiRefresh > 500) {
+    // The followed truck's own numbers (speed, odometer, ETA) refresh
+    // every frame so they read as genuinely live, not on a tick like the
+    // fleet-wide rankings below (cheap either way, but a full re-sort of
+    // 150 trucks every frame is unnecessary work for numbers no one is
+    // watching that closely).
+    if (followed) refreshFollowedTruckDetails(followed);
+
+    if (now - lastUiRefresh > 400) {
       lastUiRefresh = now;
       renderOverview(trucks);
       renderFleetTab(trucks);
-      if (followed) openDetailsFor(followed, "truck");
     }
   } catch (err) {
     el.fatal.textContent = "Runtime error: " + (err.stack || err.message);

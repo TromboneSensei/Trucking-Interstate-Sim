@@ -1,8 +1,10 @@
-// render.js - static background (roads + cities, drawn once to an
-// offscreen canvas) plus a thin per-frame dynamic layer (truck dots,
-// selection ring, followed-truck route highlight). Roads/cities never
+// render.js - static background (roads + city dots, drawn once to an
+// offscreen canvas) plus a per-frame dynamic layer (city labels, truck
+// dots, selection ring, followed-truck route highlight). Roads/dots never
 // move, so re-rendering them every frame would be wasted work at any
-// fleet size; only the moving parts are drawn dynamically.
+// fleet size. Labels DO need to be dynamic: which tiers are visible
+// depends on the live camera zoom, so they're drawn fresh each frame
+// against camera.baseZoom (the initial fit-to-screen zoom set by main.js).
 import { WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
@@ -11,6 +13,14 @@ const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
 const TRUCK_DOT_RADIUS = 9;
 
+// Multiples of camera.baseZoom at which each additional tier of city
+// labels comes into view. Tier 1 is visible from the spawn/fit zoom
+// onward; each further tier needs progressively more zoom-in, revealed
+// cumulatively (zooming to see tier 3 still shows tiers 1-2).
+const LABEL_TIER_ZOOM_MULT = { 1: 1.0, 2: 1.7, 3: 3.2, 4: 5.5 };
+const LABEL_FONT_PX = { 1: 15, 2: 13, 3: 11.5, 4: 10.5 };
+const LABEL_COLOR = { 1: "#f1f3f5", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" };
+
 export function renderStaticBackground(graph) {
   const bg = document.createElement("canvas");
   bg.width = WORLD_WIDTH * BG_SCALE;
@@ -18,7 +28,7 @@ export function renderStaticBackground(graph) {
   const ctx = bg.getContext("2d");
   ctx.scale(BG_SCALE, BG_SCALE);
 
-  ctx.fillStyle = "#141a24";
+  ctx.fillStyle = "#12161c";
   ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
   ctx.lineCap = "round";
@@ -48,16 +58,27 @@ export function renderStaticBackground(graph) {
     ctx.beginPath();
     ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     ctx.fill();
-
-    if (node.t <= 2) {
-      ctx.fillStyle = "#c7d0dc";
-      ctx.font = "700 13px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(node.name, node.x, node.y - radius - 5);
-    }
   }
 
   return bg;
+}
+
+// Draws every city's label whose tier is currently revealed at `zoom`
+// relative to `baseZoom`. Called inside the same camera-transformed
+// context as the rest of the dynamic layer, so world-space font sizes
+// scale naturally with zoom, same as everything else on the map.
+function drawCityLabels(ctx, graph, zoom, baseZoom) {
+  ctx.textAlign = "center";
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    if (node.t === 0) continue;
+    const mult = LABEL_TIER_ZOOM_MULT[node.t] ?? Infinity;
+    if (zoom < baseZoom * mult) continue;
+    const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
+    ctx.font = `600 ${LABEL_FONT_PX[node.t]}px "Oswald", sans-serif`;
+    ctx.fillStyle = LABEL_COLOR[node.t];
+    ctx.fillText(node.name, node.x, node.y - radius - 5);
+  }
 }
 
 export function truckWorldPos(graph, truck) {
@@ -69,7 +90,7 @@ export function truckWorldPos(graph, truck) {
 
 export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selectedTruck) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.fillStyle = "#141a24";
+  ctx.fillStyle = "#12161c";
   ctx.fillRect(0, 0, w, h);
 
   const center = camera.visualCenter();
@@ -79,9 +100,15 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   ctx.translate(-camera.x, -camera.y);
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom);
 
+  // The dashed remaining-route line already walks the real A* edge list
+  // (one lineTo per hop through the actual interstate/highway control
+  // cities the truck will pass through), not a straight shot to the
+  // final destination - small dots at each intermediate waypoint make
+  // that legible at a glance instead of it reading as a single line.
   if (selectedTruck && selectedTruck.remainingPath && selectedTruck.remainingPath.length) {
-    ctx.strokeStyle = "rgba(255, 176, 32, 0.7)";
+    ctx.strokeStyle = "rgba(232, 163, 61, 0.85)";
     ctx.lineWidth = 2.5 / camera.zoom;
     ctx.setLineDash([10 / camera.zoom, 8 / camera.zoom]);
     ctx.beginPath();
@@ -93,6 +120,15 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     }
     ctx.stroke();
     ctx.setLineDash([]);
+
+    ctx.fillStyle = "#e8a33d";
+    const waypointRadius = 3.5 / camera.zoom;
+    for (let i = 0; i < selectedTruck.remainingPath.length - 1; i++) {
+      const n = graph.nodes[selectedTruck.remainingPath[i].to];
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, waypointRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   for (const truck of trucks) {

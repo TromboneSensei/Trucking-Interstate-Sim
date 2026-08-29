@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Interstate Fleet</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,18 +12,18 @@
 
   <div id="hud">
     <div id="top-bar">
-      <span id="clock">Day 1 &bull; 6:00 AM</span>
-      <span class="divider">|</span>
-      <span id="fleet-count">0 trucks</span>
+      <span id="clock">DAY 1 &nbsp;6:00 AM</span>
+      <span class="divider">/</span>
+      <span id="fleet-count">0 UNITS</span>
       <input type="range" id="time-slider" min="0" max="8" step="0.5" value="1" title="Simulation speed">
-      <span id="time-readout">1.0x</span>
+      <span id="time-readout">1.0&times;</span>
     </div>
 
-    <button id="btn-exit-follow" class="pill-btn hidden">&times; Exit Follow</button>
+    <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
   </div>
 
   <div id="decision-overlay" class="hidden">
-    <div id="decision-title">Junction Ahead &mdash; Pick a Route</div>
+    <div id="decision-title">Junction Ahead &mdash; Choose Your Route</div>
     <div id="decision-options"></div>
     <div id="decision-timer"><div id="decision-timer-fill"></div></div>
   </div>
@@ -30,9 +31,9 @@
   <div id="bottom-sheet">
     <div id="sheet-handle"></div>
     <div id="sheet-tabs">
-      <button class="tab-btn active" data-tab="overview">Ops Center</button>
-      <button class="tab-btn" data-tab="fleet">Fleet</button>
-      <button class="tab-btn" data-tab="details">Details</button>
+      <button class="tab-btn active" data-tab="overview">Dispatch</button>
+      <button class="tab-btn" data-tab="fleet">Rankings</button>
+      <button class="tab-btn" data-tab="details">Unit</button>
     </div>
     <div class="tab-content">
       <div id="tab-overview" class="content-panel active"></div>

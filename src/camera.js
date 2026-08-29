@@ -14,6 +14,7 @@ export class Camera {
     this.x = x;
     this.y = y;
     this.zoom = zoom;
+    this.baseZoom = zoom; // the initial fit-to-screen zoom; render.js keys city-label tiers off this
     this.minZoom = minZoom;
     this.maxZoom = maxZoom;
     this.mode = "FREE"; // "FREE" | "FOLLOW"
@@ -108,23 +109,39 @@ export class Camera {
       zoomAt(e.clientX, e.clientY, Math.pow(1.0015, -e.deltaY));
     }, { passive: false });
 
-    canvas.addEventListener("touchstart", (e) => {
-      if (e.touches.length === 2) {
-        pinchDist = dist(e.touches[0], e.touches[1]);
+    // Any change in the number of fingers down re-bases whichever
+    // gesture reference is now active (drag origin or pinch distance)
+    // from the CURRENT touch positions, instead of carrying over a
+    // stale value from the previous finger count. Without this, letting
+    // go of a pinch (2 fingers -> 1 before the final lift) reused the
+    // single-finger drag origin from before the pinch even started,
+    // producing a sudden camera jump right as the gesture released.
+    let touchCount = 0;
+    const rebase = (touches) => {
+      if (touches.length >= 2) {
+        dragging = false;
+        pinchDist = dist(touches[0], touches[1]);
         moved = true;
+      } else if (touches.length === 1) {
+        pinchDist = 0;
+        const c = center(touches);
+        if (!dragging || touchCount >= 2) startDrag(c.x, c.y);
+        else { lastX = c.x; lastY = c.y; }
       } else {
-        const c = center(e.touches);
-        startDrag(c.x, c.y);
+        pinchDist = 0;
       }
-    }, { passive: true });
+      touchCount = touches.length;
+    };
+
+    canvas.addEventListener("touchstart", (e) => rebase(e.touches), { passive: true });
     canvas.addEventListener("touchmove", (e) => {
       e.preventDefault();
-      if (e.touches.length === 2) {
+      if (e.touches.length >= 2) {
         const d = dist(e.touches[0], e.touches[1]);
         const c = center(e.touches);
         if (pinchDist > 0) zoomAt(c.x, c.y, d / pinchDist);
         pinchDist = d;
-      } else if (dragging) {
+      } else if (e.touches.length === 1 && dragging) {
         const c = center(e.touches);
         doDrag(c.x, c.y);
       }
@@ -132,9 +149,12 @@ export class Camera {
     canvas.addEventListener("touchend", (e) => {
       if (e.touches.length === 0) {
         pinchDist = 0;
+        touchCount = 0;
         const t = e.changedTouches[0];
         if (t) endDrag(t.clientX, t.clientY);
         else dragging = false;
+      } else {
+        rebase(e.touches);
       }
     });
   }

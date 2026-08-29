@@ -41,6 +41,7 @@ export class Truck {
     this.speed = 0; // current mph, eases toward the edge's limit
     this.totalMilesDriven = 0;
     this.earnings = 0;
+    this.contractsCompleted = 0;
     this.awaitingDecision = false;
     this.pendingOptions = null;
     this.contract = null;
@@ -71,6 +72,7 @@ export class Truck {
 
   _arriveAtDestination(graph) {
     this.earnings += this.contract.payout;
+    this.contractsCompleted++;
     this.currentNode = this.contract.destination;
     this.edge = null;
     this._assignContract(graph, Math.random);
