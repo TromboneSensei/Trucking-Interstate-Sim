@@ -167,11 +167,7 @@ function canRefuel(city) {
   return !!city && (city.t > 0 || (city.ind && city.ind.includes("Fuel")));
 }
 
-function pickEdgesFrom(node, excludeReverseOf) {
-  const all = graph.adjacency[node] || [];
-  const filtered = all.filter((e) => !(excludeReverseOf && e.to === excludeReverseOf.from && e.route === excludeReverseOf.route));
-  return filtered.length ? filtered : all; // dead end -> allow U-turn
-}
+// pickEdgesFrom now lives in geo.js so the traffic system can share it.
 
 function weightedPick(list, weightFn, rnd) {
   const total = list.reduce((s, x) => s + weightFn(x), 0);
@@ -600,7 +596,7 @@ function strokeLateralLine(node, ribbon, ss, offset, cam, width) {
 // instead of the old stroked-centerline approximation. `alpha` fades branch
 // previews the player hasn't reached yet so the road actually being driven
 // always reads as the most prominent thing on screen.
-function drawRoadSegment(node, cam, sFrom, sTo, alpha) {
+function drawRoadSegment(node, cam, sFrom, sTo) {
   const ribbon = node.ribbon, kind = node.edge.kind;
   const halfW = roadHalfWidth(kind);
   const step = 44;
@@ -617,7 +613,6 @@ function drawRoadSegment(node, cam, sFrom, sTo, alpha) {
     rightPts.push(projectWorld(node, rp.x, rp.y, cam));
   }
 
-  sceneCtx.globalAlpha = alpha;
   sceneCtx.fillStyle = roadFillColor(kind);
   sceneCtx.beginPath();
   sceneCtx.moveTo(leftPts[0].x, leftPts[0].y);
@@ -645,15 +640,13 @@ function drawRoadSegment(node, cam, sFrom, sTo, alpha) {
     strokeLateralLine(node, ribbon, ss, 0, cam, 2.5);
     sceneCtx.setLineDash([]);
   }
-  sceneCtx.globalAlpha = 1;
 }
 
-const BUILDING_PALETTE = ["#4a5568", "#586178", "#3f4a5c", "#5b6b57", "#5a5248"];
-
-// Simplified, deterministic (per-city-seeded) settlement marker: a small
-// flat cluster of solid-color blocks sized by the city's tier/weight,
-// instead of the old fully-random scattered rectangles. Tier-0 "Junction"
-// filler nodes aren't real settlements, so they just get a small dot.
+// Building clusters are disabled for now (per product direction, to focus
+// on getting the road network + traffic flow right first) — just a node
+// marker (sized a bit by the city's weight so major hubs still stand out)
+// and its label. Tier-0 "Junction" filler nodes aren't real settlements,
+// so they just get a small dot.
 function drawCityBlock(node, lx, ly, cam, city) {
   const origin = projectWorld(node, lx, ly, cam);
   if (origin.scale < 0.35) return;
@@ -666,35 +659,21 @@ function drawCityBlock(node, lx, ly, cam, city) {
     return;
   }
 
-  const rnd = mulberry32(hashStr(city.name));
-  const count = city.t <= 2 ? 5 + Math.round(rnd() * 3) : city.t === 3 ? 3 + Math.round(rnd() * 2) : 2;
-  const tallest = city.t <= 2 ? 60 : city.t === 3 ? 36 : 22;
-  const cols = Math.min(3, count);
-  for (let i = 0; i < count; i++) {
-    const col = i % cols, row = Math.floor(i / cols);
-    const side = i % 2 === 0 ? 1 : -1;
-    const offX = side * (110 + col * 46 + rnd() * 14);
-    const offY = (row - 0.5) * 70 + (rnd() * 20 - 10);
-    const p = projectWorld(node, lx + offX, ly + offY, cam);
-    if (p.scale < 0.3) continue;
-    const h = tallest * (0.55 + rnd() * 0.45) * p.scale;
-    const w = (26 + rnd() * 16) * p.scale;
-    sceneCtx.fillStyle = BUILDING_PALETTE[Math.floor(rnd() * BUILDING_PALETTE.length)];
-    sceneCtx.fillRect(p.x - w / 2, p.y - h, w, h);
-    sceneCtx.strokeStyle = "rgba(0,0,0,0.35)";
-    sceneCtx.lineWidth = 1;
-    sceneCtx.strokeRect(p.x - w / 2, p.y - h, w, h);
-  }
-
+  const radius = Math.max(2, Math.min(11, 3 + city.w * 0.6)) * origin.scale;
   sceneCtx.fillStyle = "#fff";
   sceneCtx.beginPath();
-  sceneCtx.arc(origin.x, origin.y, Math.max(2, 4 * origin.scale), 0, Math.PI * 2);
+  sceneCtx.arc(origin.x, origin.y, radius, 0, Math.PI * 2);
   sceneCtx.fill();
+  sceneCtx.strokeStyle = "rgba(0,0,0,0.4)";
+  sceneCtx.lineWidth = 1.5;
+  sceneCtx.stroke();
+
+  sceneCtx.fillStyle = "#fff";
   sceneCtx.font = `700 ${Math.max(10, 15 * origin.scale)}px sans-serif`;
   sceneCtx.textAlign = "center";
   sceneCtx.shadowColor = "rgba(0,0,0,0.8)";
   sceneCtx.shadowBlur = 4;
-  sceneCtx.fillText(city.name, origin.x, origin.y + 16);
+  sceneCtx.fillText(city.name, origin.x, origin.y + radius + 14);
   sceneCtx.shadowBlur = 0;
 }
 
@@ -807,9 +786,10 @@ function renderScene() {
   treeNodes.sort((a, b) => b.depth - a.depth); // deepest/farthest first, root drawn last (on top)
 
   for (const node of treeNodes) {
-    const alpha = node.depth <= 1 ? 1 : node.depth === 2 ? 0.6 : 0.35;
+    // No per-depth fade: the road network should read as one continuous
+    // system through junctions, not a set of disconnected previews.
     const sFrom = node.depth === 0 ? Math.max(0, state.s - 700) : 0;
-    drawRoadSegment(node, cam, sFrom, node.ribbon.length, alpha);
+    drawRoadSegment(node, cam, sFrom, node.ribbon.length);
   }
 
   for (const marker of collectCityMarkers(state.visibleTree)) {

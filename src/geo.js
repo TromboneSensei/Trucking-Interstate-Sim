@@ -160,6 +160,16 @@ function edgeId(edge) {
     return edge.from + "|" + edge.to + "|" + edge.route;
 }
 
+// All legal next edges from `node`, excluding a straight U-turn back the
+// way `excludeReverseOf` came from (unless that's the only option, e.g. a
+// dead end). Shared by the player's junction-decision logic and the
+// traffic system's own junction continuation.
+function pickEdgesFrom(node, excludeReverseOf) {
+    const all = graph.adjacency[node] || [];
+    const filtered = all.filter((e) => !(excludeReverseOf && e.to === excludeReverseOf.from && e.route === excludeReverseOf.route));
+    return filtered.length ? filtered : all;
+}
+
 // ---------------------------------------------------------------------
 // Road geometry: deterministic per-edge "ribbon" (a gently curving arcade
 // road path in its own local 2D space, x=lateral, y=forward). Shared

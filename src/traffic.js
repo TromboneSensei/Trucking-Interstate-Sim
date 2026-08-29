@@ -92,6 +92,23 @@ const Traffic = (function () {
     return true;
   }
 
+  // Reaching the end of an edge merges onto a connecting highway instead
+  // of despawning, so traffic flows continuously through junctions (the
+  // same graph pickEdgesFrom the player's own routing uses, so AI only
+  // ever continues onto a real connecting road).
+  function continueVehicle(v) {
+    const overflow = v.s - v.ribbon.length;
+    const options = pickEdgesFrom(v.edge.to, v.edge);
+    const next = options[Math.floor(Math.random() * options.length)];
+    v.edge = next;
+    v.edgeKey = edgeId(next);
+    v.ribbon = buildRibbon(next);
+    v.s = Math.min(Math.max(0, overflow), v.ribbon.length);
+    v.lane = Math.min(v.lane, laneCount(next.kind) - 1);
+    v.targetSpeed = randomSpeed(next, Math.random);
+    v.changeCooldown = 1 + Math.random() * 2;
+  }
+
   function update(dt) {
     for (const v of vehicles) {
       v.changeCooldown = Math.max(0, v.changeCooldown - dt);
@@ -118,8 +135,8 @@ const Traffic = (function () {
       }
 
       v.s += v.speed * UNITS_PER_MPH * dt;
+      if (v.s >= v.ribbon.length) continueVehicle(v);
     }
-    vehicles = vehicles.filter((v) => v.s < v.ribbon.length);
   }
 
   function getVehicles() { return vehicles; }
