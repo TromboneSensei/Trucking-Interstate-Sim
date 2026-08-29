@@ -1,13 +1,29 @@
 // geo.js - graph construction + geography helpers built on top of data.js
-// (masterCities, interstateRoutes, highwayRoutes, terrainModifiers are globals from data.js)
+import { masterCities, interstateRoutes, highwayRoutes, terrainModifiers } from "./data.js";
 
 const DEFAULT_INTERSTATE_MPH = 70;
 const DEFAULT_HIGHWAY_MPH = 55;
 
+// Fixed lat/lon bounds for the continental US, projected into a static
+// "world space" once per node so rendering never has to reproject a
+// lat/lon on every frame. World units are arbitrary but consistent; the
+// camera (see camera.js) maps this space to screen pixels.
+const WORLD_BOUNDS = { minLat: 24.5, maxLat: 49.5, minLon: -125.0, maxLon: -66.0 };
+export const WORLD_WIDTH = 4000;
+export const WORLD_HEIGHT = 2400;
+
+function projectToWorld(lat, lon) {
+    const { minLat, maxLat, minLon, maxLon } = WORLD_BOUNDS;
+    return {
+        x: (lon - minLon) * (WORLD_WIDTH / (maxLon - minLon)),
+        y: (maxLat - lat) * (WORLD_HEIGHT / (maxLat - minLat)),
+    };
+}
+
 function toRad(deg) { return deg * Math.PI / 180; }
 function toDeg(rad) { return rad * 180 / Math.PI; }
 
-function haversineMiles(a, b) {
+export function haversineMiles(a, b) {
     const R = 3958.8;
     const dLat = toRad(b.lat - a.lat);
     const dLon = toRad(b.lon - a.lon);
@@ -17,7 +33,7 @@ function haversineMiles(a, b) {
 }
 
 // Initial bearing from a to b, in degrees, 0 = north, clockwise.
-function bearing(a, b) {
+export function bearing(a, b) {
     const la1 = toRad(a.lat), la2 = toRad(b.lat);
     const dLon = toRad(b.lon - a.lon);
     const y = Math.sin(dLon) * Math.cos(la2);
@@ -26,14 +42,15 @@ function bearing(a, b) {
     return (deg + 360) % 360;
 }
 
-function compassLabel(deg) {
+export function compassLabel(deg) {
     const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
     return dirs[Math.round(deg / 45) % 8];
 }
 
-// Small deterministic string hash -> 32-bit int, used to seed per-edge PRNGs
-// so the same road segment always renders with the same curvature.
-function hashStr(s) {
+// Small deterministic string hash -> 32-bit int, used to seed per-entity
+// PRNGs (driver personality, contract rolls) so the same seed always
+// reproduces the same result.
+export function hashStr(s) {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) {
         h ^= s.charCodeAt(i);
@@ -42,7 +59,7 @@ function hashStr(s) {
     return h >>> 0;
 }
 
-function mulberry32(seed) {
+export function mulberry32(seed) {
     let a = seed >>> 0;
     return function () {
         a |= 0; a = (a + 0x6D2B79F5) | 0;
@@ -76,10 +93,18 @@ function findControlCity(cityList, index, dir) {
     return last;
 }
 
-function buildGraph() {
+// Stable identity string for a directed edge (from/to/route uniquely
+// identify one direction of travel on a route segment).
+export function edgeId(edge) {
+    return edge.from + "|" + edge.to + "|" + edge.route;
+}
+
+export function buildGraph() {
     const nodes = {};
     for (const name in masterCities) {
-        nodes[name] = Object.assign({ name }, masterCities[name]);
+        const data = masterCities[name];
+        const { x, y } = projectToWorld(data.lat, data.lon);
+        nodes[name] = Object.assign({ name, x, y }, data);
     }
 
     // adjacency[city] = array of edge objects
@@ -101,13 +126,11 @@ function buildGraph() {
                     from: a, to: b, route: routeName, kind, speedLimit: mph, miles,
                     bearing: brgAB, dirLabel: compassLabel(brgAB),
                     control: findControlCity(cities, i, +1),
-                    seed: hashStr(`${a}|${b}|${routeName}`),
                 });
                 adjacency[b].push({
                     from: b, to: a, route: routeName, kind, speedLimit: mph, miles,
                     bearing: brgBA, dirLabel: compassLabel(brgBA),
                     control: findControlCity(cities, i + 1, -1),
-                    seed: hashStr(`${b}|${a}|${routeName}`),
                 });
             }
         }
@@ -119,181 +142,120 @@ function buildGraph() {
     return { nodes, adjacency };
 }
 
-// Dijkstra shortest path (by miles) between two cities. Returns array of
-// edge objects to traverse, or null if unreachable.
-function shortestPath(graph, startName, goalName) {
-    const dist = {}, prevEdge = {}, visited = {};
-    for (const n in graph.nodes) dist[n] = Infinity;
-    dist[startName] = 0;
-    const pq = [[0, startName]];
-    while (pq.length) {
-        pq.sort((a, b) => a[0] - b[0]);
-        const [d, u] = pq.shift();
-        if (visited[u]) continue;
-        visited[u] = true;
-        if (u === goalName) break;
-        for (const e of graph.adjacency[u]) {
-            const nd = d + e.miles;
-            if (nd < dist[e.to]) {
-                dist[e.to] = nd;
-                prevEdge[e.to] = e;
-                pq.push([nd, e.to]);
-            }
-        }
-    }
-    if (dist[goalName] === Infinity) return null;
-    const path = [];
-    let cur = goalName;
-    while (cur !== startName) {
-        const e = prevEdge[cur];
-        if (!e) return null;
-        path.unshift(e);
-        cur = e.from;
-    }
-    return path;
-}
-
-// Stable identity string for a directed edge (from/to/route uniquely
-// identify one direction of travel on a route segment). Used by the
-// traffic system to track AI vehicles independent of any render frame.
-function edgeId(edge) {
-    return edge.from + "|" + edge.to + "|" + edge.route;
-}
-
 // All legal next edges from `node`, excluding a straight U-turn back the
 // way `excludeReverseOf` came from (unless that's the only option, e.g. a
-// dead end). Shared by the player's junction-decision logic and the
-// traffic system's own junction continuation.
-function pickEdgesFrom(node, excludeReverseOf) {
+// dead end).
+export function pickEdgesFrom(graph, node, excludeReverseOf) {
     const all = graph.adjacency[node] || [];
     const filtered = all.filter((e) => !(excludeReverseOf && e.to === excludeReverseOf.from && e.route === excludeReverseOf.route));
     return filtered.length ? filtered : all;
 }
 
 // ---------------------------------------------------------------------
-// Road geometry: deterministic per-edge "ribbon" (a gently curving arcade
-// road path in its own local 2D space, x=lateral, y=forward). Shared
-// globally (not just by game.js) so the traffic system can sample AI
-// vehicle positions the same way the player's own position is sampled.
+// A* pathfinding: a binary min-heap open set (O(log n) push/pop instead
+// of an O(n) sorted-array insert) plus a small bounded path cache, since
+// many trucks will request routes. Cost = real miles; heuristic =
+// straight-line miles to the goal, which is always <= the true remaining
+// road distance, so it's admissible.
 // ---------------------------------------------------------------------
-const graph = buildGraph();
-const ribbonCache = new Map();
-
-function ribbonKey(a, b, route) {
-    const pair = [a, b].sort();
-    return `${route}::${pair[0]}|${pair[1]}`;
-}
-
-// Catmull-Rom evaluation for one interior segment (p1->p2) given neighbours.
-function catmullRom(p0, p1, p2, p3, t) {
-    const t2 = t * t, t3 = t2 * t;
-    const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-    const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-    return { x, y };
-}
-
-function buildRibbon(edge) {
-    const key = ribbonKey(edge.from, edge.to, edge.route);
-    let cached = ribbonCache.get(key);
-    if (!cached) {
-        const rnd = mulberry32(hashStr(key));
-        const len = Math.min(4200, Math.max(600, 320 + edge.miles * 1.55));
-        const nMid = Math.max(1, Math.min(6, Math.round(len / 650)));
-        const ctrl = [{ x: 0, y: 0 }];
-        ctrl.push({ x: 0, y: len * 0.1 });
-        const curviness = len * (0.05 + rnd() * 0.05);
-        for (let i = 1; i <= nMid; i++) {
-            const t = i / (nMid + 1);
-            const sway = Math.sin(t * Math.PI) * curviness * (rnd() * 2 - 1);
-            ctrl.push({ x: sway, y: len * (0.1 + t * 0.8) });
+class MinHeap {
+    constructor(scoreOf) {
+        this.scoreOf = scoreOf;
+        this.data = [];
+    }
+    size() { return this.data.length; }
+    push(item) {
+        this.data.push(item);
+        this._bubbleUp(this.data.length - 1);
+    }
+    pop() {
+        const top = this.data[0];
+        const last = this.data.pop();
+        if (this.data.length > 0) {
+            this.data[0] = last;
+            this._sinkDown(0);
         }
-        ctrl.push({ x: 0, y: len * 0.9 });
-        ctrl.push({ x: 0, y: len });
+        return top;
+    }
+    _bubbleUp(i) {
+        while (i > 0) {
+            const parent = (i - 1) >> 1;
+            if (this.scoreOf(this.data[i]) < this.scoreOf(this.data[parent])) {
+                [this.data[i], this.data[parent]] = [this.data[parent], this.data[i]];
+                i = parent;
+            } else break;
+        }
+    }
+    _sinkDown(i) {
+        const n = this.data.length;
+        while (true) {
+            const l = 2 * i + 1, r = 2 * i + 2;
+            let smallest = i;
+            if (l < n && this.scoreOf(this.data[l]) < this.scoreOf(this.data[smallest])) smallest = l;
+            if (r < n && this.scoreOf(this.data[r]) < this.scoreOf(this.data[smallest])) smallest = r;
+            if (smallest === i) break;
+            [this.data[i], this.data[smallest]] = [this.data[smallest], this.data[i]];
+            i = smallest;
+        }
+    }
+}
 
-        const ext = [ctrl[0], ...ctrl, ctrl[ctrl.length - 1]];
-        const dense = [];
-        const stepsPerSeg = 14;
-        for (let i = 0; i < ext.length - 3; i++) {
-            for (let s = 0; s < stepsPerSeg; s++) {
-                const t = s / stepsPerSeg;
-                dense.push(catmullRom(ext[i], ext[i + 1], ext[i + 2], ext[i + 3], t));
+const PATH_CACHE_MAX = 5000;
+const pathCache = new Map();
+
+function cachePath(key, value) {
+    if (pathCache.size >= PATH_CACHE_MAX) {
+        pathCache.delete(pathCache.keys().next().value); // evict oldest (Map preserves insertion order)
+    }
+    pathCache.set(key, value);
+}
+
+// Returns an array of directed edges from startName to goalName (the
+// route to walk edge-by-edge), or null if unreachable.
+export function findPath(graph, startName, goalName) {
+    if (startName === goalName) return null;
+    const cacheKey = `${startName}->${goalName}`;
+    if (pathCache.has(cacheKey)) return pathCache.get(cacheKey);
+
+    const goalNode = graph.nodes[goalName];
+    if (!graph.nodes[startName] || !goalNode) return null;
+
+    const gScore = new Map([[startName, 0]]);
+    const fScore = new Map([[startName, haversineMiles(graph.nodes[startName], goalNode)]]);
+    const cameFromEdge = new Map();
+    const closed = new Set();
+
+    const heap = new MinHeap((name) => fScore.get(name) ?? Infinity);
+    heap.push(startName);
+
+    while (heap.size() > 0) {
+        const current = heap.pop();
+        if (closed.has(current)) continue;
+        if (current === goalName) {
+            const path = [];
+            let cur = current;
+            while (cameFromEdge.has(cur)) {
+                const e = cameFromEdge.get(cur);
+                path.unshift(e);
+                cur = e.from;
+            }
+            cachePath(cacheKey, path);
+            return path;
+        }
+        closed.add(current);
+
+        for (const e of graph.adjacency[current] || []) {
+            if (closed.has(e.to)) continue;
+            const tentativeG = (gScore.get(current) ?? Infinity) + e.miles;
+            if (tentativeG < (gScore.get(e.to) ?? Infinity)) {
+                cameFromEdge.set(e.to, e);
+                gScore.set(e.to, tentativeG);
+                fScore.set(e.to, tentativeG + haversineMiles(graph.nodes[e.to], goalNode));
+                heap.push(e.to);
             }
         }
-        dense.push(ctrl[ctrl.length - 1]);
-
-        const cum = [0];
-        for (let i = 1; i < dense.length; i++) {
-            const dx = dense[i].x - dense[i - 1].x, dy = dense[i].y - dense[i - 1].y;
-            cum.push(cum[i - 1] + Math.hypot(dx, dy));
-        }
-        cached = { points: dense, cum, length: cum[cum.length - 1], forwardKeyStartsAt: [edge.from, edge.to].sort()[0] };
-        ribbonCache.set(key, cached);
     }
-    // Orient the shared geometry to this edge's travel direction.
-    const forward = cached.forwardKeyStartsAt === edge.from;
-    return { ...cached, reversed: !forward };
-}
 
-function ribbonSample(ribbon, s) {
-    s = Math.max(0, Math.min(ribbon.length, s));
-    const sQuery = ribbon.reversed ? ribbon.length - s : s;
-    const cum = ribbon.cum, pts = ribbon.points;
-    // binary search
-    let lo = 0, hi = cum.length - 1;
-    while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (cum[mid] < sQuery) lo = mid + 1; else hi = mid;
-    }
-    const i = Math.max(1, lo);
-    const segLen = Math.max(1e-6, cum[i] - cum[i - 1]);
-    const t = (sQuery - cum[i - 1]) / segLen;
-    const a = pts[i - 1], b = pts[i];
-    let x = a.x + (b.x - a.x) * t;
-    let y = a.y + (b.y - a.y) * t;
-    if (ribbon.reversed) x = -x;
-    return { x, y };
-}
-
-// Arcade world-units of road traveled per mph per second — shared so the
-// player and AI traffic move at consistent relative speeds.
-const UNITS_PER_MPH = 5.2;
-
-// Multi-lane road geometry (world units). Interstates are divided,
-// multi-lane; US highways are undivided, one lane each way. Shared by the
-// renderer (road polygon + lane markings), the player's steering clamp,
-// and the traffic system (lane slots + lane-change-to-pass logic).
-const LANE_WIDTH = 34;
-const SHOULDER = 20;
-const LANES_PER_DIR = { interstate: 2, highway: 1 };
-const MEDIAN_WIDTH = { interstate: 26, highway: 0 };
-
-function laneCount(kind) { return LANES_PER_DIR[kind] || 1; }
-function ownLaneX(kind, i) { return MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * i + LANE_WIDTH / 2; }
-function roadHalfWidth(kind) { return MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * laneCount(kind) + SHOULDER; }
-function laneRange(kind) {
-    const min = MEDIAN_WIDTH[kind] / 2 - 6;
-    const max = MEDIAN_WIDTH[kind] / 2 + LANE_WIDTH * laneCount(kind) + SHOULDER * 0.6;
-    return [min, max];
-}
-
-function ribbonPose(ribbon, s) {
-    const eps = 8;
-    const p0 = ribbonSample(ribbon, s - eps);
-    const p1 = ribbonSample(ribbon, s + eps);
-    const dx = p1.x - p0.x, dy = p1.y - p0.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const mid = ribbonSample(ribbon, s);
-    return { x: mid.x, y: mid.y, headingX: dx / len, headingY: dy / len };
-}
-
-// Position at arclength s, offset sideways by `offset` local units
-// (positive = the driver's right, i.e. the own-direction side of the
-// road in right-hand traffic). Follows curves correctly because the
-// offset is applied perpendicular to the ribbon's tangent at s, not as a
-// flat world-space nudge. Used for lane centers, lane markings, and both
-// the player's and AI vehicles' rendered position.
-function ribbonLateral(ribbon, s, offset) {
-    const pose = ribbonPose(ribbon, s);
-    const px = pose.headingY, py = -pose.headingX;
-    return { x: pose.x + px * offset, y: pose.y + py * offset };
+    cachePath(cacheKey, null);
+    return null;
 }

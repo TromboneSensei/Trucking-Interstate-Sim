@@ -1,0 +1,141 @@
+// camera.js - flat top-down pan/zoom camera with a FREE (user-driven) mode
+// and a FOLLOW mode that smoothly centers on a target (a truck). No
+// rotation-to-heading: this is a satellite-style map, not a chase cam.
+"use strict";
+
+const TAP_MOVE_THRESHOLD = 8; // px
+const TAP_MAX_DURATION = 300; // ms
+const FOLLOW_LERP = 0.08;
+const FOLLOW_ZOOM = 2.4;
+
+export class Camera {
+  constructor(canvas, { x = 0, y = 0, zoom = 0.3, minZoom = 0.05, maxZoom = 6, onTap = null } = {}) {
+    this.canvas = canvas;
+    this.x = x;
+    this.y = y;
+    this.zoom = zoom;
+    this.minZoom = minZoom;
+    this.maxZoom = maxZoom;
+    this.mode = "FREE"; // "FREE" | "FOLLOW"
+    this.followTarget = null;
+    this.onTap = onTap;
+    this.visualCenterYRatio = 0.42; // bias the focal point up so the bottom sheet doesn't cover it
+
+    this._bindInput();
+  }
+
+  visualCenter() {
+    return { x: this.canvas.clientWidth / 2, y: this.canvas.clientHeight * this.visualCenterYRatio };
+  }
+
+  screenToWorld(sx, sy) {
+    const c = this.visualCenter();
+    return { x: (sx - c.x) / this.zoom + this.x, y: (sy - c.y) / this.zoom + this.y };
+  }
+
+  worldToScreen(wx, wy) {
+    const c = this.visualCenter();
+    return { x: c.x + (wx - this.x) * this.zoom, y: c.y + (wy - this.y) * this.zoom };
+  }
+
+  follow(target) {
+    this.mode = "FOLLOW";
+    this.followTarget = target;
+  }
+
+  unfollow() {
+    this.mode = "FREE";
+    this.followTarget = null;
+  }
+
+  clampZoom(z) {
+    return Math.max(this.minZoom, Math.min(this.maxZoom, z));
+  }
+
+  update() {
+    if (this.mode === "FOLLOW" && this.followTarget) {
+      this.x += (this.followTarget.x - this.x) * FOLLOW_LERP;
+      this.y += (this.followTarget.y - this.y) * FOLLOW_LERP;
+      this.zoom += (FOLLOW_ZOOM - this.zoom) * FOLLOW_LERP;
+    }
+  }
+
+  _bindInput() {
+    const canvas = this.canvas;
+    let dragging = false, moved = false, tapStart = 0;
+    let lastX = 0, lastY = 0;
+    let pinchDist = 0;
+
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const center = (touches) => {
+      let x = 0, y = 0;
+      for (const t of touches) { x += t.clientX; y += t.clientY; }
+      return { x: x / touches.length, y: y / touches.length };
+    };
+
+    const startDrag = (sx, sy) => {
+      dragging = true; moved = false; tapStart = Date.now();
+      lastX = sx; lastY = sy;
+      if (this.mode === "FOLLOW") this.unfollow();
+    };
+    const doDrag = (sx, sy) => {
+      const dx = sx - lastX, dy = sy - lastY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+      this.x -= dx / this.zoom;
+      this.y -= dy / this.zoom;
+      lastX = sx; lastY = sy;
+    };
+    const endDrag = (sx, sy) => {
+      dragging = false;
+      if (!moved && Date.now() - tapStart < TAP_MAX_DURATION && this.onTap) {
+        const w = this.screenToWorld(sx, sy);
+        this.onTap(w.x, w.y);
+      }
+    };
+    const zoomAt = (sx, sy, factor) => {
+      const before = this.screenToWorld(sx, sy);
+      this.zoom = this.clampZoom(this.zoom * factor);
+      const after = this.screenToWorld(sx, sy);
+      this.x += before.x - after.x;
+      this.y += before.y - after.y;
+    };
+
+    canvas.addEventListener("mousedown", (e) => startDrag(e.clientX, e.clientY));
+    canvas.addEventListener("mousemove", (e) => { if (dragging) doDrag(e.clientX, e.clientY); });
+    window.addEventListener("mouseup", (e) => { if (dragging) endDrag(e.clientX, e.clientY); });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, Math.pow(1.0015, -e.deltaY));
+    }, { passive: false });
+
+    canvas.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 2) {
+        pinchDist = dist(e.touches[0], e.touches[1]);
+        moved = true;
+      } else {
+        const c = center(e.touches);
+        startDrag(c.x, c.y);
+      }
+    }, { passive: true });
+    canvas.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+      if (e.touches.length === 2) {
+        const d = dist(e.touches[0], e.touches[1]);
+        const c = center(e.touches);
+        if (pinchDist > 0) zoomAt(c.x, c.y, d / pinchDist);
+        pinchDist = d;
+      } else if (dragging) {
+        const c = center(e.touches);
+        doDrag(c.x, c.y);
+      }
+    }, { passive: false });
+    canvas.addEventListener("touchend", (e) => {
+      if (e.touches.length === 0) {
+        pinchDist = 0;
+        const t = e.changedTouches[0];
+        if (t) endDrag(t.clientX, t.clientY);
+        else dragging = false;
+      }
+    });
+  }
+}

@@ -1,7 +1,7 @@
 // data.js
 // V16.5 - Supreme Freight Architect Pass (187+ Nodes, Chokes & Triangles)
 
-const masterCities = {
+export const masterCities = {
     // --- GULF COAST ---
     "Houston": { t: 1, w: 10.0, lat: 29.7604, lon: -95.3698, ind: ["Energy", "Space", "Port", "Refinery"] },
     "Baton Rouge": { t: 2, w: 6.0, lat: 30.4515, lon: -91.1871, ind: ["Petrochem", "Refinery"] },
@@ -409,7 +409,7 @@ const masterCities = {
     
 };
 // --- INTERSTATE ROUTES (V16.5 - Updated Topology & Invisible Chokes) ---
-const interstateRoutes = {
+export const interstateRoutes = {
     "I-2": ["McAllen", "Harlingen"],
     "I-4": ["Tampa", "Lakeland", "Orlando", "Daytona Beach"], 
     "I-5": ["San Diego", "Long Beach", "Los Angeles", "Mettler", "Stockton", "Sacramento", "Redding", "Medford", "Eugene", "Salem", "Portland", "Olympia", "Tacoma", "Seattle", "Everett", "Blaine"],
@@ -512,7 +512,7 @@ const interstateRoutes = {
 };
 
 // --- HIGHWAY ROUTES (V16.5 - The Realism & Triangle Layer) ---
-const highwayRoutes = {
+export const highwayRoutes = {
     // California Spine
     "CA-99": ["Mettler", "Bakersfield", "Visalia", "Fresno", "Modesto", "Stockton", "Sacramento"],
     "US-101": ["Los Angeles", "Santa Barbara", "San Luis Obispo", "Monterey", "San Jose", "San Francisco", "Santa Rosa", "Eureka", "Medford"],
@@ -558,7 +558,7 @@ const highwayRoutes = {
 // --- V16.6 SUPREME TERRAIN MODIFIERS (Realism Meets Tycoon) ---
 // Base Interstate: 70 MPH | Base Highway: 55 MPH
 
-const terrainModifiers = {
+export const terrainModifiers = {
     // --- APPALACHIA & EAST COAST CHOKEPOINTS ---
     "Morgantown-Cumberland": 50,
     "Cumberland-Hancock": 50,
