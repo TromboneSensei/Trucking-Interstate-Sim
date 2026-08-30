@@ -34,24 +34,24 @@ const MAX_DECISION_OPTIONS = 4;
 // anti-overlap math has to be anchored to the render scale, not real
 // truck dimensions - which is why these read as large mile values below
 // even though on screen they land as a normal-looking gap.
-const MIN_DOT_GAP_WORLD_UNITS = 2 * TRUCK_DOT_RADIUS + 4; // a bit more than "just touching" - same-lane trucks always use this, never relaxed
+const MIN_DOT_GAP_WORLD_UNITS = 2 * TRUCK_DOT_RADIUS + 1; // just a hair more than touching - required gap when two trucks are in the same visual lane, tight enough that a jam still reads as "bunched up" rather than a generous gap
 // render.js deliberately sets the two lanes' offsets closer together
 // than MIN_DOT_GAP_WORLD_UNITS - a little visual overlap between a
 // truck and one directly beside it in the other lane reads as normal
 // lane-adjacent traffic, not a bug. This is that same steady-state gap,
-// used as the "good enough, no along-edge cushion needed" threshold for
-// cross-lane pairs specifically (see clampOverlaps/placeOnEdge) - a
-// truck still mid-lane-change (its rendered offset partway between the
-// two lanes, not yet at this full separation) still gets some
-// along-edge protection via the Pythagorean shortfall below it.
+// the required along-edge cushion once two trucks are fully settled in
+// different lanes. crossLaneTarget() below interpolates between this and
+// MIN_DOT_GAP_WORLD_UNITS continuously as laneT changes, so a truck mid-
+// lane-change never gets more clearance credit than its actual lateral
+// separation has earned yet (see clampOverlaps/placeOnEdge).
 const CROSS_LANE_TARGET_WORLD_UNITS = RIGHT_LANE_OFFSET - LEFT_LANE_OFFSET;
-const FOLLOW_TIME_GAP_S = 2.5; // extra following distance on top of the anti-overlap floor, grows with speed
+const FOLLOW_TIME_GAP_S = 1.1; // extra following distance on top of the anti-overlap floor, grows with speed - tight but not bumper-to-bumper
 const PASS_CLEAR_AHEAD_MULT = 2; // multiples of minSafeMiles for a comfortable passing gap
 const PASS_CLEAR_BEHIND_MULT = 1.5;
 const MERGE_BACK_CLEAR_MULT = 1.5;
 const PASS_AGGRESSION_THRESHOLD = 0.4; // only drivers at least this aggressive attempt a pass
-const FOLLOW_TRIGGER_MULT = 1.4; // start capping speed at this multiple of the anti-overlap floor, before it's actually urgent
-const EMERGENCY_BRAKE_MULT = 1.15; // hard speed clamp once the gap shrinks inside this multiple of the floor
+const FOLLOW_TRIGGER_MULT = 1.15; // start capping speed at this multiple of the anti-overlap floor, before it's actually urgent
+const EMERGENCY_BRAKE_MULT = 1.05; // hard speed clamp once the gap shrinks inside this multiple of the floor
 const PASS_CONSIDER_MULT = 3; // decide to change lanes this much earlier than the speed cap, so the visual lane-blend has room to complete
 const MAX_DEPARTURE_WAIT_REAL_S = 3; // defensive timeout so a truck can never stall forever
 const LANE_CHANGE_EASE = 2.0; // dt-multiplier for the visual lane-blend, same shape as speed easing
@@ -197,11 +197,23 @@ function rankAndCapOptions(graph, options) {
   return ranked.slice(0, MAX_DECISION_OPTIONS);
 }
 
+// Weighted by city `w` (roulette-wheel, same shape as economy.js's
+// pickDestination) rather than a flat uniform pick over the eligible
+// pool - tier-3 cities alone outnumber tier-1 hubs roughly 4 to 1, so a
+// flat pick handed small cities disproportionately more starting trucks
+// purely from pool arithmetic, independent of how "important" they are.
 export function spawnFleet(graph, count, rnd = Math.random) {
   const cities = Object.values(graph.nodes).filter((n) => n.t > 0 && n.t <= 3);
+  let totalWeight = 0;
+  for (const c of cities) totalWeight += c.w;
   const trucks = [];
   for (let i = 0; i < count; i++) {
-    const city = cities[Math.floor(rnd() * cities.length)];
+    let roll = rnd() * totalWeight;
+    let city = cities[cities.length - 1];
+    for (const c of cities) {
+      roll -= c.w;
+      if (roll <= 0) { city = c; break; }
+    }
     trucks.push(new Truck(graph, city.name, rnd));
   }
   return trucks;
@@ -369,7 +381,7 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
   if (group) {
     const occupants = [...group.lane0, ...group.lane1].sort((a, b) => a.s - b.s);
     for (const t of occupants) {
-      const target = t.lane === truck.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
+      const target = crossLaneTarget(t.laneT, truck.laneT);
       const perpGap = Math.abs(laneOffset(t) - myOffset);
       if (perpGap >= target) continue; // laterally clear regardless of s
       const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);
@@ -389,7 +401,7 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
       const byDistance = [...group.lane0, ...group.lane1].sort((a, b) => b.s - a.s);
       for (const t of byDistance) {
         if (t.s < s) break; // already comfortably behind this candidate slot
-        const target = t.lane === truck.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
+        const target = crossLaneTarget(t.laneT, truck.laneT);
         const perpGap = Math.abs(laneOffset(t) - myOffset);
         if (perpGap >= target) continue;
         const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);
@@ -417,6 +429,25 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
 // passing lane's full separation from lane 0.
 function laneOffset(truck) {
   return RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT;
+}
+
+// The along-edge gap threshold two trucks need, continuously interpolated
+// on how far apart their laneT actually is - NOT on the discrete `.lane`
+// target flag. RIGHT_LANE_OFFSET - LEFT_LANE_OFFSET === CROSS_LANE_TARGET_
+// WORLD_UNITS by construction, so perpGap between any two trucks is always
+// exactly CROSS_LANE_TARGET_WORLD_UNITS * |Δlanet|, bounded in [0,
+// CROSS_LANE_TARGET_WORLD_UNITS] - meaning a plain linear ramp from
+// MIN_DOT_GAP_WORLD_UNITS (same visual lane) down to CROSS_LANE_TARGET_
+// WORLD_UNITS (fully opposite lanes) lands exactly on both today's steady-
+// state endpoints with a smooth, monotonic gradient between them. Using
+// the discrete flag instead (as this used to) relaxes the threshold the
+// instant a pass/merge DECISION is made, before the truck has actually
+// moved sideways - reading as a same-tick longitudinal snap rather than a
+// diagonal glide. This formula makes that discontinuity structurally
+// impossible rather than just less likely.
+function crossLaneTarget(laneTA, laneTB) {
+  const diff = Math.abs(laneTA - laneTB);
+  return MIN_DOT_GAP_WORLD_UNITS - (MIN_DOT_GAP_WORLD_UNITS - CROSS_LANE_TARGET_WORLD_UNITS) * diff;
 }
 
 // After every truck has moved this tick, two trucks can still end up too
@@ -452,7 +483,7 @@ function clampOverlaps(graph, trucks) {
     const unitsPerMile = worldUnitsPerMile(graph, arr[0].edge);
     for (let i = 1; i < arr.length; i++) {
       const ahead = arr[i - 1], behind = arr[i];
-      const target = ahead.lane === behind.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
+      const target = crossLaneTarget(ahead.laneT, behind.laneT);
       const perpGap = Math.abs(laneOffset(ahead) - laneOffset(behind));
       if (perpGap >= target) continue; // laterally clear regardless of along-edge gap
       const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);

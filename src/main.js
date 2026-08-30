@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS = {
   defaultTimeScale: 1,
   showAllLabels: false,
   showMedians: true,
+  showStateBorders: true,
 };
 
 const canvas = document.getElementById("map");
@@ -41,8 +42,10 @@ const el = {
   settingDefaultSpeedVal: document.getElementById("setting-default-speed-val"),
   settingAllLabels: document.getElementById("setting-all-labels"),
   settingMedians: document.getElementById("setting-medians"),
+  settingStateBorders: document.getElementById("setting-state-borders"),
   btnSettingsCancel: document.getElementById("btn-settings-cancel"),
   btnSettingsApply: document.getElementById("btn-settings-apply"),
+  fpsCounter: document.getElementById("fps-counter"),
 };
 
 window.addEventListener("error", (e) => {
@@ -235,6 +238,7 @@ function openSettings() {
   el.settingDefaultSpeedVal.textContent = settings.defaultTimeScale.toFixed(1) + "×";
   el.settingAllLabels.checked = settings.showAllLabels;
   el.settingMedians.checked = settings.showMedians;
+  el.settingStateBorders.checked = settings.showStateBorders;
   el.settingsOverlay.classList.remove("hidden");
 }
 
@@ -258,6 +262,7 @@ el.btnSettingsApply.addEventListener("click", () => {
     defaultTimeScale: parseFloat(el.settingDefaultSpeed.value),
     showAllLabels: el.settingAllLabels.checked,
     showMedians: el.settingMedians.checked,
+    showStateBorders: el.settingStateBorders.checked,
   };
   closeSettings();
   bootSim(newSettings);
@@ -310,10 +315,19 @@ bootSim(DEFAULT_SETTINGS);
 
 let lastTime = performance.now();
 let lastUiRefresh = 0;
+let lastFpsTime = performance.now();
+let fpsFrameCount = 0;
 
 function frame(now) {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
+
+  fpsFrameCount++;
+  if (now - lastFpsTime > 500) {
+    el.fpsCounter.textContent = Math.round((fpsFrameCount * 1000) / (now - lastFpsTime)) + " FPS";
+    lastFpsTime = now;
+    fpsFrameCount = 0;
+  }
 
   try {
     if (state.paused) {

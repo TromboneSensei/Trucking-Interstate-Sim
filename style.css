@@ -115,6 +115,21 @@ html, body {
 }
 #btn-settings:active { transform: scale(0.94); }
 
+/* FPS counter - deliberately unobtrusive (no border/background chrome
+   like #btn-settings/#top-bar get), top-left mirror of the settings
+   gear's corner-pinning. */
+#fps-counter {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  left: max(8px, env(safe-area-inset-left));
+  z-index: 5;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--dim);
+  opacity: 0.7;
+}
+
 /* ---------------------------------------------------------------------
    Settings modal - centered card over a dimmed backdrop (distinct from
    the bottom-anchored decision overlay since this holds a full form,

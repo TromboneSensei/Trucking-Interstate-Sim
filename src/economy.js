@@ -173,7 +173,7 @@ function pickDestination(graph, originName, rnd) {
         if (tripRoll >= 0.75 && miles <= 1400) continue;
 
         let gravity = node.w;
-        if (node.w < 4) gravity *= 1.4; // give small towns a fighting chance
+        if (node.w < 4) gravity *= 1.15; // give small towns a fighting chance, without letting them regularly out-score a hub
         const distanceFriction = 1 / Math.sqrt(1 + miles / 800);
         const score = gravity * distanceFriction * (0.85 + rnd() * 0.3);
         if (score > 0.0001) {
@@ -208,5 +208,5 @@ export function generateContract(graph, originName, rnd = Math.random) {
     const { cargo, truckType } = pickCargo(originName, rnd);
     const tierMult = TIER_PAY_MULT[graph.nodes[destination].t] ?? 1;
     const payout = Math.round(optimalMiles * PAY_RATE_PER_MILE * truckType.multiplier * tierMult);
-    return { destination, cargo, truckType, optimalMiles, payout, path };
+    return { origin: originName, destination, cargo, truckType, optimalMiles, payout, path };
 }

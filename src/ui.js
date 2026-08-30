@@ -155,7 +155,7 @@ const TRUCK_STATS = {
 const CITY_STATS = {
   population: { label: "Largest Cities", dir: "desc", get: (c) => c.pop || 0, fmt: (v) => v.toLocaleString(), unit: "" },
   inbound: { label: "Most Inbound Traffic", dir: "desc", get: (c, trucks) => trucks.filter((t) => t.contract.destination === c.name).length, fmt: (v) => v, unit: " inbound" },
-  outbound: { label: "Most Outbound Traffic", dir: "desc", get: (c, trucks) => trucks.filter((t) => t.edge && t.edge.from === c.name).length, fmt: (v) => v, unit: " outbound" },
+  outbound: { label: "Most Outbound Traffic", dir: "desc", get: (c, trucks) => trucks.filter((t) => t.contract.origin === c.name).length, fmt: (v) => v, unit: " outbound" },
 };
 
 function sortedTrucksBy(trucks, key) {
@@ -343,7 +343,7 @@ function renderCityPage(city, graph, trucks) {
 // map tap) so both read from one accurate, consistently formatted source.
 function cityDetailsHTML(city, graph, trucks) {
   const inbound = trucks.filter((t) => t.contract.destination === city.name);
-  const outbound = trucks.filter((t) => t.edge && t.edge.from === city.name);
+  const outbound = trucks.filter((t) => t.contract.origin === city.name);
   const allReal = realCities(graph);
   const popRank = city.pop ? allReal.filter((c) => (c.pop || 0) > city.pop).length + 1 : null;
 

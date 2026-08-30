@@ -6,10 +6,13 @@
 // depends on the live camera zoom, so they're drawn fresh each frame
 // against camera.baseZoom (the initial fit-to-screen zoom set by main.js).
 import { WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
+import { STATE_BORDER_RINGS } from "./states-data.js";
 
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
 const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
+const STATE_BORDER_COLOR = "rgba(110, 125, 145, 0.35)"; // subtle cool gray, thinner/dimmer than roads - reads as a basemap layer, not competing with them
+const STATE_BORDER_WIDTH = 1.0;
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
 export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
 
@@ -33,11 +36,12 @@ const MEDIAN_WIDTH = 0.5;
 // onward; each further tier needs progressively more zoom-in, revealed
 // cumulatively (zooming to see tier 3 still shows tiers 1-2).
 const LABEL_TIER_ZOOM_MULT = { 1: 1.0, 2: 1.7, 3: 3.2, 4: 5.5 };
-const LABEL_FONT_PX = { 1: 15, 2: 13, 3: 11.5, 4: 10.5 };
-const LABEL_COLOR = { 1: "#f1f3f5", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" };
+const LABEL_FONT_PX = { 1: 25, 2: 24, 3: 23, 4: 22 }; // tier1 = old 15px * 1.69, tiers 2-4 step down just barely (was a steeper {15,13,11.5,10.5} cascade)
+const LABEL_COLOR = { 1: "#ffffff", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" }; // tier1 fully white; 2-4 stay the existing off-white-to-grey cascade
 
 export function renderStaticBackground(graph, opts = {}) {
   const showMedians = opts.showMedians !== false; // default on
+  const showStateBorders = opts.showStateBorders !== false; // default on
   const bg = document.createElement("canvas");
   bg.width = WORLD_WIDTH * BG_SCALE;
   bg.height = WORLD_HEIGHT * BG_SCALE;
@@ -48,6 +52,26 @@ export function renderStaticBackground(graph, opts = {}) {
   ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
   ctx.lineCap = "round";
+
+  // State borders first, beneath everything else - a basemap layer, not
+  // a road. Pre-projected/pre-simplified at build time (see
+  // scripts/build-states-data.mjs), so this is just a stroke pass, same
+  // one-time-cost pattern as the road network below: every ring shares
+  // one beginPath()/stroke() call. Stroke-only (never filled), so
+  // MultiPolygon inner/hole rings need no special handling - every ring
+  // draws identically regardless of outer/inner role.
+  if (showStateBorders) {
+    ctx.strokeStyle = STATE_BORDER_COLOR;
+    ctx.lineWidth = STATE_BORDER_WIDTH;
+    ctx.beginPath();
+    for (const ring of STATE_BORDER_RINGS) {
+      ctx.moveTo(ring[0], ring[1]);
+      for (let i = 2; i < ring.length; i += 2) ctx.lineTo(ring[i], ring[i + 1]);
+      ctx.closePath();
+    }
+    ctx.stroke();
+  }
+
   // highways first (dimmer, thinner), interstates on top (brighter, thicker)
   for (const kind of ["highway", "interstate"]) {
     ctx.strokeStyle = ROAD_COLOR[kind];
