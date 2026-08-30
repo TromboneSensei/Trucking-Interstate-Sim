@@ -108,9 +108,11 @@ export function spawnFleet(graph, count, rnd = Math.random) {
 
 // Advances every truck by `dt` real seconds at the given time-scale
 // multiplier. Returns the truck awaiting a junction decision, if any
-// (only possible for `followedTruck`), so the caller can pause the whole
-// sim and show the decision panel.
-export function updateFleet(graph, trucks, dt, timeScale, followedTruck) {
+// (only possible for `controlledTruck` - the one truck the player has
+// explicitly taken control of via the details panel, a separate,
+// narrower thing than merely being followed by the camera), so the
+// caller can pause the whole sim and show the decision panel.
+export function updateFleet(graph, trucks, dt, timeScale, controlledTruck) {
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
 
   for (const truck of trucks) {
@@ -131,7 +133,7 @@ export function updateFleet(graph, trucks, dt, timeScale, followedTruck) {
       continue;
     }
 
-    if (truck === followedTruck) {
+    if (truck === controlledTruck) {
       const options = pickEdgesFrom(graph, node, truck.edge);
       if (options.length > 1) {
         truck.pendingOptions = rankAndCapOptions(graph, options);

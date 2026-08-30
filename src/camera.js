@@ -81,14 +81,14 @@ export class Camera {
     };
     const doDrag = (sx, sy) => {
       const dx = sx - lastX, dy = sy - lastY;
-      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+      if (Math.abs(dx) > TAP_MOVE_THRESHOLD || Math.abs(dy) > TAP_MOVE_THRESHOLD) moved = true;
       this.x -= dx / this.zoom;
       this.y -= dy / this.zoom;
       lastX = sx; lastY = sy;
     };
     const endDrag = (sx, sy) => {
       dragging = false;
-      if (!moved && Date.now() - tapStart < TAP_MAX_DURATION && this.onTap) {
+      if (!moved && !gestureMultiTouch && Date.now() - tapStart < TAP_MAX_DURATION && this.onTap) {
         const w = this.screenToWorld(sx, sy);
         this.onTap(w.x, w.y);
       }
@@ -116,17 +116,31 @@ export class Camera {
     // go of a pinch (2 fingers -> 1 before the final lift) reused the
     // single-finger drag origin from before the pinch even started,
     // producing a sudden camera jump right as the gesture released.
+    //
+    // gestureMultiTouch tracks whether *this entire gesture* ever saw a
+    // second finger, from first touch down to all fingers lifted. A
+    // pinch that drops to one finger still counts: rebase()'s 1-finger
+    // branch calls startDrag(), which resets `moved` to false, so
+    // without re-asserting it here a quick final release would read as
+    // a plain tap and select whatever was under that last finger, even
+    // though the whole gesture was a pinch-zoom, not a tap.
     let touchCount = 0;
+    let gestureMultiTouch = false;
     const rebase = (touches) => {
       if (touches.length >= 2) {
         dragging = false;
+        gestureMultiTouch = true;
         pinchDist = dist(touches[0], touches[1]);
         moved = true;
       } else if (touches.length === 1) {
         pinchDist = 0;
         const c = center(touches);
-        if (!dragging || touchCount >= 2) startDrag(c.x, c.y);
-        else { lastX = c.x; lastY = c.y; }
+        if (!dragging || touchCount >= 2) {
+          startDrag(c.x, c.y);
+          if (gestureMultiTouch) moved = true;
+        } else {
+          lastX = c.x; lastY = c.y;
+        }
       } else {
         pinchDist = 0;
       }
@@ -153,6 +167,7 @@ export class Camera {
         const t = e.changedTouches[0];
         if (t) endDrag(t.clientX, t.clientY);
         else dragging = false;
+        gestureMultiTouch = false; // gesture fully over; next touch starts fresh
       } else {
         rebase(e.touches);
       }

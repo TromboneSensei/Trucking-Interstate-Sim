@@ -4,7 +4,7 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, renderOverview, renderFleetTab } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, renderDispatchTab } from "./ui.js";
 
 const FLEET_SIZE = 150;
 const DECISION_TIMEOUT = 11; // seconds
@@ -39,12 +39,22 @@ const state = {
   timeScale: parseFloat(el.timeSlider.value),
   gameSeconds: 6 * 3600, // start at 6:00 AM
   followedTruckId: null,
+  // Being followed just means the camera is locked on - purely a
+  // spectator thing. controlledTruckId is a separate, narrower opt-in:
+  // only the controlled truck's junctions ever pause the sim for a
+  // player decision, armed explicitly via the details panel's Take
+  // Control button.
+  controlledTruckId: null,
   decisionTruck: null,
   decisionTimer: 0,
 };
 
 function getFollowedTruck() {
   return state.followedTruckId == null ? null : trucks.find((t) => t.id === state.followedTruckId) || null;
+}
+
+function getControlledTruck() {
+  return state.controlledTruckId == null ? null : trucks.find((t) => t.id === state.controlledTruckId) || null;
 }
 
 // ---------------------------------------------------------------------
@@ -73,17 +83,26 @@ window.addEventListener("resize", () => { resizeCanvas(); });
 
 function followTruck(truck) {
   state.followedTruckId = truck.id;
+  state.controlledTruckId = null; // following defaults to spectate-only; Take Control is an explicit opt-in
   camera.follow(truckWorldPos(graph, truck));
   el.btnExitFollow.classList.remove("hidden");
-  openDetailsFor(truck, "truck");
+  openDetailsFor(truck, "truck", false);
 }
 
 function unfollow() {
   state.followedTruckId = null;
+  state.controlledTruckId = null;
   camera.unfollow();
   el.btnExitFollow.classList.add("hidden");
 }
 el.btnExitFollow.addEventListener("click", unfollow);
+
+function toggleControl() {
+  const followed = getFollowedTruck();
+  if (!followed) return;
+  state.controlledTruckId = state.controlledTruckId === followed.id ? null : followed.id;
+  refreshFollowedTruckDetails(followed, state.controlledTruckId === followed.id);
+}
 
 function handleTap(wx, wy) {
   const tol = TAP_TOLERANCE_PX / camera.zoom;
@@ -102,7 +121,7 @@ function handleTap(wx, wy) {
     const d = Math.hypot(node.x - wx, node.y - wy);
     if (d < bestDist) { bestDist = d; bestCity = node; }
   }
-  if (bestCity) openDetailsFor(bestCity, "city");
+  if (bestCity) openDetailsFor(bestCity, "city", false);
 }
 
 // ---------------------------------------------------------------------
@@ -172,7 +191,7 @@ el.fleetCount.textContent = `${trucks.length} UNITS`;
 // ---------------------------------------------------------------------
 // UI wiring + main loop
 // ---------------------------------------------------------------------
-initUI({ onSelectTruck: followTruck });
+initUI({ onSelectTruck: followTruck, onToggleControl: toggleControl });
 
 let lastTime = performance.now();
 let lastUiRefresh = 0;
@@ -191,7 +210,7 @@ function frame(now) {
       }
     } else {
       state.gameSeconds += dt * BASE_TIME_SCALE * state.timeScale;
-      const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getFollowedTruck());
+      const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck());
       if (decisionTruck) showDecisionPanel(decisionTruck);
     }
 
@@ -211,12 +230,11 @@ function frame(now) {
     // fleet-wide rankings below (cheap either way, but a full re-sort of
     // 150 trucks every frame is unnecessary work for numbers no one is
     // watching that closely).
-    if (followed) refreshFollowedTruckDetails(followed);
+    if (followed) refreshFollowedTruckDetails(followed, state.controlledTruckId === followed.id);
 
     if (now - lastUiRefresh > 400) {
       lastUiRefresh = now;
-      renderOverview(trucks);
-      renderFleetTab(trucks);
+      renderDispatchTab(trucks);
     }
   } catch (err) {
     el.fatal.textContent = "Runtime error: " + (err.stack || err.message);
