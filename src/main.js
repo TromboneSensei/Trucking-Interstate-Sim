@@ -4,7 +4,7 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, resetUIState } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, resetUIState } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 const TAP_TOLERANCE_PX = 26;
@@ -305,6 +305,7 @@ function bootSim(newSettings) {
 
   resetUIState();
   renderDispatchTab(trucks, graph);
+  renderRankingsTab(trucks, graph);
 }
 
 // ---------------------------------------------------------------------
@@ -368,6 +369,7 @@ function frame(now) {
     if (now - lastUiRefresh > 400) {
       lastUiRefresh = now;
       renderDispatchTab(trucks, graph);
+      renderRankingsTab(trucks, graph);
       if (state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }

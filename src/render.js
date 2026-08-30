@@ -147,19 +147,27 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels) {
   }
 }
 
-export function truckWorldPos(graph, truck) {
+// The point on the road's centerline (median, for a divided interstate)
+// at a truck's current progress - i.e. truckWorldPos without the lane
+// offset. Exported so the dashed route-preview line can emanate from the
+// road itself rather than visibly starting off to one side at the
+// truck's actual (lane-offset) dot position.
+export function truckCenterlinePos(graph, truck) {
   if (!truck.edge) {
-    // Waiting to depart a city (pendingEdge) or genuinely stranded -
-    // either way, render at the node it's sitting at.
     const n = graph.nodes[truck.currentNode];
     return { x: n.x, y: n.y };
   }
   const edge = truck.edge;
   const a = graph.nodes[edge.from], b = graph.nodes[edge.to];
   const t = Math.max(0, Math.min(1, truck.s / edge.miles));
-  const baseX = a.x + (b.x - a.x) * t;
-  const baseY = a.y + (b.y - a.y) * t;
-  if (edge.kind !== "interstate") return { x: baseX, y: baseY };
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+export function truckWorldPos(graph, truck) {
+  if (!truck.edge || truck.edge.kind !== "interstate") return truckCenterlinePos(graph, truck);
+
+  const edge = truck.edge;
+  const { x: baseX, y: baseY } = truckCenterlinePos(graph, truck);
 
   // Perpendicular offset to the right of travel, derived from the
   // edge's stored compass bearing: rightX=cos(theta), rightY=sin(theta)
@@ -201,7 +209,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     ctx.lineWidth = 2.5 / camera.zoom;
     ctx.setLineDash([10 / camera.zoom, 8 / camera.zoom]);
     ctx.beginPath();
-    const p0 = truckWorldPos(graph, selectedTruck);
+    const p0 = truckCenterlinePos(graph, selectedTruck);
     ctx.moveTo(p0.x, p0.y);
     for (const name of nodeSeq) {
       const n = graph.nodes[name];

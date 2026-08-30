@@ -4,20 +4,23 @@
 // to (re)render whenever something changes. Real CSS classes throughout
 // (no inline-styled template strings).
 "use strict";
+import { travelDirectionLabel } from "./geo.js";
 
 const el = {
   sheet: document.getElementById("bottom-sheet"),
   handle: document.getElementById("sheet-handle"),
   tabs: document.querySelectorAll(".tab-btn"),
   overview: document.getElementById("tab-overview"),
+  rankings: document.getElementById("tab-rankings"),
   detailsEmpty: document.getElementById("details-empty"),
   detailsData: document.getElementById("details-data"),
 };
 
 let onSelectTruck = null;
 let onToggleControl = null;
-let drillKey = null; // null = overview + leader cards; a key (possibly "city:"-prefixed) = drilled into that ranking
-let selectedCityName = null; // set once a city is picked out of a city ranking - replaces the Dispatch tab with that city's full page
+let dispatchDrill = null; // null = the Dispatch summary cards; "corridors" | "interstates" = drilled into that ranking
+let rankingsDrillKey = null; // null = the Rankings leader cards; a key (possibly "city:"-prefixed) = drilled into that ranking
+let selectedCityName = null; // set once a city is picked out of a city ranking - replaces the Rankings tab with that city's full page
 let lastTrucks = [];
 let lastGraph = null;
 
@@ -30,28 +33,42 @@ export function initUI(callbacks) {
     btn.addEventListener("click", () => openTab(btn.dataset.tab));
   });
 
-  // Delegated: the overview tab's content is fully rebuilt on every
-  // refresh, so its click targets are wired here once against the
-  // stable parent rather than re-attached per render.
+  // Delegated: each tab's content is fully rebuilt on every refresh, so
+  // its click targets are wired here once against the stable parent
+  // rather than re-attached per render.
   el.overview.addEventListener("click", (e) => {
+    const drillCard = e.target.closest("[data-drill]");
+    const chip = e.target.closest("[data-chip]");
+    const back = e.target.closest("[data-back]");
+    if (!drillCard && !chip && !back) return;
+
+    if (drillCard) dispatchDrill = drillCard.dataset.drill;
+    else if (chip) dispatchDrill = chip.dataset.chip;
+    else dispatchDrill = null; // back out of a ranking to the summary cards
+
+    renderDispatchTab(lastTrucks, lastGraph);
+    el.overview.scrollTop = 0;
+  });
+
+  el.rankings.addEventListener("click", (e) => {
     const drillCard = e.target.closest("[data-drill]");
     const chip = e.target.closest("[data-chip]");
     const cityRow = e.target.closest("[data-city]");
     const back = e.target.closest("[data-back]");
     if (!drillCard && !chip && !cityRow && !back) return;
 
-    if (drillCard) { drillKey = drillCard.dataset.drill; selectedCityName = null; }
-    else if (chip) { drillKey = chip.dataset.chip; selectedCityName = null; }
+    if (drillCard) { rankingsDrillKey = drillCard.dataset.drill; selectedCityName = null; }
+    else if (chip) { rankingsDrillKey = chip.dataset.chip; selectedCityName = null; }
     else if (cityRow) { selectedCityName = cityRow.dataset.city; }
     else if (selectedCityName) { selectedCityName = null; } // back out of a city page to its ranking list
-    else { drillKey = null; } // back out of a ranking to the overview
+    else { rankingsDrillKey = null; } // back out of a ranking to the leader cards
 
-    renderDispatchTab(lastTrucks, lastGraph);
+    renderRankingsTab(lastTrucks, lastGraph);
     // Rebuilding the panel's innerHTML doesn't reset its own scroll
-    // position, so navigating between overview/ranking/city views from
-    // partway down the previous one left the new (shorter) content
+    // position, so navigating between leader-cards/ranking/city views
+    // from partway down the previous one left the new (shorter) content
     // starting mid-scroll instead of at its own top.
-    el.overview.scrollTop = 0;
+    el.rankings.scrollTop = 0;
   });
 
   el.detailsData.addEventListener("click", (e) => {
@@ -63,7 +80,8 @@ export function initUI(callbacks) {
 // this panel was showing (a drilldown, a selected city page, cached
 // trucks/graph references) no longer apply to the fresh run.
 export function resetUIState() {
-  drillKey = null;
+  dispatchDrill = null;
+  rankingsDrillKey = null;
   selectedCityName = null;
   lastTrucks = [];
   lastGraph = null;
@@ -99,9 +117,10 @@ export function refreshViewedCityDetails(city, graph, trucks) {
   if (city) renderCityDetails(city, graph, trucks);
 }
 
-function metricCard(title, value, sub, tone) {
+function metricCard(title, value, sub, tone, drillKey) {
   const div = document.createElement("div");
   div.className = "metric-card" + (tone ? " " + tone : "");
+  if (drillKey) div.dataset.drill = drillKey;
   div.innerHTML = `<div class="metric-title">${title}</div><div class="metric-value">${value}</div><div class="metric-sub">${sub}</div>`;
   return div;
 }
@@ -117,8 +136,9 @@ function etaMilesOf(t) {
 
 // Combines both directions of the same physical road segment (from/to
 // sorted) so a corridor's congestion count doesn't split by which way
-// trucks happen to be driving on it.
-function busiestCorridor(trucks) {
+// trucks happen to be driving on it. Sorted descending - [0] is the
+// single busiest corridor, the full array backs its ranking drilldown.
+function corridorCounts(trucks) {
   const counts = new Map();
   for (const t of trucks) {
     if (!t.edge) continue;
@@ -127,13 +147,50 @@ function busiestCorridor(trucks) {
     rec.count++;
     counts.set(key, rec);
   }
-  let best = null;
-  for (const rec of counts.values()) if (!best || rec.count > best.count) best = rec;
-  return best;
+  return [...counts.values()].sort((a, b) => b.count - a.count);
+}
+
+// A physical route like I-76 can be split into two non-contiguous
+// segments in the data (route names "I-76 (West)"/"I-76 (East)") - this
+// strips that suffix so both halves roll up into one "I-76" total.
+function baseRouteName(route) {
+  return route.replace(" (West)", "").replace(" (East)", "");
+}
+
+// Every truck currently on an interstate, tallied by which interstate
+// (both directions, all corridors of that route combined) - "busiest
+// interstate overall" rather than "busiest single segment".
+function interstateCounts(trucks) {
+  const counts = new Map();
+  for (const t of trucks) {
+    if (!t.edge || t.edge.kind !== "interstate") continue;
+    const key = baseRouteName(t.edge.route);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].map(([route, count]) => ({ route, count })).sort((a, b) => b.count - a.count);
 }
 
 function shieldLabel(route) {
   return route.replace("US-", "US ").replace(" (West)", "").replace(" (East)", "");
+}
+
+// A periodic (every ~400ms) refresh tears down and rebuilds a panel's
+// innerHTML wholesale, which by default resets any scroll position -
+// most jarringly the chip-row's horizontal scroll snapping back to its
+// start mid-swipe. Wrapping a render call in this preserves both the
+// panel's own vertical scroll and any chip-row's horizontal scroll
+// across that rebuild; explicit navigation (tapping into/out of a
+// ranking) still resets scroll afterward via its own click handler,
+// which runs after and overrides this.
+function preserveScroll(container, renderFn) {
+  const scrollTop = container.scrollTop;
+  const chipScrollLeft = container.querySelector(".chip-row")?.scrollLeft;
+  renderFn();
+  container.scrollTop = scrollTop;
+  if (chipScrollLeft != null) {
+    const chipRow = container.querySelector(".chip-row");
+    if (chipRow) chipRow.scrollLeft = chipScrollLeft;
+  }
 }
 
 // Every stat a truck can be ranked by. Each shows up as one leader card
@@ -186,68 +243,120 @@ function listRow(rank, mainText, subText, valueText, valueUnit, onClick, dataAtt
 export function renderDispatchTab(trucks, graph) {
   lastTrucks = trucks;
   lastGraph = graph;
-  el.overview.innerHTML = "";
-  if (!trucks.length || !graph) return;
+  if (!trucks.length || !graph) { el.overview.innerHTML = ""; return; }
 
-  if (selectedCityName) { renderCityPage(graph.nodes[selectedCityName], graph, trucks); return; }
-  if (drillKey) { renderDrilldown(trucks, graph, drillKey); return; }
+  preserveScroll(el.overview, () => {
+    el.overview.innerHTML = "";
+    if (dispatchDrill) { renderRoadDrilldown(trucks, dispatchDrill); return; }
 
-  const moving = trucks.filter((t) => t.edge);
-  const avgSpeed = moving.length ? moving.reduce((s, t) => s + t.speed, 0) / moving.length : 0;
-  const totalEarnings = trucks.reduce((s, t) => s + t.earnings, 0);
-  const totalMiles = trucks.reduce((s, t) => s + t.totalMilesDriven, 0);
-  const totalTrips = trucks.reduce((s, t) => s + t.contractsCompleted, 0);
-  const cargoCounts = {};
-  for (const t of trucks) cargoCounts[t.contract.truckType.label] = (cargoCounts[t.contract.truckType.label] || 0) + 1;
-  const topType = Object.entries(cargoCounts).sort((a, b) => b[1] - a[1])[0];
-  const corridor = busiestCorridor(trucks);
+    const moving = trucks.filter((t) => t.edge);
+    const avgSpeed = moving.length ? moving.reduce((s, t) => s + t.speed, 0) / moving.length : 0;
+    const totalEarnings = trucks.reduce((s, t) => s + t.earnings, 0);
+    const totalMiles = trucks.reduce((s, t) => s + t.totalMilesDriven, 0);
+    const totalTrips = trucks.reduce((s, t) => s + t.contractsCompleted, 0);
+    const cargoCounts = {};
+    for (const t of trucks) cargoCounts[t.contract.truckType.label] = (cargoCounts[t.contract.truckType.label] || 0) + 1;
+    const topType = Object.entries(cargoCounts).sort((a, b) => b[1] - a[1])[0];
+    const corridors = corridorCounts(trucks);
+    const corridor = corridors[0];
+    const interstates = interstateCounts(trucks);
+    const topInterstate = interstates[0];
 
-  const grid = document.createElement("div");
-  grid.className = "metric-grid";
-  grid.appendChild(metricCard("Active Fleet", trucks.length, `${moving.length} rolling`));
-  grid.appendChild(metricCard("Network Speed", Math.round(avgSpeed) + " mph", "fleet average"));
-  grid.appendChild(metricCard("Total Earnings", "$" + Math.round(totalEarnings).toLocaleString(), "all-time"));
-  grid.appendChild(metricCard("Miles Logged", Math.round(totalMiles).toLocaleString(), "all-time"));
-  grid.appendChild(metricCard("Contracts Done", totalTrips.toLocaleString(), "all-time"));
-  grid.appendChild(metricCard("Top Cargo", topType ? topType[0] : "—", topType ? `${topType[1]} trucks` : ""));
-  grid.appendChild(metricCard("Busiest Corridor", corridor ? shieldLabel(corridor.edge.route) : "—", corridor ? `near ${corridor.edge.control} • ${corridor.count} trucks` : "", "info"));
-  el.overview.appendChild(grid);
+    const grid = document.createElement("div");
+    grid.className = "metric-grid";
+    grid.appendChild(metricCard("Active Fleet", trucks.length, `${moving.length} rolling`));
+    grid.appendChild(metricCard("Network Speed", Math.round(avgSpeed) + " mph", "fleet average"));
+    grid.appendChild(metricCard("Total Earnings", "$" + Math.round(totalEarnings).toLocaleString(), "all-time"));
+    grid.appendChild(metricCard("Miles Logged", Math.round(totalMiles).toLocaleString(), "all-time"));
+    grid.appendChild(metricCard("Contracts Done", totalTrips.toLocaleString(), "all-time"));
+    grid.appendChild(metricCard("Top Cargo", topType ? topType[0] : "—", topType ? `${topType[1]} trucks` : ""));
+    grid.appendChild(metricCard("Busiest Corridor", corridor ? shieldLabel(corridor.edge.route) : "—", corridor ? `near ${corridor.edge.control} • ${corridor.count} trucks` : "", "info", "corridors"));
+    grid.appendChild(metricCard("Busiest Interstate", topInterstate ? shieldLabel(topInterstate.route) : "—", topInterstate ? `${topInterstate.count} trucks total` : "", "info", "interstates"));
+    el.overview.appendChild(grid);
+  });
+}
 
-  const fleetLabel = document.createElement("div");
-  fleetLabel.className = "section-label";
-  fleetLabel.textContent = "Fleet Leaderboards — tap to see the full ranking";
-  el.overview.appendChild(fleetLabel);
+const ROAD_DRILL_LABEL = { corridors: "Busiest Corridors", interstates: "Busiest Interstates" };
 
-  const fleetGrid = document.createElement("div");
-  fleetGrid.className = "metric-grid";
-  for (const key in TRUCK_STATS) {
-    const stat = TRUCK_STATS[key];
-    const leader = sortedTrucksBy(trucks, key)[0];
-    const card = document.createElement("div");
-    card.className = "metric-card good";
-    card.dataset.drill = key;
-    card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
-    fleetGrid.appendChild(card);
+// Dispatch's own (much smaller) drilldown - just the two road-traffic
+// rankings, so it gets a simple 2-way chip toggle rather than pulling in
+// the full Rankings-tab machinery for two categories.
+function renderRoadDrilldown(trucks, key) {
+  const header = document.createElement("div");
+  header.className = "detail-header";
+  header.style.marginTop = "2px";
+  header.innerHTML = `<button class="pill-btn" data-back style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button>
+    <div class="detail-title" style="font-size:1rem;">${ROAD_DRILL_LABEL[key]}</div><span></span>`;
+  el.overview.appendChild(header);
+
+  const chipRow = document.createElement("div");
+  chipRow.className = "chip-row";
+  for (const k in ROAD_DRILL_LABEL) {
+    const chip = document.createElement("button");
+    chip.className = "chip" + (k === key ? " active" : "");
+    chip.dataset.chip = k;
+    chip.textContent = ROAD_DRILL_LABEL[k];
+    chipRow.appendChild(chip);
   }
-  el.overview.appendChild(fleetGrid);
+  el.overview.appendChild(chipRow);
 
-  const cityLabel = document.createElement("div");
-  cityLabel.className = "section-label";
-  cityLabel.textContent = "City Rankings — tap to see the full list";
-  el.overview.appendChild(cityLabel);
-
-  const cityGrid = document.createElement("div");
-  cityGrid.className = "metric-grid";
-  for (const key in CITY_STATS) {
-    const stat = CITY_STATS[key];
-    const leader = sortedCitiesBy(graph, trucks, key)[0];
-    const card = document.createElement("div");
-    card.className = "metric-card info";
-    card.dataset.drill = "city:" + key;
-    card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader, trucks))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
-    cityGrid.appendChild(card);
+  const list = document.createElement("div");
+  if (key === "corridors") {
+    corridorCounts(trucks).slice(0, 10).forEach((rec, i) => {
+      list.appendChild(listRow(i + 1, shieldLabel(rec.edge.route), `near ${rec.edge.control}`, rec.count, " trucks"));
+    });
+  } else {
+    interstateCounts(trucks).slice(0, 10).forEach((rec, i) => {
+      list.appendChild(listRow(i + 1, shieldLabel(rec.route), "all corridors", rec.count, " trucks"));
+    });
   }
-  el.overview.appendChild(cityGrid);
+  el.overview.appendChild(list);
+}
+
+export function renderRankingsTab(trucks, graph) {
+  if (!trucks.length || !graph) { el.rankings.innerHTML = ""; return; }
+
+  preserveScroll(el.rankings, () => {
+    el.rankings.innerHTML = "";
+    if (selectedCityName) { renderCityPage(graph.nodes[selectedCityName], graph, trucks); return; }
+    if (rankingsDrillKey) { renderDrilldown(trucks, graph, rankingsDrillKey); return; }
+
+    const fleetLabel = document.createElement("div");
+    fleetLabel.className = "section-label";
+    fleetLabel.textContent = "Fleet Leaderboards — tap to see the full ranking";
+    el.rankings.appendChild(fleetLabel);
+
+    const fleetGrid = document.createElement("div");
+    fleetGrid.className = "metric-grid";
+    for (const key in TRUCK_STATS) {
+      const stat = TRUCK_STATS[key];
+      const leader = sortedTrucksBy(trucks, key)[0];
+      const card = document.createElement("div");
+      card.className = "metric-card good";
+      card.dataset.drill = key;
+      card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
+      fleetGrid.appendChild(card);
+    }
+    el.rankings.appendChild(fleetGrid);
+
+    const cityLabel = document.createElement("div");
+    cityLabel.className = "section-label";
+    cityLabel.textContent = "City Rankings — tap to see the full list";
+    el.rankings.appendChild(cityLabel);
+
+    const cityGrid = document.createElement("div");
+    cityGrid.className = "metric-grid";
+    for (const key in CITY_STATS) {
+      const stat = CITY_STATS[key];
+      const leader = sortedCitiesBy(graph, trucks, key)[0];
+      const card = document.createElement("div");
+      card.className = "metric-card info";
+      card.dataset.drill = "city:" + key;
+      card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader, trucks))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
+      cityGrid.appendChild(card);
+    }
+    el.rankings.appendChild(cityGrid);
+  });
 }
 
 function renderDrilldown(trucks, graph, key) {
@@ -259,7 +368,7 @@ function renderDrilldown(trucks, graph, key) {
   header.style.marginTop = "2px";
   header.innerHTML = `<button class="pill-btn" data-back style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button>
     <div class="detail-title" style="font-size:1rem;">${stat.label}</div><span></span>`;
-  el.overview.appendChild(header);
+  el.rankings.appendChild(header);
 
   const chipRow = document.createElement("div");
   chipRow.className = "chip-row";
@@ -270,7 +379,7 @@ function renderDrilldown(trucks, graph, key) {
     chip.textContent = TRUCK_STATS[k].label;
     chipRow.appendChild(chip);
   }
-  el.overview.appendChild(chipRow);
+  el.rankings.appendChild(chipRow);
 
   const list = document.createElement("div");
   sortedTrucksBy(trucks, key).slice(0, 10).forEach((t, i) => {
@@ -283,7 +392,7 @@ function renderDrilldown(trucks, graph, key) {
       () => onSelectTruck && onSelectTruck(t)
     ));
   });
-  el.overview.appendChild(list);
+  el.rankings.appendChild(list);
 }
 
 function cityTierLabel(t) {
@@ -297,7 +406,7 @@ function renderCityDrilldown(trucks, graph, key) {
   header.style.marginTop = "2px";
   header.innerHTML = `<button class="pill-btn" data-back style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button>
     <div class="detail-title" style="font-size:1rem;">${stat.label}</div><span></span>`;
-  el.overview.appendChild(header);
+  el.rankings.appendChild(header);
 
   const chipRow = document.createElement("div");
   chipRow.className = "chip-row";
@@ -308,7 +417,7 @@ function renderCityDrilldown(trucks, graph, key) {
     chip.textContent = CITY_STATS[k].label;
     chipRow.appendChild(chip);
   }
-  el.overview.appendChild(chipRow);
+  el.rankings.appendChild(chipRow);
 
   const list = document.createElement("div");
   sortedCitiesBy(graph, trucks, key).slice(0, 10).forEach((c, i) => {
@@ -322,21 +431,21 @@ function renderCityDrilldown(trucks, graph, key) {
       ["city", c.name]
     ));
   });
-  el.overview.appendChild(list);
+  el.rankings.appendChild(list);
 }
 
-// The rich per-city page, embedded directly in the Dispatch tab in place
+// The rich per-city page, embedded directly in the Rankings tab in place
 // of whichever city ranking the player drilled through to get here.
 function renderCityPage(city, graph, trucks) {
   const header = document.createElement("div");
   header.className = "detail-header";
   header.style.marginTop = "2px";
   header.innerHTML = `<button class="pill-btn" data-back style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button><span></span>`;
-  el.overview.appendChild(header);
+  el.rankings.appendChild(header);
 
   const wrap = document.createElement("div");
   wrap.innerHTML = cityDetailsHTML(city, graph, trucks);
-  el.overview.appendChild(wrap);
+  el.rankings.appendChild(wrap);
 }
 
 // Shared by the Dispatch-tab city page and the Unit-tab city view (via
@@ -376,11 +485,42 @@ function statBar(label, value01, color) {
   </div>`;
 }
 
+// The full planned route (contract.path never shrinks as the truck
+// drives, unlike remainingPath) as its ordered real-city stops - origin,
+// every tier>0 waypoint the route happens to pass through, destination.
+// Static for the life of the contract, unlike showing currentNode (which
+// would silently swap the "from" city out for whatever town the truck
+// most recently passed).
+function fullRouteStops(truck) {
+  const stops = [truck.contract.origin];
+  for (const edge of truck.contract.path) {
+    stops.push(edge.to);
+  }
+  return stops;
+}
+
+// Same stops, joined for display with the final destination bolded -
+// mirrors the emphasis the old currentNode-→-destination line had.
+function fullRouteHTML(truck) {
+  const stops = fullRouteStops(truck);
+  const last = stops.pop();
+  return [...stops, `<strong style="color:var(--ink)">${last}</strong>`].join(" → ");
+}
+
+// "On I-75 North" / "Stopped in Macon" - live, changes edge to edge
+// (or when stopped waiting to depart), unlike the static route above.
+function currentRoadDetail(truck) {
+  if (truck.edge) return `On ${shieldLabel(truck.edge.route)} ${travelDirectionLabel(truck.edge)}`;
+  if (truck.pendingEdge) return `Stopped in ${truck.currentNode}`;
+  return null;
+}
+
 function renderTruckDetails(truck, isControlled) {
   el.detailsEmpty.classList.add("hidden");
   el.detailsData.classList.remove("hidden");
   const archetype = truck.driver.getArchetype();
   const etaMiles = etaMilesOf(truck);
+  const roadDetail = currentRoadDetail(truck);
 
   const controlBlock = isControlled
     ? `<button class="pill-btn" data-control-toggle style="background:var(--go);width:100%;margin-bottom:12px;">&#9881; Controlling — Release Control</button>`
@@ -397,7 +537,8 @@ function renderTruckDetails(truck, isControlled) {
         <div class="archetype-desc">${archetype.desc}</div>
       </div>
     </div>
-    <div class="detail-sub" style="margin-bottom:10px;">${truck.currentNode} → <strong style="color:var(--ink)">${truck.contract.destination}</strong> &bull; ${Math.round(etaMiles)} mi remaining</div>
+    <div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)} &bull; ${Math.round(etaMiles)} mi remaining</div>
+    ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
     ${controlBlock}
     ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls are yours - the sim will pause and wait for you at the next fork.</div>` : ""}
     <div class="metric-grid" style="margin-bottom:12px;">

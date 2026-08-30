@@ -47,6 +47,43 @@ export function compassLabel(deg) {
     return dirs[Math.round(deg / 45) % 8];
 }
 
+const COMPASS_WORD = { N: "North", NE: "Northeast", E: "East", SE: "Southeast", S: "South", SW: "Southwest", W: "West", NW: "Northwest" };
+
+// US highway numbering convention (both the Interstate and the older US
+// Numbered Highway systems): ODD route numbers run north-south, EVEN
+// numbers run east-west - the reliable rule, not "ends in 0/5" (a
+// simplification that happens to hold for many of the big coast-to-coast/
+// border-to-border routes, e.g. I-10/I-80/I-90 or I-5/I-75/I-95, but
+// isn't the actual convention - I-4, I-16, I-66 are all even/east-west
+// despite not ending in 0, and I-19/I-99 are odd/north-south despite not
+// ending in 5). Only reliable for 1-2 digit route numbers - a 3-digit
+// route (a spur or beltway loop off a parent route, e.g. I-380, I-215)
+// doesn't dependably inherit its parent's axis (I-380 is even/"should"
+// be east-west by the numeric rule but is actually a north-south spur),
+// so those fall back to the edge's own measured compass label instead of
+// a forced axis.
+function routeAxis(route) {
+    const m = route.match(/^(?:I|US)-(\d+)/);
+    if (!m) return null;
+    const num = parseInt(m[1], 10);
+    if (num >= 100) return null;
+    return num % 2 === 0 ? "EW" : "NS";
+}
+
+// The direction word for a truck's current edge, honoring the route's
+// fixed axis where one reliably applies (see routeAxis) rather than the
+// edge's literal bearing - a north-south interstate reads as "North" or
+// "South" the whole way even through a jog that briefly angles east or
+// west. Falls back to the edge's own 8-way compass label when no fixed
+// axis applies (3-digit routes, or an unrecognized route prefix).
+export function travelDirectionLabel(edge) {
+    const axis = routeAxis(edge.route);
+    const rad = (edge.bearing * Math.PI) / 180;
+    if (axis === "NS") return Math.cos(rad) >= 0 ? "North" : "South";
+    if (axis === "EW") return Math.sin(rad) >= 0 ? "East" : "West";
+    return COMPASS_WORD[edge.dirLabel] || edge.dirLabel;
+}
+
 // Small deterministic string hash -> 32-bit int, used to seed per-entity
 // PRNGs (driver personality, contract rolls) so the same seed always
 // reproduces the same result.
