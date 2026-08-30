@@ -1,8 +1,9 @@
-// driver.js - lightweight per-truck personality flavor. No lane physics,
-// reaction-time, or merge-confidence fields here (this build has no
-// per-lane simulation) — just a few stats that read well in the fleet
-// dashboard and give trucks some character (a "fastest truck" or "top
-// earner" leaderboard is more fun when the leader has a name and a vibe).
+// driver.js - lightweight per-truck personality flavor. No reaction-time
+// or merge-confidence fields here - just a few stats that read well in
+// the fleet dashboard and give trucks some character (a "fastest truck"
+// or "top earner" leaderboard is more fun when the leader has a name and
+// a vibe), plus the accel/decel rates fleet.js's car-following/passing
+// logic uses to make aggressive drivers visibly surge and brake harder.
 "use strict";
 
 export class DriverDNA {
@@ -18,6 +19,13 @@ export class DriverDNA {
         this.cruiseMult = 0.92 + this.aggression * 0.28 - (this.compliance > 0.8 ? 0.08 : 0);
         // fuelBurnMult: skilled/smooth drivers sip less, aggressive ones burn more.
         this.fuelBurnMult = 1.18 - this.skill * 0.3 + this.aggression * 0.1;
+
+        // accelRate/decelRate: how fast this driver's speed eases toward
+        // a target (replaces a flat easing constant) - higher is
+        // snappier. Braking is always faster than accelerating for
+        // everyone, but aggressive drivers push both harder.
+        this.accelRate = 2.2 + this.aggression * 1.6;
+        this.decelRate = 2.8 + this.aggression * 2.4;
     }
 
     getArchetype() {

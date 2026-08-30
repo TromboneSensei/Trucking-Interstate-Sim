@@ -94,9 +94,12 @@ function metricCard(title, value, sub, tone) {
 }
 
 // Remaining distance to a truck's contract destination: the tail of its
-// current edge plus every edge still queued in remainingPath.
+// current edge (or the full length of pendingEdge, while briefly stopped
+// waiting for a gap to depart a city) plus every edge still queued in
+// remainingPath.
 function etaMilesOf(t) {
-  return Math.max(0, t.edge ? t.edge.miles - t.s : 0) + t.remainingPath.reduce((s, e) => s + e.miles, 0);
+  const currentLeg = t.edge ? t.edge.miles - t.s : (t.pendingEdge ? t.pendingEdge.miles : 0);
+  return Math.max(0, currentLeg) + t.remainingPath.reduce((s, e) => s + e.miles, 0);
 }
 
 // Combines both directions of the same physical road segment (from/to

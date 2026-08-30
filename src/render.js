@@ -11,7 +11,18 @@ const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't 
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
 const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
-const TRUCK_DOT_RADIUS = 6.3; // ~30% smaller than the original 9
+export const TRUCK_DOT_RADIUS = 5.0; // exported: fleet.js's car-following/passing gaps are sized off this
+
+// Two-lanes-per-direction offsets, interstate-only (highways stay
+// single-file). World units, in the same camera-scaled space as
+// everything else, so they scale naturally with zoom. LEFT is the
+// passing lane, close against the median; RIGHT is the default lane,
+// far enough out that a passing truck alongside a lane-0 truck clears
+// it with just a sliver of gap.
+export const LEFT_LANE_OFFSET = TRUCK_DOT_RADIUS + 2; // exported: fleet.js's overlap clamp needs the exact rendered offset
+export const RIGHT_LANE_OFFSET = LEFT_LANE_OFFSET + 2 * TRUCK_DOT_RADIUS + 2;
+const MEDIAN_COLOR = "rgba(235, 225, 200, 0.45)";
+const MEDIAN_WIDTH = 0.5;
 
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
@@ -50,6 +61,25 @@ export function renderStaticBackground(graph) {
     ctx.stroke();
   }
 
+  // Thin median down the centerline of divided highways only
+  // (interstates) - the two lanes per direction either side of it are a
+  // purely positional truck offset (see truckWorldPos), no drawn lane
+  // divider needed between them.
+  ctx.strokeStyle = MEDIAN_COLOR;
+  ctx.lineWidth = MEDIAN_WIDTH;
+  ctx.beginPath();
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    for (const e of graph.adjacency[name]) {
+      if (e.kind !== "interstate") continue;
+      if (name > e.to) continue;
+      const other = graph.nodes[e.to];
+      ctx.moveTo(node.x, node.y);
+      ctx.lineTo(other.x, other.y);
+    }
+  }
+  ctx.stroke();
+
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     if (node.t === 0) continue; // junction filler nodes aren't real places
@@ -82,10 +112,29 @@ function drawCityLabels(ctx, graph, zoom, baseZoom) {
 }
 
 export function truckWorldPos(graph, truck) {
+  if (!truck.edge) {
+    // Waiting to depart a city (pendingEdge) or genuinely stranded -
+    // either way, render at the node it's sitting at.
+    const n = graph.nodes[truck.currentNode];
+    return { x: n.x, y: n.y };
+  }
   const edge = truck.edge;
   const a = graph.nodes[edge.from], b = graph.nodes[edge.to];
   const t = Math.max(0, Math.min(1, truck.s / edge.miles));
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  const baseX = a.x + (b.x - a.x) * t;
+  const baseY = a.y + (b.y - a.y) * t;
+  if (edge.kind !== "interstate") return { x: baseX, y: baseY };
+
+  // Perpendicular offset to the right of travel, derived from the
+  // edge's stored compass bearing: rightX=cos(theta), rightY=sin(theta)
+  // (theta=0/north -> right=east; theta=90/east -> right=south - matches
+  // real-world driving-on-the-right). The reverse-direction edge stores
+  // bearing+180, so its right-vector is the negation of this one -
+  // opposing traffic lands on the opposite side of the median for free.
+  const rad = (edge.bearing * Math.PI) / 180;
+  const rightX = Math.cos(rad), rightY = Math.sin(rad);
+  const off = RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT;
+  return { x: baseX + rightX * off, y: baseY + rightY * off };
 }
 
 export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selectedTruck) {
