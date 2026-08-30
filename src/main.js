@@ -4,7 +4,7 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, renderDispatchTab } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab } from "./ui.js";
 
 const FLEET_SIZE = 150;
 const DECISION_TIMEOUT = 11; // seconds
@@ -45,6 +45,11 @@ const state = {
   // player decision, armed explicitly via the details panel's Take
   // Control button.
   controlledTruckId: null,
+  // What the Unit tab is currently showing - independent of
+  // followedTruckId/controlledTruckId, so tapping a city to inspect it
+  // doesn't get silently clobbered back to truck stats by the followed
+  // truck's per-frame refresh (or vice versa).
+  detailsView: null, // { kind: "truck", id } | { kind: "city", name } | null
   decisionTruck: null,
   decisionTimer: 0,
 };
@@ -84,12 +89,16 @@ window.addEventListener("resize", () => { resizeCanvas(); });
 function followTruck(truck) {
   state.followedTruckId = truck.id;
   state.controlledTruckId = null; // following defaults to spectate-only; Take Control is an explicit opt-in
+  state.detailsView = { kind: "truck", id: truck.id };
   camera.follow(truckWorldPos(graph, truck));
   el.btnExitFollow.classList.remove("hidden");
   openDetailsFor(truck, "truck", false);
 }
 
 function unfollow() {
+  if (state.detailsView && state.detailsView.kind === "truck" && state.detailsView.id === state.followedTruckId) {
+    state.detailsView = null;
+  }
   state.followedTruckId = null;
   state.controlledTruckId = null;
   camera.unfollow();
@@ -121,7 +130,10 @@ function handleTap(wx, wy) {
     const d = Math.hypot(node.x - wx, node.y - wy);
     if (d < bestDist) { bestDist = d; bestCity = node; }
   }
-  if (bestCity) openDetailsFor(bestCity, "city", false);
+  if (bestCity) {
+    state.detailsView = { kind: "city", name: bestCity.name };
+    openDetailsFor(bestCity, "city", false, trucks, graph);
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -225,16 +237,23 @@ function frame(now) {
     drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, followed);
     el.clock.textContent = formatClock(state.gameSeconds);
 
-    // The followed truck's own numbers (speed, odometer, ETA) refresh
-    // every frame so they read as genuinely live, not on a tick like the
-    // fleet-wide rankings below (cheap either way, but a full re-sort of
-    // 150 trucks every frame is unnecessary work for numbers no one is
-    // watching that closely).
-    if (followed) refreshFollowedTruckDetails(followed, state.controlledTruckId === followed.id);
+    // Whatever the Unit tab is currently showing refreshes live - a
+    // followed truck's numbers every frame (speed/odometer/ETA are worth
+    // that smoothness), a viewed city's on the same slower tick as the
+    // fleet-wide rankings below (inbound/outbound counts don't need
+    // frame-rate smoothness, and re-scanning all trucks for them every
+    // frame would be wasted work for numbers no one watches that closely).
+    if (state.detailsView && state.detailsView.kind === "truck") {
+      const t = trucks.find((tt) => tt.id === state.detailsView.id);
+      if (t) refreshFollowedTruckDetails(t, state.controlledTruckId === t.id);
+    }
 
     if (now - lastUiRefresh > 400) {
       lastUiRefresh = now;
-      renderDispatchTab(trucks);
+      renderDispatchTab(trucks, graph);
+      if (state.detailsView && state.detailsView.kind === "city") {
+        refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
+      }
     }
   } catch (err) {
     el.fatal.textContent = "Runtime error: " + (err.stack || err.message);

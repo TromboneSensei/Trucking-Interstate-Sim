@@ -11,7 +11,7 @@ const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't 
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
 const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
-const TRUCK_DOT_RADIUS = 9;
+const TRUCK_DOT_RADIUS = 6.3; // ~30% smaller than the original 9
 
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
@@ -102,20 +102,24 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom);
 
-  // The dashed remaining-route line already walks the real A* edge list
-  // (one lineTo per hop through the actual interstate/highway control
-  // cities the truck will pass through), not a straight shot to the
-  // final destination - small dots at each intermediate waypoint make
-  // that legible at a glance instead of it reading as a single line.
-  if (selectedTruck && selectedTruck.remainingPath && selectedTruck.remainingPath.length) {
+  // The dashed remaining-route line walks the real A* edge list - but
+  // `remainingPath` only holds the hops AFTER the truck's current edge
+  // (the current edge's own endpoint already got shifted out of it into
+  // truck.edge by _advanceToNextEdge). Forgetting to include that
+  // endpoint here made the first drawn segment jump straight from the
+  // truck's position to the node two hops ahead, skipping the immediate
+  // next node and reading as a straight shot across land. nodeSeq below
+  // is the full remaining stop sequence, current edge included.
+  if (selectedTruck && selectedTruck.edge) {
+    const nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     ctx.strokeStyle = "rgba(232, 163, 61, 0.85)";
     ctx.lineWidth = 2.5 / camera.zoom;
     ctx.setLineDash([10 / camera.zoom, 8 / camera.zoom]);
     ctx.beginPath();
     const p0 = truckWorldPos(graph, selectedTruck);
     ctx.moveTo(p0.x, p0.y);
-    for (const e of selectedTruck.remainingPath) {
-      const n = graph.nodes[e.to];
+    for (const name of nodeSeq) {
+      const n = graph.nodes[name];
       ctx.lineTo(n.x, n.y);
     }
     ctx.stroke();
@@ -123,8 +127,8 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
 
     ctx.fillStyle = "#e8a33d";
     const waypointRadius = 3.5 / camera.zoom;
-    for (let i = 0; i < selectedTruck.remainingPath.length - 1; i++) {
-      const n = graph.nodes[selectedTruck.remainingPath[i].to];
+    for (let i = 0; i < nodeSeq.length - 1; i++) {
+      const n = graph.nodes[nodeSeq[i]];
       ctx.beginPath();
       ctx.arc(n.x, n.y, waypointRadius, 0, Math.PI * 2);
       ctx.fill();
