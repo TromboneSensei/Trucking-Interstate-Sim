@@ -4,11 +4,21 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, resetUIState } from "./ui.js";
 
-const FLEET_SIZE = 150;
 const DECISION_TIMEOUT = 11; // seconds
 const TAP_TOLERANCE_PX = 26;
+
+// Settings-panel defaults - also what the form resets to on first open.
+// Everything here is applied at (re)boot time via bootSim(); nothing
+// here is read mid-simulation.
+const DEFAULT_SETTINGS = {
+  fleetSize: 500,
+  startSeconds: 6 * 3600, // 6:00 AM
+  defaultTimeScale: 1,
+  showAllLabels: false,
+  showMedians: true,
+};
 
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
@@ -23,6 +33,16 @@ const el = {
   decisionOptions: document.getElementById("decision-options"),
   decisionTimerFill: document.getElementById("decision-timer-fill"),
   fatal: document.getElementById("fatal-error"),
+  btnSettings: document.getElementById("btn-settings"),
+  settingsOverlay: document.getElementById("settings-overlay"),
+  settingFleetSize: document.getElementById("setting-fleet-size"),
+  settingStartTime: document.getElementById("setting-start-time"),
+  settingDefaultSpeed: document.getElementById("setting-default-speed"),
+  settingDefaultSpeedVal: document.getElementById("setting-default-speed-val"),
+  settingAllLabels: document.getElementById("setting-all-labels"),
+  settingMedians: document.getElementById("setting-medians"),
+  btnSettingsCancel: document.getElementById("btn-settings-cancel"),
+  btnSettingsApply: document.getElementById("btn-settings-apply"),
 };
 
 window.addEventListener("error", (e) => {
@@ -31,13 +51,15 @@ window.addEventListener("error", (e) => {
 });
 
 const graph = buildGraph();
-const bgCanvas = renderStaticBackground(graph);
-const trucks = spawnFleet(graph, FLEET_SIZE);
+let settings = { ...DEFAULT_SETTINGS };
+let bgCanvas = null;
+let trucks = [];
 
 const state = {
-  paused: false,
-  timeScale: parseFloat(el.timeSlider.value),
-  gameSeconds: 6 * 3600, // start at 6:00 AM
+  paused: false, // true only while a junction decision is pending (see showDecisionPanel/resolveDecision)
+  settingsOpen: false, // true while the settings modal is up - also freezes the sim, independently of `paused`
+  timeScale: settings.defaultTimeScale,
+  gameSeconds: settings.startSeconds,
   followedTruckId: null,
   // Being followed just means the camera is locked on - purely a
   // spectator thing. controlledTruckId is a separate, narrower opt-in:
@@ -198,12 +220,93 @@ function formatClock(gameSeconds) {
   return `DAY ${day} ${h}:${m < 10 ? "0" + m : m} ${ampm}`;
 }
 
-el.fleetCount.textContent = `${trucks.length} UNITS`;
+// ---------------------------------------------------------------------
+// Settings modal - pauses the sim while open (state.settingsOpen, kept
+// separate from the junction-decision `state.paused` so the two can't
+// stomp on each other), and Apply tears down + rebuilds the fleet under
+// whatever was chosen.
+// ---------------------------------------------------------------------
+function openSettings() {
+  if (state.decisionTruck) return; // don't stack over an active junction decision
+  state.settingsOpen = true;
+  el.settingFleetSize.value = settings.fleetSize;
+  el.settingStartTime.value = String(settings.startSeconds);
+  el.settingDefaultSpeed.value = String(settings.defaultTimeScale);
+  el.settingDefaultSpeedVal.textContent = settings.defaultTimeScale.toFixed(1) + "×";
+  el.settingAllLabels.checked = settings.showAllLabels;
+  el.settingMedians.checked = settings.showMedians;
+  el.settingsOverlay.classList.remove("hidden");
+}
+
+function closeSettings() {
+  state.settingsOpen = false;
+  el.settingsOverlay.classList.add("hidden");
+}
+
+el.btnSettings.addEventListener("click", openSettings);
+el.btnSettingsCancel.addEventListener("click", closeSettings);
+el.settingsOverlay.addEventListener("click", (e) => { if (e.target === el.settingsOverlay) closeSettings(); });
+el.settingDefaultSpeed.addEventListener("input", (e) => {
+  el.settingDefaultSpeedVal.textContent = parseFloat(e.target.value).toFixed(1) + "×";
+});
+
+el.btnSettingsApply.addEventListener("click", () => {
+  const fleetSize = Math.max(10, Math.min(2000, parseInt(el.settingFleetSize.value, 10) || DEFAULT_SETTINGS.fleetSize));
+  const newSettings = {
+    fleetSize,
+    startSeconds: parseInt(el.settingStartTime.value, 10),
+    defaultTimeScale: parseFloat(el.settingDefaultSpeed.value),
+    showAllLabels: el.settingAllLabels.checked,
+    showMedians: el.settingMedians.checked,
+  };
+  closeSettings();
+  bootSim(newSettings);
+});
+
+// (Re)builds the whole fleet/world state from scratch under `newSettings`
+// - both the very first boot and every "Apply & Restart Sim" run through
+// here. `graph` itself never changes (topology is settings-independent);
+// everything downstream of it (the pre-rendered background, the fleet,
+// the clock/camera/UI state) gets torn down and rebuilt.
+function bootSim(newSettings) {
+  settings = newSettings;
+
+  bgCanvas = renderStaticBackground(graph, settings);
+  trucks = spawnFleet(graph, settings.fleetSize);
+
+  state.paused = false;
+  state.settingsOpen = false;
+  state.timeScale = settings.defaultTimeScale;
+  state.gameSeconds = settings.startSeconds;
+  state.followedTruckId = null;
+  state.controlledTruckId = null;
+  state.detailsView = null;
+  state.decisionTruck = null;
+  state.decisionTimer = 0;
+
+  el.timeSlider.value = String(settings.defaultTimeScale);
+  el.timeReadout.textContent = settings.defaultTimeScale.toFixed(1) + "x";
+  el.btnExitFollow.classList.add("hidden");
+  el.decisionOverlay.classList.add("hidden");
+  el.fleetCount.textContent = `${trucks.length} UNITS`;
+
+  camera.unfollow();
+  const zoom = fitZoom();
+  camera.x = WORLD_WIDTH / 2;
+  camera.y = WORLD_HEIGHT / 2;
+  camera.zoom = zoom;
+  camera.baseZoom = zoom;
+  camera.minZoom = zoom * 0.6;
+
+  resetUIState();
+  renderDispatchTab(trucks, graph);
+}
 
 // ---------------------------------------------------------------------
 // UI wiring + main loop
 // ---------------------------------------------------------------------
 initUI({ onSelectTruck: followTruck, onToggleControl: toggleControl });
+bootSim(DEFAULT_SETTINGS);
 
 let lastTime = performance.now();
 let lastUiRefresh = 0;
@@ -220,7 +323,7 @@ function frame(now) {
       if (state.decisionTimer <= 0 && state.decisionTruck) {
         resolveDecision(state.decisionTruck.pendingOptions[0]);
       }
-    } else {
+    } else if (!state.settingsOpen) {
       state.gameSeconds += dt * BASE_TIME_SCALE * state.timeScale;
       const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck());
       if (decisionTruck) showDecisionPanel(decisionTruck);
@@ -234,7 +337,7 @@ function frame(now) {
     }
     camera.update();
 
-    drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, followed);
+    drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, followed, { showAllLabels: settings.showAllLabels });
     el.clock.textContent = formatClock(state.gameSeconds);
 
     // Whatever the Unit tab is currently showing refreshes live - a

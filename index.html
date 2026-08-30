@@ -22,6 +22,49 @@
     <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
   </div>
 
+  <button id="btn-settings" title="Settings">&#9881;</button>
+
+  <div id="settings-overlay" class="hidden">
+    <div id="settings-panel">
+      <div id="settings-title">Simulation Settings</div>
+
+      <div class="settings-row">
+        <label for="setting-fleet-size">Fleet Size</label>
+        <input type="number" id="setting-fleet-size" min="10" max="2000" step="10" value="500">
+      </div>
+
+      <div class="settings-row">
+        <label for="setting-start-time">Start Time</label>
+        <select id="setting-start-time">
+          <option value="0">12:00 AM</option>
+          <option value="21600" selected>6:00 AM</option>
+          <option value="43200">12:00 PM</option>
+          <option value="64800">6:00 PM</option>
+        </select>
+      </div>
+
+      <div class="settings-row">
+        <label for="setting-default-speed">Default Speed <span id="setting-default-speed-val">1.0&times;</span></label>
+        <input type="range" id="setting-default-speed" min="0" max="8" step="0.5" value="1">
+      </div>
+
+      <div class="settings-row settings-row-toggle">
+        <label for="setting-all-labels">Show All City Labels</label>
+        <label class="switch"><input type="checkbox" id="setting-all-labels"><span class="switch-track"></span></label>
+      </div>
+
+      <div class="settings-row settings-row-toggle">
+        <label for="setting-medians">Show Interstate Medians</label>
+        <label class="switch"><input type="checkbox" id="setting-medians" checked><span class="switch-track"></span></label>
+      </div>
+
+      <div id="settings-actions">
+        <button id="btn-settings-cancel" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">Cancel</button>
+        <button id="btn-settings-apply" class="pill-btn" style="background:var(--go)">Apply &amp; Restart Sim</button>
+      </div>
+    </div>
+  </div>
+
   <div id="decision-overlay" class="hidden">
     <div id="decision-title">Junction Ahead &mdash; Choose Your Route</div>
     <div id="decision-options"></div>

@@ -59,6 +59,19 @@ export function initUI(callbacks) {
   });
 }
 
+// Called when the sim restarts under new settings: the old fleet/graph
+// this panel was showing (a drilldown, a selected city page, cached
+// trucks/graph references) no longer apply to the fresh run.
+export function resetUIState() {
+  drillKey = null;
+  selectedCityName = null;
+  lastTrucks = [];
+  lastGraph = null;
+  el.detailsEmpty.classList.remove("hidden");
+  el.detailsData.classList.add("hidden");
+  el.detailsData.innerHTML = "";
+}
+
 function openTab(name) {
   el.sheet.classList.remove("minimized");
   el.tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));

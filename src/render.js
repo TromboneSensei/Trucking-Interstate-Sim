@@ -36,7 +36,8 @@ const LABEL_TIER_ZOOM_MULT = { 1: 1.0, 2: 1.7, 3: 3.2, 4: 5.5 };
 const LABEL_FONT_PX = { 1: 15, 2: 13, 3: 11.5, 4: 10.5 };
 const LABEL_COLOR = { 1: "#f1f3f5", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" };
 
-export function renderStaticBackground(graph) {
+export function renderStaticBackground(graph, opts = {}) {
+  const showMedians = opts.showMedians !== false; // default on
   const bg = document.createElement("canvas");
   bg.width = WORLD_WIDTH * BG_SCALE;
   bg.height = WORLD_HEIGHT * BG_SCALE;
@@ -68,21 +69,24 @@ export function renderStaticBackground(graph) {
   // Thin median down the centerline of divided highways only
   // (interstates) - the two lanes per direction either side of it are a
   // purely positional truck offset (see truckWorldPos), no drawn lane
-  // divider needed between them.
-  ctx.strokeStyle = MEDIAN_COLOR;
-  ctx.lineWidth = MEDIAN_WIDTH;
-  ctx.beginPath();
-  for (const name in graph.nodes) {
-    const node = graph.nodes[name];
-    for (const e of graph.adjacency[name]) {
-      if (e.kind !== "interstate") continue;
-      if (name > e.to) continue;
-      const other = graph.nodes[e.to];
-      ctx.moveTo(node.x, node.y);
-      ctx.lineTo(other.x, other.y);
+  // divider needed between them. Settings-gated purely cosmetically -
+  // the lane offsets themselves are unaffected either way.
+  if (showMedians) {
+    ctx.strokeStyle = MEDIAN_COLOR;
+    ctx.lineWidth = MEDIAN_WIDTH;
+    ctx.beginPath();
+    for (const name in graph.nodes) {
+      const node = graph.nodes[name];
+      for (const e of graph.adjacency[name]) {
+        if (e.kind !== "interstate") continue;
+        if (name > e.to) continue;
+        const other = graph.nodes[e.to];
+        ctx.moveTo(node.x, node.y);
+        ctx.lineTo(other.x, other.y);
+      }
     }
+    ctx.stroke();
   }
-  ctx.stroke();
 
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
@@ -101,13 +105,17 @@ export function renderStaticBackground(graph) {
 // relative to `baseZoom`. Called inside the same camera-transformed
 // context as the rest of the dynamic layer, so world-space font sizes
 // scale naturally with zoom, same as everything else on the map.
-function drawCityLabels(ctx, graph, zoom, baseZoom) {
+// `showAllLabels` (a settings toggle) bypasses the zoom gating entirely -
+// every tier renders regardless of how zoomed out the camera is.
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels) {
   ctx.textAlign = "center";
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     if (node.t === 0) continue;
-    const mult = LABEL_TIER_ZOOM_MULT[node.t] ?? Infinity;
-    if (zoom < baseZoom * mult) continue;
+    if (!showAllLabels) {
+      const mult = LABEL_TIER_ZOOM_MULT[node.t] ?? Infinity;
+      if (zoom < baseZoom * mult) continue;
+    }
     const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
     ctx.font = `600 ${LABEL_FONT_PX[node.t]}px "Oswald", sans-serif`;
     ctx.fillStyle = LABEL_COLOR[node.t];
@@ -141,7 +149,7 @@ export function truckWorldPos(graph, truck) {
   return { x: baseX + rightX * off, y: baseY + rightY * off };
 }
 
-export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selectedTruck) {
+export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selectedTruck, renderOpts = {}) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   ctx.fillStyle = "#12161c";
   ctx.fillRect(0, 0, w, h);
@@ -153,7 +161,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   ctx.translate(-camera.x, -camera.y);
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels);
 
   // The dashed remaining-route line walks the real A* edge list - but
   // `remainingPath` only holds the hops AFTER the truck's current edge

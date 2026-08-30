@@ -142,10 +142,12 @@ export class Truck {
   // i.e. an actual delivery pickup, not just a waypoint the route happens
   // to route through. A truck passing through a real city mid-route
   // (this edge is just the next leg of an already-underway haul) carries
-  // its speed straight through instead, same as a tier-0 junction always
-  // has - it still slowed for the approach via arrivalSpeedCap, it just
-  // doesn't additionally stop dead and re-accelerate from zero. It still
-  // needs `placeOnEdge`'s conflict nudge either way (`laneGroups` may be
+  // straight through at full speed and in whatever lane it was already
+  // in instead - same as a tier-0 junction always has (see
+  // arrivalSpeedCap, which only decelerates a truck's actual final leg,
+  // and placeOnEdge, which no longer resets lane/laneT itself) - real
+  // continuity through the node, not just "no hard stop". It still needs
+  // `placeOnEdge`'s conflict nudge either way (`laneGroups` may be
   // undefined only when spawning a fresh truck, which always starts at a
   // real city and never reaches this branch).
   _advanceToNextEdge(graph, laneGroups, isNewContractStart = false) {
@@ -159,8 +161,6 @@ export class Truck {
       this.passingLeaderId = null;
       this.departureWaitS = 0;
     } else {
-      this.lane = 0;
-      this.passingLeaderId = null;
       placeOnEdge(graph, this, next, laneGroups);
     }
   }
@@ -236,9 +236,14 @@ function buildLaneGroups(trucks) {
 }
 
 // Speed cap for a truck approaching a real city (tier > 0) at the end of
-// its current edge - Infinity (no cap) for a tier-0 junction pass-through
-// or while still outside the decel zone.
+// its current edge - Infinity (no cap) for a tier-0 junction pass-through,
+// a mid-route real-city waypoint the route just happens to run through
+// (remainingPath still has hops left after this edge - i.e. this edge's
+// `to` isn't actually truck.contract.destination), or while still
+// outside the decel zone. Only the truck's genuine final leg slows down;
+// everything else carries straight through at cruise speed.
 function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
+  if (truck.remainingPath.length > 0) return Infinity;
   const toNode = graph.nodes[truck.edge.to];
   if (toNode.t === 0) return Infinity;
   const zone = ARRIVAL_DECEL_BASE_MI + truck.edge.speedLimit * ARRIVAL_DECEL_PER_MPH;
@@ -334,24 +339,28 @@ function tryDepartTruck(graph, truck, laneGroups, dt) {
   }
 }
 
-// Places a truck onto `edge` at s=0, lane 0 (the only lane a truck ever
-// *enters* on) and registers it into this tick's lane groups so any
-// other truck placed onto the same edge later in the same tick sees it.
-// If something's already sitting nearby (two or more trucks converging
-// through the same junction onto the same next edge in the same tick,
-// the one unprotected case a stop-and-wait deliberately doesn't cover -
-// junctions aren't real stops), nudge in just behind it instead of
-// landing exactly on top of it - checking BOTH lanes (a truck can enter
-// right next to a lane-1 occupant that's still mid-lane-change, not yet
-// far enough over to be laterally clear on its own) and chaining past a
-// whole run of them: checking only the single nearest occupant isn't
-// enough once a third truck can arrive the same tick and need to clear
-// the truck the *second* one was just nudged behind, not the original.
+// Places a truck onto `edge` at s=0 and registers it into this tick's
+// lane groups so any other truck placed onto the same edge later in the
+// same tick sees it. `truck.lane`/`laneT` are left exactly as the caller
+// set them: a fresh departure from a full stop already has them reset to
+// 0 by the time this runs (see tryDepartTruck), while a truck merely
+// continuing through a junction or a mid-route city keeps whatever lane
+// it was already in - it stays in the passing lane straight through the
+// node rather than snapping back to the right lane, matching a truck
+// it's mid-pass on doing the same. If something's already sitting nearby
+// (two or more trucks converging through the same junction onto the same
+// next edge in the same tick, the one unprotected case a stop-and-wait
+// deliberately doesn't cover - junctions aren't real stops), nudge in
+// just behind it instead of landing exactly on top of it - checking BOTH
+// lanes (a truck can enter right next to a lane-1 occupant that's still
+// mid-lane-change, not yet far enough over to be laterally clear on its
+// own) and chaining past a whole run of them: checking only the single
+// nearest occupant isn't enough once a third truck can arrive the same
+// tick and need to clear the truck the *second* one was just nudged
+// behind, not the original.
 function placeOnEdge(graph, truck, edge, laneGroups) {
   truck.edge = edge;
   truck.pendingEdge = null;
-  truck.lane = 0;
-  truck.laneT = 0;
   const key = edgeId(edge);
   let group = laneGroups ? laneGroups.get(key) : null;
   const unitsPerMile = worldUnitsPerMile(graph, edge);
@@ -397,8 +406,9 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
   truck.s = Math.min(s, edge.miles);
   if (laneGroups) {
     if (!group) { group = { lane0: [], lane1: [] }; laneGroups.set(key, group); }
-    group.lane0.push(truck);
-    group.lane0.sort((a, b) => a.s - b.s); // keep the ascending-by-progress invariant intact for this tick's remaining lookups
+    const arr = truck.lane === 1 ? group.lane1 : group.lane0;
+    arr.push(truck);
+    arr.sort((a, b) => a.s - b.s); // keep the ascending-by-progress invariant intact for this tick's remaining lookups
   }
 }
 
