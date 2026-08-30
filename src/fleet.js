@@ -34,7 +34,17 @@ const MAX_DECISION_OPTIONS = 4;
 // anti-overlap math has to be anchored to the render scale, not real
 // truck dimensions - which is why these read as large mile values below
 // even though on screen they land as a normal-looking gap.
-const MIN_DOT_GAP_WORLD_UNITS = 2 * TRUCK_DOT_RADIUS + 4; // a bit more than "just touching"
+const MIN_DOT_GAP_WORLD_UNITS = 2 * TRUCK_DOT_RADIUS + 4; // a bit more than "just touching" - same-lane trucks always use this, never relaxed
+// render.js deliberately sets the two lanes' offsets closer together
+// than MIN_DOT_GAP_WORLD_UNITS - a little visual overlap between a
+// truck and one directly beside it in the other lane reads as normal
+// lane-adjacent traffic, not a bug. This is that same steady-state gap,
+// used as the "good enough, no along-edge cushion needed" threshold for
+// cross-lane pairs specifically (see clampOverlaps/placeOnEdge) - a
+// truck still mid-lane-change (its rendered offset partway between the
+// two lanes, not yet at this full separation) still gets some
+// along-edge protection via the Pythagorean shortfall below it.
+const CROSS_LANE_TARGET_WORLD_UNITS = RIGHT_LANE_OFFSET - LEFT_LANE_OFFSET;
 const FOLLOW_TIME_GAP_S = 2.5; // extra following distance on top of the anti-overlap floor, grows with speed
 const PASS_CLEAR_AHEAD_MULT = 2; // multiples of minSafeMiles for a comfortable passing gap
 const PASS_CLEAR_BEHIND_MULT = 1.5;
@@ -121,23 +131,26 @@ export class Truck {
 
     this.contract = contract;
     this.remainingPath = contract.path ? [...contract.path] : [];
-    if (this.remainingPath.length) this._advanceToNextEdge(graph, laneGroups);
+    if (this.remainingPath.length) this._advanceToNextEdge(graph, laneGroups, true);
     else { this.edge = null; this.pendingEdge = null; } // truly stranded; will just sit idle rather than crash
   }
 
-  // Moves to the next queued edge. If the node being LEFT is a real city
-  // (not a tier-0 highway-interchange filler node), the truck doesn't
-  // teleport onto the new road at cruise speed - it stops and waits for
-  // a gap (see tryDepartTruck in updateFleet), which is also what gives
-  // it a "start slow, accelerate away" look for free via the normal
-  // accel easing once it does pull out. Passing through a tier-0
-  // junction is not a real stop, so speed carries straight through - but
-  // it still needs `placeOnEdge`'s conflict nudge (`laneGroups` may be
+  // Moves to the next queued edge. The full stop-and-wait-for-a-gap
+  // treatment (see tryDepartTruck in updateFleet) only applies when this
+  // is the start of a brand-new contract's route AND the node being LEFT
+  // is a real city (not a tier-0 highway-interchange filler node) -
+  // i.e. an actual delivery pickup, not just a waypoint the route happens
+  // to route through. A truck passing through a real city mid-route
+  // (this edge is just the next leg of an already-underway haul) carries
+  // its speed straight through instead, same as a tier-0 junction always
+  // has - it still slowed for the approach via arrivalSpeedCap, it just
+  // doesn't additionally stop dead and re-accelerate from zero. It still
+  // needs `placeOnEdge`'s conflict nudge either way (`laneGroups` may be
   // undefined only when spawning a fresh truck, which always starts at a
   // real city and never reaches this branch).
-  _advanceToNextEdge(graph, laneGroups) {
+  _advanceToNextEdge(graph, laneGroups, isNewContractStart = false) {
     const next = this.remainingPath.shift();
-    if (graph.nodes[next.from].t > 0) {
+    if (isNewContractStart && graph.nodes[next.from].t > 0) {
       this.edge = null;
       this.pendingEdge = next;
       this.speed = 0;
@@ -347,9 +360,10 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
   if (group) {
     const occupants = [...group.lane0, ...group.lane1].sort((a, b) => a.s - b.s);
     for (const t of occupants) {
+      const target = t.lane === truck.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
       const perpGap = Math.abs(laneOffset(t) - myOffset);
-      if (perpGap >= MIN_DOT_GAP_WORLD_UNITS) continue; // laterally clear regardless of s
-      const neededWorldGap = Math.sqrt(MIN_DOT_GAP_WORLD_UNITS ** 2 - perpGap ** 2);
+      if (perpGap >= target) continue; // laterally clear regardless of s
+      const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);
       const neededMiles = Math.min(neededWorldGap / unitsPerMile, edge.miles);
       if (Math.abs(t.s - s) < neededMiles) s = t.s + neededMiles;
     }
@@ -366,9 +380,10 @@ function placeOnEdge(graph, truck, edge, laneGroups) {
       const byDistance = [...group.lane0, ...group.lane1].sort((a, b) => b.s - a.s);
       for (const t of byDistance) {
         if (t.s < s) break; // already comfortably behind this candidate slot
+        const target = t.lane === truck.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
         const perpGap = Math.abs(laneOffset(t) - myOffset);
-        if (perpGap >= MIN_DOT_GAP_WORLD_UNITS) continue;
-        const neededWorldGap = Math.sqrt(MIN_DOT_GAP_WORLD_UNITS ** 2 - perpGap ** 2);
+        if (perpGap >= target) continue;
+        const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);
         const neededMiles = Math.min(neededWorldGap / unitsPerMile, edge.miles);
         if (t.s - s < neededMiles) s = Math.max(0, t.s - neededMiles);
       }
@@ -427,9 +442,10 @@ function clampOverlaps(graph, trucks) {
     const unitsPerMile = worldUnitsPerMile(graph, arr[0].edge);
     for (let i = 1; i < arr.length; i++) {
       const ahead = arr[i - 1], behind = arr[i];
+      const target = ahead.lane === behind.lane ? MIN_DOT_GAP_WORLD_UNITS : CROSS_LANE_TARGET_WORLD_UNITS;
       const perpGap = Math.abs(laneOffset(ahead) - laneOffset(behind));
-      if (perpGap >= MIN_DOT_GAP_WORLD_UNITS) continue; // laterally clear regardless of along-edge gap
-      const neededWorldGap = Math.sqrt(MIN_DOT_GAP_WORLD_UNITS ** 2 - perpGap ** 2);
+      if (perpGap >= target) continue; // laterally clear regardless of along-edge gap
+      const neededWorldGap = Math.sqrt(target ** 2 - perpGap ** 2);
       const neededMiles = Math.min(neededWorldGap / unitsPerMile, ahead.edge.miles);
       const maxAllowed = ahead.s - neededMiles;
       // Each pairwise push is capped to the edge's own length, but (as in

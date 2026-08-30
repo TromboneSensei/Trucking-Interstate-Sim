@@ -11,16 +11,20 @@ const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't 
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
 const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
-export const TRUCK_DOT_RADIUS = 5.0; // exported: fleet.js's car-following/passing gaps are sized off this
+export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
 
 // Two-lanes-per-direction offsets, interstate-only (highways stay
 // single-file). World units, in the same camera-scaled space as
 // everything else, so they scale naturally with zoom. LEFT is the
-// passing lane, close against the median; RIGHT is the default lane,
-// far enough out that a passing truck alongside a lane-0 truck clears
-// it with just a sliver of gap.
-export const LEFT_LANE_OFFSET = TRUCK_DOT_RADIUS + 2; // exported: fleet.js's overlap clamp needs the exact rendered offset
-export const RIGHT_LANE_OFFSET = LEFT_LANE_OFFSET + 2 * TRUCK_DOT_RADIUS + 2;
+// passing lane, close against the median; RIGHT is the default lane.
+// Deliberately closer together than "2 * radius" (the two lanes are
+// allowed a slight overlap when a truck is directly beside another in
+// the next lane over - reads as normal lane-adjacent traffic rather
+// than an exaggerated gap) - fleet.js's overlap guard is aware of this
+// and only relaxes its own check by the same amount, see
+// CROSS_LANE_TARGET_WORLD_UNITS there.
+export const LEFT_LANE_OFFSET = TRUCK_DOT_RADIUS + 1; // exported: fleet.js's overlap clamp needs the exact rendered offset
+export const RIGHT_LANE_OFFSET = LEFT_LANE_OFFSET + 2 * TRUCK_DOT_RADIUS - 2;
 const MEDIAN_COLOR = "rgba(235, 225, 200, 0.45)";
 const MEDIAN_WIDTH = 0.5;
 
