@@ -491,20 +491,11 @@ function statBar(label, value01, color) {
 // Static for the life of the contract, unlike showing currentNode (which
 // would silently swap the "from" city out for whatever town the truck
 // most recently passed).
-function fullRouteStops(truck) {
-  const stops = [truck.contract.origin];
-  for (const edge of truck.contract.path) {
-    stops.push(edge.to);
-  }
-  return stops;
-}
-
-// Same stops, joined for display with the final destination bolded -
-// mirrors the emphasis the old currentNode-→-destination line had.
+// Just origin and destination (no intermediate waypoints) - final
+// destination bolded, mirrors the emphasis the old currentNode-→-destination
+// line had.
 function fullRouteHTML(truck) {
-  const stops = fullRouteStops(truck);
-  const last = stops.pop();
-  return [...stops, `<strong style="color:var(--ink)">${last}</strong>`].join(" → ");
+  return `${truck.contract.origin} → <strong style="color:var(--ink)">${truck.contract.destination}</strong>`;
 }
 
 // "On I-75 North" / "Stopped in Macon" - live, changes edge to edge
@@ -538,7 +529,7 @@ function renderTruckDetails(truck, isControlled) {
       </div>
     </div>
     <div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)} &bull; ${Math.round(etaMiles)} mi remaining</div>
-    ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
+    ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);font-size:1.6rem;font-weight:700;">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
     ${controlBlock}
     ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls are yours - the sim will pause and wait for you at the next fork.</div>` : ""}
     <div class="metric-grid" style="margin-bottom:12px;">

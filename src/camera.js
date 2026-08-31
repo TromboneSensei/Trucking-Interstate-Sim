@@ -10,7 +10,7 @@ const TAP_MAX_DURATION = 300; // ms
 const FOLLOW_LERP = 0.08;
 const FOLLOW_ZOOM = 2.4;
 const HEADING_LERP = 0.08; // matches FOLLOW_LERP - no reason to diverge initially
-export const TILT_FACTOR = 0.62; // Y-axis compression in FOLLOW_NAV, faking a tilted viewing angle - exported: render.js's drawFrame needs the exact value
+export const TILT_FACTOR = 0.45; // Y-axis compression in FOLLOW_NAV, faking a tilted viewing angle - exported: render.js's drawFrame needs the exact value
 
 // Plain linear easing breaks at the 0/2*PI wrap (e.g. easing from 350deg
 // to 10deg must go forward through 360deg, not backward through 180deg) -

@@ -12,8 +12,8 @@ import { TILT_FACTOR } from "./camera.js";
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
 const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
-const STATE_BORDER_COLOR = "rgba(110, 125, 145, 0.35)"; // subtle cool gray, thinner/dimmer than roads - reads as a basemap layer, not competing with them
-const STATE_BORDER_WIDTH = 1.0;
+const STATE_BORDER_COLOR = "rgba(225, 230, 238, 0.5)"; // brighter near-white with a faint cool cast, thinner/dimmer than roads - reads as a basemap layer, not competing with them
+const STATE_BORDER_WIDTH = 1.2;
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
 export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
 
@@ -148,10 +148,29 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
     ctx.font = `600 ${LABEL_FONT_PX[node.t]}px "Oswald", sans-serif`;
     ctx.fillStyle = LABEL_COLOR[node.t];
     if (counterRotation) {
+      // Nav view: labels should look like they're standing up off the
+      // tilted ground rather than lying flat on it - a stem rising from
+      // the city dot plus a drop-shadowed label at its top, the standard
+      // 3D-map POI treatment. Drawn inside a local frame that cancels
+      // BOTH the heading-rotation (counterRotation) and the ambient
+      // tilt-squash (1/TILT_FACTOR) so the stem renders as a clean
+      // vertical screen-space line and the text stays undistorted,
+      // independent of the current heading or tilt steepness.
       ctx.save();
-      ctx.translate(node.x, node.y - radius - 5);
+      ctx.translate(node.x, node.y);
       ctx.rotate(counterRotation);
-      ctx.fillText(node.name, 0, 0);
+      ctx.scale(1, 1 / TILT_FACTOR);
+      const stemH = radius + 14;
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, -radius);
+      ctx.lineTo(0, -stemH);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillText(node.name, 1.5, -stemH - 3.5);
+      ctx.fillStyle = LABEL_COLOR[node.t];
+      ctx.fillText(node.name, 0, -stemH - 5);
       ctx.restore();
     } else {
       ctx.fillText(node.name, node.x, node.y - radius - 5);
@@ -202,8 +221,17 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   const nav = camera.mode === "FOLLOW_NAV";
   ctx.save();
   ctx.translate(center.x, center.y);
-  if (nav) ctx.rotate(-camera.heading);
+  // Scale before rotate: the anisotropic Y-compression must land along
+  // screen-vertical (a fixed "depth" axis, like a real tilted camera)
+  // BEFORE the heading-rotation is applied - not along the world's fixed
+  // N/S axis, which is what calling rotate() first would do (the squash
+  // direction would then visibly rotate together with the truck's
+  // heading instead of staying tied to the screen). Verified with a real
+  // ctx.getTransform() check during planning: canvas composes transforms
+  // so the LAST call here is applied FIRST to a raw point, so this order
+  // (scale, then rotate) is what keeps compression screen-fixed.
   ctx.scale(camera.zoom, nav ? camera.zoom * TILT_FACTOR : camera.zoom);
+  if (nav) ctx.rotate(-camera.heading);
   ctx.translate(-camera.x, -camera.y);
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
