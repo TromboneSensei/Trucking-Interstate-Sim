@@ -30,6 +30,7 @@ const el = {
   timeSlider: document.getElementById("time-slider"),
   timeReadout: document.getElementById("time-readout"),
   btnExitFollow: document.getElementById("btn-exit-follow"),
+  btnNavToggle: document.getElementById("btn-nav-toggle"),
   decisionOverlay: document.getElementById("decision-overlay"),
   decisionOptions: document.getElementById("decision-options"),
   decisionTimerFill: document.getElementById("decision-timer-fill"),
@@ -115,8 +116,10 @@ function followTruck(truck) {
   state.followedTruckId = truck.id;
   state.controlledTruckId = null; // following defaults to spectate-only; Take Control is an explicit opt-in
   state.detailsView = { kind: "truck", id: truck.id };
-  camera.follow(truckWorldPos(graph, truck));
+  camera.follow(truckWorldPos(graph, truck)); // always starts flat FOLLOW - nav view is an explicit opt-in via btnNavToggle, never the default
   el.btnExitFollow.classList.remove("hidden");
+  el.btnNavToggle.classList.remove("hidden");
+  el.btnNavToggle.classList.remove("active");
   openDetailsFor(truck, "truck", false);
 }
 
@@ -128,8 +131,16 @@ function unfollow() {
   state.controlledTruckId = null;
   camera.unfollow();
   el.btnExitFollow.classList.add("hidden");
+  el.btnNavToggle.classList.add("hidden");
 }
 el.btnExitFollow.addEventListener("click", unfollow);
+
+el.btnNavToggle.addEventListener("click", () => {
+  if (!getFollowedTruck()) return; // button is hidden otherwise, but guard defensively
+  const toNav = camera.mode !== "FOLLOW_NAV";
+  camera.mode = toNav ? "FOLLOW_NAV" : "FOLLOW";
+  el.btnNavToggle.classList.toggle("active", toNav);
+});
 
 function toggleControl() {
   const followed = getFollowedTruck();
@@ -255,7 +266,7 @@ el.settingDefaultSpeed.addEventListener("input", (e) => {
 });
 
 el.btnSettingsApply.addEventListener("click", () => {
-  const fleetSize = Math.max(10, Math.min(2000, parseInt(el.settingFleetSize.value, 10) || DEFAULT_SETTINGS.fleetSize));
+  const fleetSize = Math.max(10, Math.min(5000, parseInt(el.settingFleetSize.value, 10) || DEFAULT_SETTINGS.fleetSize));
   const newSettings = {
     fleetSize,
     startSeconds: parseInt(el.settingStartTime.value, 10),
@@ -292,6 +303,8 @@ function bootSim(newSettings) {
   el.timeSlider.value = String(settings.defaultTimeScale);
   el.timeReadout.textContent = settings.defaultTimeScale.toFixed(1) + "x";
   el.btnExitFollow.classList.add("hidden");
+  el.btnNavToggle.classList.add("hidden");
+  el.btnNavToggle.classList.remove("active");
   el.decisionOverlay.classList.add("hidden");
   el.fleetCount.textContent = `${trucks.length} UNITS`;
 
@@ -345,9 +358,21 @@ function frame(now) {
     }
 
     const followed = getFollowedTruck();
-    if (camera.mode === "FOLLOW" && followed) {
+    const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";
+    if (isFollowMode && followed) {
       camera.followTarget = truckWorldPos(graph, followed);
-    } else if (camera.mode === "FOLLOW" && !followed) {
+      // Hold the last known heading while the truck is stopped/between
+      // edges (edge briefly null) rather than snapping to 0 - avoids a
+      // spurious rotation flash right as a truck departs/arrives a city.
+      if (followed.edge) camera.targetHeading = (followed.edge.bearing * Math.PI) / 180;
+    } else if (isFollowMode && !followed) {
+      unfollow();
+    } else if (!isFollowMode && state.followedTruckId != null) {
+      // Camera dropped to FREE on its own (a drag on the canvas calls
+      // camera.js's own internal unfollow() directly, decoupled from
+      // this outer unfollow() which owns the HUD button visibility) -
+      // resync state/UI to match rather than leaving stale RELEASE/NAV
+      // VIEW buttons showing for a camera that's no longer following.
       unfollow();
     }
     camera.update();

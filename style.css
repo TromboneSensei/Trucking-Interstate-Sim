@@ -90,6 +90,12 @@ html, body {
   cursor: pointer;
 }
 .pill-btn:active { transform: scale(0.96); }
+
+/* Nav-view toggle - neutral until engaged (unlike the red "release"
+   button, this isn't a destructive action), amber/active to match the
+   chip/tab "currently selected" convention used elsewhere. */
+#btn-nav-toggle { background: var(--panel-strong); color: var(--ink); }
+#btn-nav-toggle.active { background: var(--caution); color: var(--caution-ink); }
 .hidden { display: none !important; }
 
 /* Settings gear - top-right, outside #hud's centered flex column so it

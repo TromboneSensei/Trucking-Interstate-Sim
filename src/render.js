@@ -7,6 +7,7 @@
 // against camera.baseZoom (the initial fit-to-screen zoom set by main.js).
 import { WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { STATE_BORDER_RINGS } from "./states-data.js";
+import { TILT_FACTOR } from "./camera.js";
 
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
 const ROAD_COLOR = { interstate: "rgba(120, 150, 190, 0.55)", highway: "rgba(160, 130, 90, 0.4)" };
@@ -131,7 +132,10 @@ export function renderStaticBackground(graph, opts = {}) {
 // scale naturally with zoom, same as everything else on the map.
 // `showAllLabels` (a settings toggle) bypasses the zoom gating entirely -
 // every tier renders regardless of how zoomed out the camera is.
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels) {
+// `counterRotation` (radians, 0 outside FOLLOW_NAV) cancels out the
+// camera's own rotation for each label individually so text stays
+// upright and readable while the world spins around it underneath.
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation) {
   ctx.textAlign = "center";
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
@@ -143,7 +147,15 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels) {
     const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
     ctx.font = `600 ${LABEL_FONT_PX[node.t]}px "Oswald", sans-serif`;
     ctx.fillStyle = LABEL_COLOR[node.t];
-    ctx.fillText(node.name, node.x, node.y - radius - 5);
+    if (counterRotation) {
+      ctx.save();
+      ctx.translate(node.x, node.y - radius - 5);
+      ctx.rotate(counterRotation);
+      ctx.fillText(node.name, 0, 0);
+      ctx.restore();
+    } else {
+      ctx.fillText(node.name, node.x, node.y - radius - 5);
+    }
   }
 }
 
@@ -187,13 +199,15 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   ctx.fillRect(0, 0, w, h);
 
   const center = camera.visualCenter();
+  const nav = camera.mode === "FOLLOW_NAV";
   ctx.save();
   ctx.translate(center.x, center.y);
-  ctx.scale(camera.zoom, camera.zoom);
+  if (nav) ctx.rotate(-camera.heading);
+  ctx.scale(camera.zoom, nav ? camera.zoom * TILT_FACTOR : camera.zoom);
   ctx.translate(-camera.x, -camera.y);
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0);
 
   // The dashed remaining-route line walks the real A* edge list - but
   // `remainingPath` only holds the hops AFTER the truck's current edge

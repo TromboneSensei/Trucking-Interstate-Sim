@@ -1,12 +1,29 @@
-// camera.js - flat top-down pan/zoom camera with a FREE (user-driven) mode
-// and a FOLLOW mode that smoothly centers on a target (a truck). No
-// rotation-to-heading: this is a satellite-style map, not a chase cam.
+// camera.js - flat top-down pan/zoom camera with a FREE (user-driven) mode,
+// a FOLLOW mode that smoothly centers on a target (a truck), and a
+// FOLLOW_NAV mode - a tilted, heading-aligned "chase cam" that rotates so
+// the followed truck's current direction of travel always points toward
+// the top of the screen, turn-by-turn-nav-app style.
 "use strict";
 
 const TAP_MOVE_THRESHOLD = 8; // px
 const TAP_MAX_DURATION = 300; // ms
 const FOLLOW_LERP = 0.08;
 const FOLLOW_ZOOM = 2.4;
+const HEADING_LERP = 0.08; // matches FOLLOW_LERP - no reason to diverge initially
+export const TILT_FACTOR = 0.62; // Y-axis compression in FOLLOW_NAV, faking a tilted viewing angle - exported: render.js's drawFrame needs the exact value
+
+// Plain linear easing breaks at the 0/2*PI wrap (e.g. easing from 350deg
+// to 10deg must go forward through 360deg, not backward through 180deg) -
+// this always returns the shorter signed delta regardless of how far
+// `from` has drifted outside [0, 2*PI) (it never needs renormalizing;
+// sin/cos are happy with an unbounded angle and this is recomputed fresh
+// every tick anyway).
+function shortestAngleDelta(from, to) {
+  let d = (to - from) % (2 * Math.PI);
+  if (d > Math.PI) d -= 2 * Math.PI;
+  if (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
 
 export class Camera {
   constructor(canvas, { x = 0, y = 0, zoom = 0.3, minZoom = 0.05, maxZoom = 6, onTap = null } = {}) {
@@ -17,16 +34,34 @@ export class Camera {
     this.baseZoom = zoom; // the initial fit-to-screen zoom; render.js keys city-label tiers off this
     this.minZoom = minZoom;
     this.maxZoom = maxZoom;
-    this.mode = "FREE"; // "FREE" | "FOLLOW"
+    this.mode = "FREE"; // "FREE" | "FOLLOW" | "FOLLOW_NAV"
     this.followTarget = null;
     this.onTap = onTap;
     this.visualCenterYRatio = 0.42; // bias the focal point up so the bottom sheet doesn't cover it
+    // FOLLOW_NAV pushes the pivot further down than flat FOLLOW's 0.42 -
+    // the truck sits lower on screen, leaving more room above it for the
+    // road ahead (which always renders toward the top once rotated).
+    // Capped well under ~0.55: the bottom sheet covers roughly the
+    // bottom 45% of the viewport (see main.js's fitZoom, which reserves
+    // the same 55% for the map), so a ratio much past that hides the
+    // truck's own dot underneath the sheet - confirmed by an actual
+    // rendered screenshot during implementation, not just arithmetic.
+    this.visualCenterYRatioNav = 0.48;
+
+    // FOLLOW_NAV-only state: `heading` is the currently-rendered camera
+    // rotation (radians, same compass convention as edge.bearing - 0deg
+    // north, clockwise), eased each update() toward `targetHeading` (set
+    // by main.js from the followed truck's current edge bearing).
+    // Meaningless/unused outside FOLLOW_NAV.
+    this.heading = 0;
+    this.targetHeading = 0;
 
     this._bindInput();
   }
 
   visualCenter() {
-    return { x: this.canvas.clientWidth / 2, y: this.canvas.clientHeight * this.visualCenterYRatio };
+    const ratio = this.mode === "FOLLOW_NAV" ? this.visualCenterYRatioNav : this.visualCenterYRatio;
+    return { x: this.canvas.clientWidth / 2, y: this.canvas.clientHeight * ratio };
   }
 
   screenToWorld(sx, sy) {
@@ -54,10 +89,13 @@ export class Camera {
   }
 
   update() {
-    if (this.mode === "FOLLOW" && this.followTarget) {
+    if ((this.mode === "FOLLOW" || this.mode === "FOLLOW_NAV") && this.followTarget) {
       this.x += (this.followTarget.x - this.x) * FOLLOW_LERP;
       this.y += (this.followTarget.y - this.y) * FOLLOW_LERP;
       this.zoom += (FOLLOW_ZOOM - this.zoom) * FOLLOW_LERP;
+    }
+    if (this.mode === "FOLLOW_NAV") {
+      this.heading += shortestAngleDelta(this.heading, this.targetHeading) * HEADING_LERP;
     }
   }
 
@@ -77,7 +115,7 @@ export class Camera {
     const startDrag = (sx, sy) => {
       dragging = true; moved = false; tapStart = Date.now();
       lastX = sx; lastY = sy;
-      if (this.mode === "FOLLOW") this.unfollow();
+      if (this.mode === "FOLLOW" || this.mode === "FOLLOW_NAV") this.unfollow();
     };
     const doDrag = (sx, sy) => {
       const dx = sx - lastX, dy = sy - lastY;
