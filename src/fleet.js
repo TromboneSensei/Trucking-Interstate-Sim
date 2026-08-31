@@ -225,19 +225,29 @@ export function spawnFleet(graph, count, rnd = Math.random) {
 // `edge` and are excluded) by directed edge and lane, sorted ascending
 // by progress along the edge. Rebuilt fresh every updateFleet tick from
 // that tick's pre-move snapshot, so decisions are deterministic and
-// never see another truck's already-updated-this-tick position. Cheap
-// at this fleet size (~150 trucks over hundreds of directed edges, most
-// groups holding 0-2 trucks) - the seam to revisit if the fleet ever
-// scales into the thousands is here: swap this per-tick rebuild for a
-// persistent per-edge/lane structure incrementally updated as trucks
-// cross thresholds, rather than reworking anything above it.
+// never see another truck's already-updated-this-tick position. Each
+// group also carries the shared `edge` object itself (every truck sharing
+// an edgeId is on the same physical road segment, so `.kind`/`.miles`/etc
+// are identical across the group) - downstream per-tick passes
+// (clampOverlaps, updateFleet's Phase 1) reuse this same Map instead of
+// re-deriving their own grouping, which is the thing that used to make
+// this "the seam to revisit if the fleet ever scales into the
+// thousands" - it since has, so that redundant rebuild is gone now.
+// IMPORTANT: the ascending sort is only valid at THIS moment (before any
+// truck moves this tick) - different trucks integrate different distances
+// in Phase 2, which can and does reorder their relative `.s` within a
+// lane by the time later phases run (confirmed empirically during
+// verification). Phase 1 runs immediately after this and never mutates
+// `.s`, so it's safe to trust this order - anything reading `lane0`/
+// `lane1` AFTER Phase 2 has run (clampOverlaps) must re-sort by current
+// `.s` rather than trusting this snapshot's order.
 function buildLaneGroups(trucks) {
   const groups = new Map();
   for (const truck of trucks) {
     if (!truck.edge) continue;
     const key = edgeId(truck.edge);
     let g = groups.get(key);
-    if (!g) { g = { lane0: [], lane1: [] }; groups.set(key, g); }
+    if (!g) { g = { lane0: [], lane1: [], edge: truck.edge }; groups.set(key, g); }
     (truck.lane === 1 ? g.lane1 : g.lane0).push(truck);
   }
   for (const g of groups.values()) {
@@ -267,15 +277,25 @@ function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
 
 // Car-following + passing, interstate edges only. Reads/mutates the
 // truck's lane state and returns an additional speed cap (Infinity if
-// nothing ahead is a factor).
-function applyFollowAndPassing(graph, truck, laneGroups, cruiseTargetSpeed) {
+// nothing ahead is a factor). `leaderMap` (built once per tick by
+// updateFleet's Phase 1, before any truck's state changes) gives O(1)
+// leader lookup instead of the `ownArr.indexOf(truck)` rescan this used to
+// do - deliberately NOT restructured to iterate lane arrays directly
+// instead of `trucks`: Phase 1 mutates each truck's own `.speed` in
+// place as it goes, and a follower's cap here reads its leader's
+// `.speed` LIVE - so which trucks have or haven't been processed yet
+// this same tick (i.e. `trucks`-array iteration order specifically)
+// silently affects the result. Confirmed by exact-match testing against
+// the pre-refactor baseline: an earlier version of this change iterated
+// lane arrays instead (back-to-front by position) and produced a
+// systematically different simulation, not just an occasional tie.
+// Preserving the exact original iteration order was necessary for a
+// true behavior-preserving optimization here.
+function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTargetSpeed) {
   if (truck.edge.kind !== "interstate") return Infinity;
   const group = laneGroups.get(edgeId(truck.edge));
   if (!group) return Infinity;
-
-  const ownArr = truck.lane === 1 ? group.lane1 : group.lane0;
-  const idx = ownArr.indexOf(truck);
-  const leader = idx >= 0 && idx + 1 < ownArr.length ? ownArr[idx + 1] : null;
+  const leader = leaderMap.get(truck) || null;
 
   const safeMi = minSafeMiles(graph, truck.edge);
   const gapToLeader = leader ? leader.s - truck.s : Infinity;
@@ -468,21 +488,29 @@ function crossLaneTarget(laneTA, laneTB) {
 // out. A truck clamped back below its edge's length simply arrives a
 // tick later than it otherwise would (a realistic "stuck behind stopped
 // traffic" outcome).
-function clampOverlaps(graph, trucks) {
-  const groups = new Map();
-  for (const truck of trucks) {
-    if (!truck.edge || truck.edge.kind !== "interstate") continue;
-    const key = edgeId(truck.edge);
-    let arr = groups.get(key);
-    if (!arr) { arr = []; groups.set(key, arr); }
-    arr.push(truck);
-  }
-  for (const arr of groups.values()) {
-    if (arr.length < 2) continue;
-    arr.sort((a, b) => b.s - a.s); // front of the line first
-    const unitsPerMile = worldUnitsPerMile(graph, arr[0].edge);
-    for (let i = 1; i < arr.length; i++) {
-      const ahead = arr[i - 1], behind = arr[i];
+// Takes the tick's already-built `laneGroups` (same Map updateFleet's
+// Phase 1 uses) instead of re-deriving its own grouping from `trucks` -
+// still avoids the full O(n) Map-rebuild-from-`trucks` every tick (group
+// MEMBERSHIP by edge doesn't change mid-tick), but each group's `lane0`/
+// `lane1` were only sorted once, at the top of updateFleet, BEFORE Phase 1
+// (speed decisions) and Phase 2 (position integration) ran - different
+// trucks move different distances this same tick, which can and does
+// reorder their relative `.s` within a lane before clampOverlaps runs
+// (confirmed empirically: two same-lane trucks swapped relative order
+// within a single tick during verification). So this still needs a fresh
+// sort by CURRENT `.s`, not a merge that trusts the stale buildLaneGroups
+// order - a merge would silently process pairs in the wrong order.
+function clampOverlaps(graph, laneGroups) {
+  for (const group of laneGroups.values()) {
+    if (group.edge.kind !== "interstate") continue;
+    if (group.lane0.length + group.lane1.length < 2) continue;
+    const ascending = [...group.lane0, ...group.lane1].sort((a, b) => a.s - b.s);
+    const unitsPerMile = worldUnitsPerMile(graph, group.edge);
+    // Walk front-to-back (highest `.s` first) by iterating the ascending
+    // merge in reverse - equivalent to the original's fresh descending
+    // sort, without building a second array.
+    for (let i = ascending.length - 1; i > 0; i--) {
+      const ahead = ascending[i], behind = ascending[i - 1];
       const target = crossLaneTarget(ahead.laneT, behind.laneT);
       const perpGap = Math.abs(laneOffset(ahead) - laneOffset(behind));
       if (perpGap >= target) continue; // laterally clear regardless of along-edge gap
@@ -508,14 +536,29 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck) {
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
   const laneGroups = buildLaneGroups(trucks);
 
+  // Precomputed once per tick, before Phase 1 mutates anything: each
+  // truck's leader (the next entry in its lane array, or null), from the
+  // same fresh laneGroups snapshot Phase 1 already relies on. O(1) lookup
+  // per truck in Phase 1 below instead of the old `ownArr.indexOf(truck)`
+  // rescan - built here (rather than inline per-truck) specifically so
+  // Phase 1's own iteration order over `trucks` doesn't change (see the
+  // long comment on applyFollowAndPassing for why that order matters).
+  const leaderMap = new Map();
+  for (const group of laneGroups.values()) {
+    for (const lane of [group.lane0, group.lane1]) {
+      for (let i = 0; i < lane.length - 1; i++) leaderMap.set(lane[i], lane[i + 1]);
+    }
+  }
+
   // Phase 1: decide each truck's target speed/lane and ease toward it -
-  // reads other trucks' pre-move positions (laneGroups), same as before.
+  // reads other trucks' pre-move positions (laneGroups/leaderMap), same
+  // as before.
   for (const truck of trucks) {
     if (truck.awaitingDecision || truck.pendingEdge || !truck.edge) continue;
 
     let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult;
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
-    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, targetSpeed));
+    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed));
 
     const rate = targetSpeed >= truck.speed ? truck.driver.accelRate : truck.driver.decelRate;
     truck.speed += (targetSpeed - truck.speed) * Math.min(1, dt * rate);
@@ -532,7 +575,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck) {
 
   // Phase 3: hard anti-overlap clamp on the post-move positions (see
   // clampOverlaps above for why this can't just be folded into phase 1).
-  clampOverlaps(graph, trucks);
+  clampOverlaps(graph, laneGroups);
 
   // Phase 4: arrivals, junction decisions, and departures, using the
   // final (clamped) positions - unchanged from before this restructuring.

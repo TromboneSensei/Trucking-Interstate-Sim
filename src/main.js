@@ -58,6 +58,11 @@ const graph = buildGraph();
 let settings = { ...DEFAULT_SETTINGS };
 let bgCanvas = null;
 let trucks = [];
+// id -> truck lookup, rebuilt once whenever `trucks` itself is rebuilt
+// (bootSim only) rather than re-scanned with .find() every frame - ids are
+// assigned once (Truck constructor's nextId++) and never reused, so the
+// cache stays valid for the whole life of a fleet.
+let truckById = new Map();
 
 const state = {
   paused: false, // true only while a junction decision is pending (see showDecisionPanel/resolveDecision)
@@ -81,11 +86,11 @@ const state = {
 };
 
 function getFollowedTruck() {
-  return state.followedTruckId == null ? null : trucks.find((t) => t.id === state.followedTruckId) || null;
+  return state.followedTruckId == null ? null : truckById.get(state.followedTruckId) || null;
 }
 
 function getControlledTruck() {
-  return state.controlledTruckId == null ? null : trucks.find((t) => t.id === state.controlledTruckId) || null;
+  return state.controlledTruckId == null ? null : truckById.get(state.controlledTruckId) || null;
 }
 
 // ---------------------------------------------------------------------
@@ -289,6 +294,7 @@ function bootSim(newSettings) {
 
   bgCanvas = renderStaticBackground(graph, settings);
   trucks = spawnFleet(graph, settings.fleetSize);
+  truckById = new Map(trucks.map((t) => [t.id, t]));
 
   state.paused = false;
   state.settingsOpen = false;
@@ -387,7 +393,7 @@ function frame(now) {
     // frame-rate smoothness, and re-scanning all trucks for them every
     // frame would be wasted work for numbers no one watches that closely).
     if (state.detailsView && state.detailsView.kind === "truck") {
-      const t = trucks.find((tt) => tt.id === state.detailsView.id);
+      const t = truckById.get(state.detailsView.id);
       if (t) refreshFollowedTruckDetails(t, state.controlledTruckId === t.id);
     }
 
