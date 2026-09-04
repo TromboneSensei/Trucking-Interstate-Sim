@@ -309,14 +309,29 @@ export function findPath(graph, startName, goalName) {
 // across that span (the west is always earlier), so sunset visibly
 // crosses the country instead of the whole map flipping at once.
 // ---------------------------------------------------------------------
+// A full west-to-east sweep of the map takes TERMINATOR_SWEEP_MIN. New
+// York and Los Angeles sit 74.98% of the map width apart, so 240 minutes
+// end to end puts exactly 180 - three game-hours - between sunset in NYC
+// and sunset in LA, which is the intended pacing.
 export const TERMINATOR_SWEEP_MIN = 240;
-export const DAWN_MIN = 6 * 60;   // 06:00 - full daylight from here
-export const DUSK_MIN = 19 * 60;  // 19:00 - darkness starts accumulating
-const NIGHT_LEN = 1440 - (DUSK_MIN - DAWN_MIN); // 660
+
+// The sim clock is East Coast time, so the terminator is anchored on NEW
+// YORK rather than on the map's eastern edge. That edge is lon -66, out
+// past Maine; anchoring there made NYC reach its own local dusk about 33
+// minutes after the HUD clock read 7pm. With this offset, local time at
+// NYC is exactly the game clock, so dusk lands at 19:00 and dawn at 07:00
+// on the nose, and LA follows three hours later.
+const ANCHOR_LON = -74.006; // New York City
+const ANCHOR_PCT_WEST = 1 - (ANCHOR_LON - WORLD_BOUNDS.minLon) / (WORLD_BOUNDS.maxLon - WORLD_BOUNDS.minLon);
+
+export const DAWN_MIN = 7 * 60;   // 07:00 in NYC - full daylight from here
+export const DUSK_MIN = 19 * 60;  // 19:00 in NYC - darkness starts accumulating
+const NIGHT_LEN = 1440 - (DUSK_MIN - DAWN_MIN); // 720
 export const NIGHT_DARKNESS_MAX = 0.65;
 
-// Mean of rawDarknessAtX over a full 24h cycle: 0 for (1440-660)/1440 of
-// the day, and a half-sine (mean 2/PI of its peak) for the rest.
+// Mean of rawDarknessAtX over a full 24h cycle: 0 for the 720-minute
+// daylight window, and a half-sine (mean 2/PI of its peak) for the
+// NIGHT_LEN minutes either side of it.
 const AVG_DARKNESS = NIGHT_DARKNESS_MAX * (2 / Math.PI) * (NIGHT_LEN / 1440);
 
 // Minute-of-day [0, 1440) at a given world X - i.e. the LOCAL clock at
@@ -324,7 +339,9 @@ const AVG_DARKNESS = NIGHT_DARKNESS_MAX * (2 / Math.PI) * (NIGHT_LEN / 1440);
 // it here" both actually depend on.
 export function localMinutesAtX(worldX, gameSeconds) {
     const pctWest = 1 - worldX / WORLD_WIDTH;
-    let m = (gameSeconds / 60 - pctWest * TERMINATOR_SWEEP_MIN) % 1440;
+    // Offset relative to the NYC anchor, so local time AT NYC is exactly
+    // the game clock and everywhere west of it runs correspondingly behind.
+    let m = (gameSeconds / 60 - (pctWest - ANCHOR_PCT_WEST) * TERMINATOR_SWEEP_MIN) % 1440;
     if (m < 0) m += 1440;
     return m;
 }

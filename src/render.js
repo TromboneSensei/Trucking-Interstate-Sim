@@ -127,7 +127,12 @@ const LABEL_TIER_ZOOM_MULT = { 1: 1.0, 2: 1.7, 3: 3.2, 4: 5.5 };
 // tier directly above it (20*0.75=15, 15*0.75=11.25->11, 11*0.75=8.25->8) -
 // a steeper cascade than the old {25,24,23,22}.
 const LABEL_FONT_PX = { 1: 20, 2: 15, 3: 11, 4: 8 };
-const LABEL_COLOR = { 1: "#ffffff", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" }; // tier1 fully white; 2-4 stay the existing off-white-to-grey cascade
+// Every tier is pure white. The old off-white-to-grey cascade was tuned
+// against a near-black basemap; against the filled slate landmass and the
+// grey asphalt bands the lower tiers greyed out into the terrain. Tier is
+// still legible from the LABEL_FONT_PX size cascade, so brightness doesn't
+// need to carry that distinction too.
+const LABEL_COLOR = { 1: "#ffffff", 2: "#ffffff", 3: "#ffffff", 4: "#ffffff" };
 const OFF_ROUTE_LABEL_SCALE = 0.7; // additional shrink for labels not on the followed truck's route ahead
 const ROUTE_HIGHLIGHT_COLOR = "rgba(232, 163, 61, 0.85)"; // same amber as the dashed route-preview line/waypoint dots
 
@@ -142,17 +147,26 @@ const ROUTE_HIGHLIGHT_COLOR = "rgba(232, 163, 61, 0.85)"; // same amber as the d
 // alpha 0 at midday means the baked basemap shows through completely
 // untinted - i.e. the bake IS the noon look and everything else grades
 // away from it. Wraps around midnight.
+// Deliberately three legible phases rather than a continuous smear:
+// a flat untinted DAY, a narrow strongly-warm DUSK/DAWN band that sweeps
+// across the country, and a deep near-black NIGHT. Alpha 0 through the
+// middle of the day means the baked basemap shows through completely, so
+// "day" is unambiguously the bright state; the warm band is short and
+// saturated so the sweep is unmistakable as it crosses; night is heavy
+// enough to read as genuinely dark. Times are LOCAL minutes, so with the
+// NYC anchor in geo.js the 19:00 peak is sunset in New York exactly.
 const SKY_KEYFRAMES = [
-  [0,    6,  12, 28, 0.72], // midnight - deep blue-black
-  [300,  10, 18, 42, 0.66], // 05:00 pre-dawn, slightly bluer
-  [375,  58, 42, 62, 0.44], // 06:15 civil twilight, violet
-  [435, 158, 96, 48, 0.30], // 07:15 sunrise gold
-  [540, 120, 124, 132, 0.08], // 09:00 morning haze, nearly clear
-  [720, 255, 255, 255, 0.0],  // 12:00 noon - untinted
-  [1020, 138, 120, 100, 0.07], // 17:00 warm afternoon
-  [1110, 176, 92, 34, 0.30],  // 18:30 sunset gold
-  [1170, 74,  42, 66, 0.48],  // 19:30 dusk violet
-  [1290, 6,   12, 28, 0.72],  // 21:30 full night
+  [0,     4,   8,  20, 0.80], // 00:00 deep night
+  [300,   4,   8,  20, 0.80], // 05:00 still deep night
+  [375,  34,  28,  56, 0.64], // 06:15 first violet light
+  [420, 198, 108,  46, 0.44], // 07:00 DAWN - peak warm, sweeps west
+  [480, 150, 122,  92, 0.15], // 08:00 warm morning fading out
+  [540, 255, 255, 255, 0.0],  // 09:00 full day begins
+  [1020, 255, 255, 255, 0.0], // 17:00 full day ends
+  [1080, 158, 118,  72, 0.16],// 18:00 warm late afternoon
+  [1140, 208,  98,  34, 0.46],// 19:00 DUSK - peak warm, sweeps west
+  [1200,  86,  44,  62, 0.64],// 20:00 violet twilight
+  [1290,   4,   8,  20, 0.80],// 21:30 full night
 ];
 
 // Interpolated sky tint at a local minute-of-day, as {r,g,b,a}.
@@ -510,8 +524,17 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
     for (const kind of ["highway", "interstate"]) {
       const list = visible[kind], idxs = visibleIdx[kind];
       if (!list.length) continue;
-      const half = kind === "interstate" ? BAND_HALF : HWY_BAND_HALF;
-      const wide = half * 2 * k + (SIMPLE_PX[kind] / camera.zoom) * (1 - k);
+      // Paint the SHOULDERS, not the full carriageway: two strokes sitting
+      // on the paved shoulder either side, leaving the travel lanes (and
+      // the trucks in them) clearly visible through the middle. Offsets
+      // are the true shoulder centreline in world units so they stay
+      // locked to the road geometry at every zoom; the width only gets a
+      // screen-space floor so the strokes never vanish sub-pixel when
+      // zoomed out to the whole country.
+      const fogOff = kind === "interstate" ? FOG_OFFSET : HWY_FOG;
+      const bandHalf = kind === "interstate" ? BAND_HALF : HWY_BAND_HALF;
+      const shoulderCentre = (fogOff + bandHalf) / 2;
+      const shoulderW = Math.max(bandHalf - fogOff, 1.4 / camera.zoom);
       for (let bi = CONGESTION_BANDS.length - 1; bi >= 0; bi--) {
         const band = CONGESTION_BANDS[bi];
         const next = CONGESTION_BANDS[bi + 1];
@@ -522,12 +545,14 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
           const d = (counts[idxs[j]] / e.len) * 100; // trucks per 100 world units
           if (d < lo || d >= hi) continue;
           if (!started) { ctx.beginPath(); started = true; }
-          ctx.moveTo(e.ax, e.ay);
-          ctx.lineTo(e.bx, e.by);
+          ctx.moveTo(e.ax + e.px * shoulderCentre, e.ay + e.py * shoulderCentre);
+          ctx.lineTo(e.bx + e.px * shoulderCentre, e.by + e.py * shoulderCentre);
+          ctx.moveTo(e.ax - e.px * shoulderCentre, e.ay - e.py * shoulderCentre);
+          ctx.lineTo(e.bx - e.px * shoulderCentre, e.by - e.py * shoulderCentre);
         }
         if (started) {
           ctx.strokeStyle = band.color;
-          ctx.lineWidth = wide;
+          ctx.lineWidth = shoulderW;
           ctx.stroke();
         }
       }
