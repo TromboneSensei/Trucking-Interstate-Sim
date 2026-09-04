@@ -1,24 +1,22 @@
-// render.js - static background (roads + city dots, drawn once to an
-// offscreen canvas) plus a per-frame dynamic layer (city labels, truck
-// dots, selection ring, followed-truck route highlight). Roads/dots never
-// move, so re-rendering them every frame would be wasted work at any
-// fleet size. Labels DO need to be dynamic: which tiers are visible
-// depends on the live camera zoom, so they're drawn fresh each frame
-// against camera.baseZoom (the initial fit-to-screen zoom set by main.js).
-import { WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
+// render.js - static background (bg fill + state borders, drawn once to an
+// offscreen canvas) plus a per-frame dynamic layer: roads, city dots, a
+// day/night terminator + city-light glow, city labels, truck dots,
+// selection ring, and the followed-truck route highlight. Roads and city
+// dots used to be baked into the static bitmap, but day/night needs to
+// recolor them every frame and the old 1.5x-scaled bitmap was already
+// visibly soft at FOLLOW_ZOOM - both now render fresh each frame from a
+// flat edge list built once at boot. Labels also stay dynamic: which
+// tiers are visible depends on the live camera zoom, drawn fresh each
+// frame against camera.baseZoom (the initial fit-to-screen zoom set by
+// main.js).
+import { WORLD_WIDTH, WORLD_HEIGHT, hashStr, mulberry32 } from "./geo.js";
 import { STATE_BORDER_RINGS } from "./states-data.js";
 import { TILT_FACTOR } from "./camera.js";
 import { TRUCK_TYPES } from "./economy.js";
 
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
-// Interstate blue and US-highway orange - the classic road-sign colors,
-// instead of the earlier desaturated grey-blue/tan. Kept distinct from
-// both the route-preview amber (rgba(232,163,61,...)) and the Flatbed
-// truck-type orange (#d97706) so none of the three read as the same color.
-const ROAD_COLOR = { interstate: "rgba(45, 110, 210, 0.75)", highway: "rgba(214, 122, 40, 0.55)" };
-const ROAD_WIDTH = { interstate: 3.2, highway: 1.8 };
 const STATE_BORDER_COLOR = "rgba(255, 255, 255, 0.85)"; // bright white, high opacity so it reads clearly against the dark basemap
-const STATE_BORDER_WIDTH = 1.6; // another step up from last round's 1.2
+const STATE_BORDER_WIDTH = 1.6;
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
 export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
 
@@ -34,8 +32,47 @@ export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passi
 // CROSS_LANE_TARGET_WORLD_UNITS there.
 export const LEFT_LANE_OFFSET = TRUCK_DOT_RADIUS + 1; // exported: fleet.js's overlap clamp needs the exact rendered offset
 export const RIGHT_LANE_OFFSET = LEFT_LANE_OFFSET + 2 * TRUCK_DOT_RADIUS - 2;
-const MEDIAN_COLOR = "rgba(235, 225, 200, 0.45)";
-const MEDIAN_WIDTH = 0.5;
+
+// ---------------------------------------------------------------------
+// Road geometry - every offset below is arithmetic on the lane constants
+// above, never a bare number, so the drawn pavement can never drift out
+// of sync with where trucks actually paint. A truck riding the right
+// (default) lane sits at RIGHT_LANE_OFFSET (9.5) with its dot extending
+// to RIGHT_LANE_OFFSET + TRUCK_DOT_RADIUS = 13.0 world units from the
+// centerline - FOG_OFFSET below is exactly that value, so the truck's
+// outer edge is tangent to the fog/edge line by construction.
+// ---------------------------------------------------------------------
+const MEDIAN_GAP = LEFT_LANE_OFFSET - TRUCK_DOT_RADIUS; // 1.0 - centerline -> inner edge of the passing lane
+const FOG_OFFSET = RIGHT_LANE_OFFSET + TRUCK_DOT_RADIUS; // 13.0 - outer edge of the travel lane == white edge line
+const SHOULDER_W = 4.0; // paved shoulder beyond the fog line
+const BAND_HALF = FOG_OFFSET + SHOULDER_W; // 17.0 - half-width of the full asphalt band
+// Highways: truckWorldPos applies no lane offset for kind !== "interstate"
+// (single-file, centerline), so their band is derived narrower/simpler.
+const HWY_FOG = TRUCK_DOT_RADIUS + 1.5; // 5.0
+const HWY_BAND_HALF = HWY_FOG + 3.0; // 8.0
+
+const ROAD_DAY = {
+  interstate: { band: "rgba(85, 110, 140, 0.95)", shoulder: "#60a5fa", fog: "#94a3b8", median: "#ffd700" },
+  highway: { band: "rgba(120, 95, 70, 0.9)", shoulder: "#fb923c", fog: "#94a3b8" },
+};
+const ROAD_NIGHT = {
+  interstate: { band: "rgba(170, 205, 230, 0.90)", shoulder: "#60a5fa", fog: "#94a3b8", median: "#ffd700" },
+  highway: { band: "rgba(150, 120, 95, 0.85)", shoulder: "#fb923c", fog: "#94a3b8" },
+};
+// Simplified (zoomed-out) atlas-style single line per road kind, day/night
+// tinted the same as the full band's asphalt color.
+const SIMPLE_PX = { interstate: 2.2, highway: 1.4 };
+
+// Zoom thresholds for the road LOD cross-fade, expressed in *screen*
+// pixels of full band width (BAND_HALF*2 = 34 world units) so they are
+// resolution-independent rather than tied to a specific camera.zoom
+// number. Comfortably above every fitZoom() (~0.09-0.20) and below
+// FOLLOW_ZOOM (2.4), so whole-country views stay simplified and
+// follow/nav views always render full detail.
+const DETAIL_MIN_PX = 18; // band width in screen px below which only the simple line renders
+const DETAIL_FULL_PX = 34; // band width in screen px above which only full detail renders
+
+const MEDIAN_WIDTH = 0.7;
 
 // Viewport-cull padding for the per-truck draw loop, in world units - only
 // covers the dot's own footprint (radius + selection ring + stroke), tied
@@ -45,6 +82,9 @@ const MEDIAN_WIDTH = 0.5;
 // isn't drawn - false positives (drawing a couple extra off-screen trucks)
 // are fine, false negatives (clipping a truck that should be visible) are not.
 const CULL_PAD_WORLD_UNITS = TRUCK_DOT_RADIUS + 8;
+// Wider cull pad for roads/city dots - the drawn band extends BAND_HALF
+// (17) world units off each edge's centerline, not just a dot's footprint.
+const ROAD_CULL_PAD_WORLD_UNITS = BAND_HALF + 8;
 
 // One draw bucket per cargo/truck-type color (7 distinct colors today, see
 // economy.js's TRUCK_TYPES) - built once at module scope, cleared and
@@ -66,8 +106,119 @@ const LABEL_COLOR = { 1: "#ffffff", 2: "#d8dde4", 3: "#a9b2bf", 4: "#8994a3" }; 
 const OFF_ROUTE_LABEL_SCALE = 0.7; // additional shrink for labels not on the followed truck's route ahead
 const ROUTE_HIGHLIGHT_COLOR = "rgba(232, 163, 61, 0.85)"; // same amber as the dashed route-preview line/waypoint dots
 
+// ---------------------------------------------------------------------
+// Day/night
+// ---------------------------------------------------------------------
+// World x=0 is lon -125 (west), x=WORLD_WIDTH is lon -66 (east) - a 59deg
+// span, ~3.93 hours of solar time. TERMINATOR_SWEEP_MIN sweeps local time
+// across that span (west is earlier), so the terminator visibly crosses
+// the map instead of the whole country flipping day/night at once.
+const TERMINATOR_SWEEP_MIN = 240;
+const DAWN_MIN = 6 * 60, DUSK_MIN = 19 * 60;
+const NIGHT_LEN = 1440 - (DUSK_MIN - DAWN_MIN); // 660
+export const NIGHT_DARKNESS_MAX = 0.65;
+// Mean of rawDarknessAtX over a full 24h cycle: darkness is 0 for
+// (1440-660)/1440 of the day and a half-sine (mean 2/PI of its peak) for
+// the rest - NIGHT_DARKNESS_MAX * (2/PI) * (NIGHT_LEN/1440).
+const AVG_DARKNESS = NIGHT_DARKNESS_MAX * (2 / Math.PI) * (NIGHT_LEN / 1440);
+
+// Local darkness [0, NIGHT_DARKNESS_MAX] at a given world X and game-clock
+// time, independent of the time-scale strobing concern below - this is
+// the "true" instantaneous value straight off the HUD clock.
+export function rawDarknessAtX(worldX, gameSeconds) {
+  const pctWest = 1 - worldX / WORLD_WIDTH;
+  let m = (gameSeconds / 60 - pctWest * TERMINATOR_SWEEP_MIN) % 1440;
+  if (m < 0) m += 1440;
+  if (m >= DAWN_MIN && m < DUSK_MIN) return 0;
+  const p = m >= DUSK_MIN ? m - DUSK_MIN : m + 1440 - DUSK_MIN;
+  return Math.sin((p / NIGHT_LEN) * Math.PI) * NIGHT_DARKNESS_MAX;
+}
+
+// At 1x, a full game day passes in 36 real seconds (BASE_TIME_SCALE=2400s
+// per real second); at the settings slider's 8x cap, 4.5 real seconds -
+// undamped, the sky would visibly strobe between noon and midnight several
+// times a minute. This blends the raw value toward the day's mean as
+// timeScale climbs, so fast simulation still shows *a* day/night cycle at
+// 1x but settles into a steady dusk-ish mid-tone at high speed instead of
+// flickering. A clean, swappable policy function - identity at
+// timeScale <= 1, so nothing changes for the common case.
+export function effectiveDarkness(raw, timeScale) {
+  const blend = 1 / (1 + Math.max(0, timeScale - 1) * 0.6);
+  return raw * blend + AVG_DARKNESS * (1 - blend);
+}
+
+function lerpColor(hexA, hexB, t) {
+  const a = parseInt(hexA.slice(1), 16), b = parseInt(hexB.slice(1), 16);
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  const r = Math.round(ar + (br - ar) * t), g = Math.round(ag + (bg - ag) * t), bl = Math.round(ab + (bb - ab) * t);
+  return `rgb(${r}, ${g}, ${bl})`;
+}
+
+// City-glow pre-render: much lower resolution than the road/border bitmap
+// (the glow is intrinsically soft, so upscaling it is invisible) to keep
+// memory sane - GLOW_SCALE 0.4 -> 1600x960 (~6MB) vs. 86MB for a second
+// full-size canvas.
+const GLOW_SCALE = 0.4;
+// Tier-based glow used to be the reference sim's approach (procedural,
+// name-seeded, hardcoded per-tier constants); we have genuine population
+// figures for every real city (src/data.js), so intensity/spread are
+// derived from actual `node.pop` instead - a five-order-of-magnitude
+// range (100 to 8.34M), so linear scaling is unusable; sqrt for radius
+// (lit area ~ population) and log10 for intensity/cluster-count (so the
+// smallest towns aren't invisible and the biggest metros don't clip).
+const GLOW_WARM_COLORS = ["255,210,140", "255,240,215", "200,220,255"];
+
+export function renderCityGlow(graph) {
+  const glow = document.createElement("canvas");
+  glow.width = WORLD_WIDTH * GLOW_SCALE;
+  glow.height = WORLD_HEIGHT * GLOW_SCALE;
+  const gctx = glow.getContext("2d");
+  gctx.scale(GLOW_SCALE, GLOW_SCALE);
+  gctx.globalCompositeOperation = "lighter";
+
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    if (node.t === 0 || !node.pop) continue; // junction filler nodes carry no population
+
+    const rnd = mulberry32(hashStr(name)); // stable across reboots, same pattern every time
+    const metroR = Math.max(3, Math.min(110, 0.0312 * Math.sqrt(node.pop)));
+    const u = Math.max(0, Math.min(1, (Math.log10(node.pop) - 2) / 4.92)); // 100 -> 0, 8.34M -> 1
+    const intensity = 0.10 + 0.58 * Math.pow(u, 1.6);
+    const clusters = Math.round(2 + u * 10);
+
+    for (let i = 0; i < clusters; i++) {
+      const ang = rnd() * Math.PI * 2;
+      const r = Math.sqrt(rnd()) * metroR;
+      const cx = node.x + Math.cos(ang) * r, cy = node.y + Math.sin(ang) * r;
+      const cr = metroR * (0.25 + rnd() * 0.35);
+      const color = GLOW_WARM_COLORS[i % GLOW_WARM_COLORS.length];
+      const grad = gctx.createRadialGradient(cx, cy, 0, cx, cy, cr);
+      grad.addColorStop(0, `rgba(${color}, ${intensity})`);
+      grad.addColorStop(1, `rgba(${color}, 0)`);
+      gctx.fillStyle = grad;
+      gctx.beginPath();
+      gctx.arc(cx, cy, cr, 0, Math.PI * 2);
+      gctx.fill();
+    }
+
+    // Bright core dot at the city itself, so even a small town reads as a
+    // distinct pinprick rather than only a diffuse haze.
+    const coreGrad = gctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, metroR * 0.18 + 1.5);
+    coreGrad.addColorStop(0, `rgba(255, 245, 220, ${Math.min(1, intensity + 0.25)})`);
+    coreGrad.addColorStop(1, "rgba(255, 245, 220, 0)");
+    gctx.fillStyle = coreGrad;
+    gctx.beginPath();
+    gctx.arc(node.x, node.y, metroR * 0.18 + 1.5, 0, Math.PI * 2);
+    gctx.fill();
+  }
+
+  return glow;
+}
+
+// ---------------------------------------------------------------------
+
 export function renderStaticBackground(graph, opts = {}) {
-  const showMedians = opts.showMedians !== false; // default on
   const showStateBorders = opts.showStateBorders !== false; // default on
   const bg = document.createElement("canvas");
   bg.width = WORLD_WIDTH * BG_SCALE;
@@ -80,13 +231,10 @@ export function renderStaticBackground(graph, opts = {}) {
 
   ctx.lineCap = "round";
 
-  // State borders first, beneath everything else - a basemap layer, not
-  // a road. Pre-projected/pre-simplified at build time (see
-  // scripts/build-states-data.mjs), so this is just a stroke pass, same
-  // one-time-cost pattern as the road network below: every ring shares
-  // one beginPath()/stroke() call. Stroke-only (never filled), so
-  // MultiPolygon inner/hole rings need no special handling - every ring
-  // draws identically regardless of outer/inner role.
+  // State borders only - roads, medians and city dots moved to a
+  // per-frame pass (see buildEdgeList/drawRoads/drawCityDots below) so
+  // day/night can recolor them and full road detail stays crisp at any
+  // zoom instead of being baked soft into this 1.5x bitmap.
   if (showStateBorders) {
     ctx.strokeStyle = STATE_BORDER_COLOR;
     ctx.lineWidth = STATE_BORDER_WIDTH;
@@ -99,57 +247,178 @@ export function renderStaticBackground(graph, opts = {}) {
     ctx.stroke();
   }
 
-  // highways first (dimmer, thinner), interstates on top (brighter, thicker)
-  for (const kind of ["highway", "interstate"]) {
-    ctx.strokeStyle = ROAD_COLOR[kind];
-    ctx.lineWidth = ROAD_WIDTH[kind];
-    ctx.beginPath();
-    for (const name in graph.nodes) {
-      const node = graph.nodes[name];
-      for (const e of graph.adjacency[name]) {
-        if (e.kind !== kind) continue;
-        if (name > e.to) continue; // each undirected edge drawn once
-        const other = graph.nodes[e.to];
-        ctx.moveTo(node.x, node.y);
-        ctx.lineTo(other.x, other.y);
-      }
-    }
-    ctx.stroke();
-  }
+  return bg;
+}
 
-  // Thin median down the centerline of divided highways only
-  // (interstates) - the two lanes per direction either side of it are a
-  // purely positional truck offset (see truckWorldPos), no drawn lane
-  // divider needed between them. Settings-gated purely cosmetically -
-  // the lane offsets themselves are unaffected either way.
-  if (showMedians) {
-    ctx.strokeStyle = MEDIAN_COLOR;
-    ctx.lineWidth = MEDIAN_WIDTH;
-    ctx.beginPath();
-    for (const name in graph.nodes) {
-      const node = graph.nodes[name];
-      for (const e of graph.adjacency[name]) {
-        if (e.kind !== "interstate") continue;
-        if (name > e.to) continue;
-        const other = graph.nodes[e.to];
-        ctx.moveTo(node.x, node.y);
-        ctx.lineTo(other.x, other.y);
-      }
-    }
-    ctx.stroke();
-  }
+// Flat, precomputed edge list for the per-frame road pass - built once
+// (memoized per graph object; `graph` itself never changes after boot) so
+// drawRoads never re-walks graph.adjacency. Each entry carries a cached
+// unit perpendicular (px, py) and a bounding box for cheap per-edge
+// culling, in addition to the raw endpoints.
+const edgeListCache = new WeakMap();
+export function buildEdgeList(graph) {
+  let cached = edgeListCache.get(graph);
+  if (cached) return cached;
 
+  const edges = [];
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
-    if (node.t === 0) continue; // junction filler nodes aren't real places
-    const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
-    ctx.fillStyle = CITY_DOT_COLOR[Math.min(3, node.t - 1)];
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-    ctx.fill();
+    for (const e of graph.adjacency[name]) {
+      if (name > e.to) continue; // each undirected edge stored once
+      const other = graph.nodes[e.to];
+      const dx = other.x - node.x, dy = other.y - node.y;
+      const len = Math.hypot(dx, dy) || 1;
+      edges.push({
+        ax: node.x, ay: node.y, bx: other.x, by: other.y,
+        kind: e.kind,
+        px: -dy / len, py: dx / len,
+        minX: Math.min(node.x, other.x), maxX: Math.max(node.x, other.x),
+        minY: Math.min(node.y, other.y), maxY: Math.max(node.y, other.y),
+      });
+    }
+  }
+  cached = edges;
+  edgeListCache.set(graph, cached);
+  return cached;
+}
+
+function edgeVisible(e, cull) {
+  if (cull.nav) {
+    // Cheap conservative circle-vs-bbox test: nearest point on the bbox to
+    // the cull circle's center, compared against the (already padded)
+    // radius. False positives (drawing a few extra off-screen edges) are
+    // fine; this never produces a false negative.
+    const nx = Math.max(e.minX, Math.min(cull.cx, e.maxX));
+    const ny = Math.max(e.minY, Math.min(cull.cy, e.maxY));
+    return (nx - cull.cx) ** 2 + (ny - cull.cy) ** 2 <= cull.radiusSq;
+  }
+  return e.maxX >= cull.minX && e.minX <= cull.maxX && e.maxY >= cull.minY && e.minY <= cull.maxY;
+}
+
+// Draws every road edge for the current frame: a zoom-driven cross-fade
+// between a simplified single line (whole-country/atlas view) and the
+// full asphalt-band + fog-lines + shoulder-outline + median treatment
+// (follow/nav view), day/night tinted. Batches one beginPath()/stroke()
+// per (kind x layer) so the whole road network costs at most ~8 stroke
+// calls regardless of fleet size.
+export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians) {
+  const bandPx = BAND_HALF * 2 * camera.zoom;
+  const k = Math.max(0, Math.min(1, (bandPx - DETAIL_MIN_PX) / (DETAIL_FULL_PX - DETAIL_MIN_PX)));
+  ctx.lineCap = "butt";
+  ctx.lineJoin = "round";
+
+  const visible = { highway: [], interstate: [] };
+  for (const e of edgeList) {
+    if (!edgeVisible(e, cull)) continue;
+    visible[e.kind].push(e);
   }
 
-  return bg;
+  if (k < 1) {
+    // Simplified atlas-style line, highway first then interstate on top,
+    // constant-screen-width regardless of zoom.
+    for (const kind of ["highway", "interstate"]) {
+      const list = visible[kind];
+      if (!list.length) continue;
+      ctx.globalAlpha = 1 - k;
+      ctx.strokeStyle = lerpColor(kind === "interstate" ? "#2d6ed2" : "#d67a28", kind === "interstate" ? "#aacdee" : "#e8a877", colorT);
+      ctx.lineWidth = SIMPLE_PX[kind] / camera.zoom;
+      ctx.beginPath();
+      for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (k > 0) {
+    ctx.globalAlpha = k;
+    for (const kind of ["highway", "interstate"]) {
+      const list = visible[kind];
+      if (!list.length) continue;
+      const half = kind === "interstate" ? BAND_HALF : HWY_BAND_HALF;
+      const fog = kind === "interstate" ? FOG_OFFSET : HWY_FOG;
+      const dayC = ROAD_DAY[kind], nightC = ROAD_NIGHT[kind];
+
+      // Asphalt band
+      ctx.strokeStyle = lerpRgba(dayC.band, nightC.band, colorT);
+      ctx.lineWidth = half * 2;
+      ctx.beginPath();
+      for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
+      ctx.stroke();
+
+      // Shoulder outlines, both sides
+      ctx.strokeStyle = dayC.shoulder; // shoulder/fog colors don't shift with day/night in the reference
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      for (const e of list) {
+        ctx.moveTo(e.ax + e.px * half, e.ay + e.py * half);
+        ctx.lineTo(e.bx + e.px * half, e.by + e.py * half);
+        ctx.moveTo(e.ax - e.px * half, e.ay - e.py * half);
+        ctx.lineTo(e.bx - e.px * half, e.by - e.py * half);
+      }
+      ctx.stroke();
+
+      // Fog lines, both sides
+      ctx.strokeStyle = dayC.fog;
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      for (const e of list) {
+        ctx.moveTo(e.ax + e.px * fog, e.ay + e.py * fog);
+        ctx.lineTo(e.bx + e.px * fog, e.by + e.py * fog);
+        ctx.moveTo(e.ax - e.px * fog, e.ay - e.py * fog);
+        ctx.lineTo(e.bx - e.px * fog, e.by - e.py * fog);
+      }
+      ctx.stroke();
+
+      // Median - interstates only, centerline
+      if (kind === "interstate" && showMedians) {
+        ctx.strokeStyle = dayC.median;
+        ctx.lineWidth = MEDIAN_WIDTH;
+        ctx.beginPath();
+        for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function lerpRgba(rgbaA, rgbaB, t) {
+  const parse = (s) => s.match(/[\d.]+/g).map(Number);
+  const a = parse(rgbaA), b = parse(rgbaB);
+  const r = Math.round(a[0] + (b[0] - a[0]) * t);
+  const g = Math.round(a[1] + (b[1] - a[1]) * t);
+  const bl = Math.round(a[2] + (b[2] - a[2]) * t);
+  const al = a[3] + ((b[3] ?? 1) - a[3]) * t;
+  return `rgba(${r}, ${g}, ${bl}, ${al})`;
+}
+
+// City dots, per-frame (moved out of the static bake alongside roads so a
+// wide asphalt band never paints over a big city's dot). Batched by tier
+// color: at most 4 beginPath()/fill() calls for the whole map.
+export function drawCityDots(ctx, graph, cull) {
+  const buckets = [[], [], [], []];
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    if (node.t === 0) continue;
+    if (cull.nav) {
+      if ((node.x - cull.cx) ** 2 + (node.y - cull.cy) ** 2 > cull.radiusSq) continue;
+    } else if (node.x < cull.minX || node.x > cull.maxX || node.y < cull.minY || node.y > cull.maxY) {
+      continue;
+    }
+    buckets[Math.min(3, node.t - 1)].push(node);
+  }
+  for (let tier = 0; tier < 4; tier++) {
+    const list = buckets[tier];
+    if (!list.length) continue;
+    ctx.fillStyle = CITY_DOT_COLOR[tier];
+    ctx.beginPath();
+    for (const node of list) {
+      const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
+      ctx.moveTo(node.x + radius, node.y);
+      ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
 }
 
 // Draws every city's label whose tier is currently revealed at `zoom`
@@ -255,7 +524,7 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
   return out;
 }
 
-export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selectedTruck, renderOpts = {}) {
+export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, selectedTruck, renderOpts = {}) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   ctx.fillStyle = "#12161c";
   ctx.fillRect(0, 0, w, h);
@@ -263,12 +532,12 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   const center = camera.visualCenter();
   const nav = camera.mode === "FOLLOW_NAV";
 
-  // Viewport-cull bounds for the per-truck draw loop below - computed once
-  // per frame, in world space, from the same camera state the transform
-  // block just below derives its own matrix from. Simulation (fleet.js)
-  // never sees this: every truck keeps updating regardless, only drawing
-  // is skipped for ones clearly outside it.
-  let cullMinX, cullMaxX, cullMinY, cullMaxY, cullCx, cullCy, cullRadiusSq;
+  // Viewport-cull bounds for the per-truck/per-road/per-dot draw loops
+  // below - computed once per frame, in world space, from the same camera
+  // state the transform block just below derives its own matrix from.
+  // Simulation (fleet.js) never sees this: every truck keeps updating
+  // regardless, only drawing is skipped for things clearly outside it.
+  let cullMinX, cullMaxX, cullMinY, cullMaxY, cullCx, cullCy, cullRadius, cullRadiusSq;
   if (nav) {
     // Rotation makes the true visible region a rotated parallelogram, not
     // an axis-aligned rect - use a padded circle instead of computing that
@@ -285,7 +554,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     );
     cullCx = camera.x;
     cullCy = camera.y;
-    const cullRadius = maxCornerDist / (camera.zoom * TILT_FACTOR) + CULL_PAD_WORLD_UNITS;
+    cullRadius = maxCornerDist / (camera.zoom * TILT_FACTOR) + CULL_PAD_WORLD_UNITS;
     cullRadiusSq = cullRadius * cullRadius;
   } else {
     // FREE/FOLLOW: no rotation, so the screen->world map is a plain
@@ -296,6 +565,36 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     cullMinY = camera.y + (0 - center.y) / camera.zoom - CULL_PAD_WORLD_UNITS;
     cullMaxY = camera.y + (h - center.y) / camera.zoom + CULL_PAD_WORLD_UNITS;
   }
+  // Roads/city dots use the same shape of cull test but with a wider pad
+  // (the asphalt band extends much further off-centerline than a dot's
+  // footprint) - share the circle center/AABB, override just the pad.
+  const roadCull = nav
+    ? { nav: true, cx: cullCx, cy: cullCy, radiusSq: (cullRadius - CULL_PAD_WORLD_UNITS + ROAD_CULL_PAD_WORLD_UNITS) ** 2 }
+    : {
+        nav: false,
+        minX: cullMinX - ROAD_CULL_PAD_WORLD_UNITS + CULL_PAD_WORLD_UNITS,
+        maxX: cullMaxX + ROAD_CULL_PAD_WORLD_UNITS - CULL_PAD_WORLD_UNITS,
+        minY: cullMinY - ROAD_CULL_PAD_WORLD_UNITS + CULL_PAD_WORLD_UNITS,
+        maxY: cullMaxY + ROAD_CULL_PAD_WORLD_UNITS - CULL_PAD_WORLD_UNITS,
+      };
+
+  // Day/night: derived once per frame from the sim clock (never from
+  // real-world time), damped against the time-scale-strobing concern via
+  // effectiveDarkness. Also used below for the "skip the overlay/glow
+  // entirely at high noon" fast path.
+  const dayNightOn = renderOpts.showDayNight !== false;
+  const gameSeconds = renderOpts.gameSeconds || 0;
+  const timeScale = renderOpts.timeScale ?? 1;
+  const visMinX = nav ? cullCx - cullRadius : cullMinX;
+  const visMaxX = nav ? cullCx + cullRadius : cullMaxX;
+  let darkAtMin = 0, darkAtMid = 0, darkAtMax = 0;
+  if (dayNightOn) {
+    darkAtMin = effectiveDarkness(rawDarknessAtX(Math.max(0, Math.min(WORLD_WIDTH, visMinX)), gameSeconds), timeScale);
+    darkAtMid = effectiveDarkness(rawDarknessAtX(Math.max(0, Math.min(WORLD_WIDTH, (visMinX + visMaxX) / 2)), gameSeconds), timeScale);
+    darkAtMax = effectiveDarkness(rawDarknessAtX(Math.max(0, Math.min(WORLD_WIDTH, visMaxX)), gameSeconds), timeScale);
+  }
+  const anyDarkness = darkAtMin > 0.01 || darkAtMid > 0.01 || darkAtMax > 0.01;
+  const colorT = Math.max(darkAtMin, darkAtMid, darkAtMax) / NIGHT_DARKNESS_MAX; // 0..1, for road/label day->night color lerp
 
   ctx.save();
   ctx.translate(center.x, center.y);
@@ -313,6 +612,54 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
   ctx.translate(-camera.x, -camera.y);
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+  drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false);
+  drawCityDots(ctx, graph, roadCull);
+
+  // Darkness overlay: a world-space horizontal gradient sampled across the
+  // visible X-range, drawn INSIDE the camera transform so rotation/tilt
+  // handle themselves for free - no rotated-gradient math needed. 5 stops
+  // is plenty; the underlying darkness curve is smooth.
+  if (dayNightOn && anyDarkness) {
+    ctx.save();
+    const grad = ctx.createLinearGradient(visMinX, 0, visMaxX, 0);
+    for (let i = 0; i <= 4; i++) {
+      const t = i / 4;
+      const x = visMinX + (visMaxX - visMinX) * t;
+      const d = effectiveDarkness(rawDarknessAtX(Math.max(0, Math.min(WORLD_WIDTH, x)), gameSeconds), timeScale);
+      grad.addColorStop(t, `rgba(6, 12, 28, ${d})`);
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(visMinX, nav ? cullCy - cullRadius : cullMinY, visMaxX - visMinX, nav ? cullRadius * 2 : cullMaxY - cullMinY);
+    ctx.restore();
+  }
+
+  // City lights - pre-rendered glow canvas, composited in vertical slices
+  // so each slice picks up its own local darkness (a real terminator, not
+  // one flat alpha) rather than the whole glow fading in/out together.
+  if (dayNightOn && anyDarkness && glowCanvas && renderOpts.showCityLights !== false) {
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    const pulse = 0.90 + Math.sin(gameSeconds * 0.02) * 0.08 + Math.cos(gameSeconds * 0.053) * 0.03;
+    const SLICE_W = 500; // 8 slices across the full map width - halves the drawImage call count from the initial 250-wide design; still fine terminator granularity (30 min of local time per slice)
+    const startSlice = Math.max(0, Math.floor(visMinX / SLICE_W));
+    const endSlice = Math.min(Math.ceil(WORLD_WIDTH / SLICE_W) - 1, Math.floor(visMaxX / SLICE_W));
+    for (let s = startSlice; s <= endSlice; s++) {
+      const sx = s * SLICE_W;
+      const sw = Math.min(SLICE_W, WORLD_WIDTH - sx);
+      if (sw <= 0) continue;
+      const d = effectiveDarkness(rawDarknessAtX(sx + sw / 2, gameSeconds), timeScale);
+      const nightStrength = Math.pow(d / NIGHT_DARKNESS_MAX, 2.2);
+      if (nightStrength < 0.01) continue;
+      ctx.globalAlpha = Math.max(0, Math.min(1, pulse * nightStrength));
+      ctx.drawImage(
+        glowCanvas,
+        sx * GLOW_SCALE, 0, sw * GLOW_SCALE, glowCanvas.height,
+        sx, 0, sw, WORLD_HEIGHT,
+      );
+    }
+    ctx.restore();
+  }
 
   // The remaining stop sequence ahead of the followed truck - `selectedTruck`
   // is only ever non-null while actually following a truck (FOLLOW or
@@ -357,9 +704,9 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
 
     // Highlight ring around every real city ahead on the route, flush
     // against its existing static dot (same radius formula as
-    // renderStaticBackground's city dots, so the ring hugs it rather than
-    // using an arbitrary fixed size). Junction filler nodes (t===0) have
-    // no dot in the static background to ring, so they're skipped.
+    // drawCityDots, so the ring hugs it rather than using an arbitrary
+    // fixed size). Junction filler nodes (t===0) have no dot to ring, so
+    // they're skipped.
     ctx.strokeStyle = ROUTE_HIGHLIGHT_COLOR;
     ctx.lineWidth = 2 / camera.zoom;
     for (const name of nodeSeq) {
@@ -408,6 +755,9 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     bucket.ys.push(p.y);
   }
 
+  // Night dimming for the fleet only - labels are drawn after the
+  // darkness overlay above so they stay fully readable regardless.
+  if (dayNightOn && darkAtMid > 0.01) ctx.globalAlpha = 1 - darkAtMid * 0.2;
   for (const b of truckBuckets.values()) {
     if (b.xs.length === 0) continue;
     ctx.fillStyle = b.color;
@@ -419,6 +769,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, selected
     }
     ctx.fill();
   }
+  ctx.globalAlpha = 1;
 
   // Google-Maps-style directional arrow for the followed truck in nav
   // view, in place of its plain dot. No separate counter-rotation needed:

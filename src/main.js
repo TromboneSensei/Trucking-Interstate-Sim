@@ -3,7 +3,7 @@
 import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
-import { renderStaticBackground, drawFrame, truckWorldPos } from "./render.js";
+import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, resetUIState } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
@@ -19,6 +19,8 @@ const DEFAULT_SETTINGS = {
   showAllLabels: false,
   showMedians: true,
   showStateBorders: true,
+  showDayNight: true,
+  showCityLights: true,
 };
 
 const canvas = document.getElementById("map");
@@ -44,6 +46,8 @@ const el = {
   settingAllLabels: document.getElementById("setting-all-labels"),
   settingMedians: document.getElementById("setting-medians"),
   settingStateBorders: document.getElementById("setting-state-borders"),
+  settingDayNight: document.getElementById("setting-day-night"),
+  settingCityLights: document.getElementById("setting-city-lights"),
   btnSettingsCancel: document.getElementById("btn-settings-cancel"),
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
@@ -57,6 +61,13 @@ window.addEventListener("error", (e) => {
 const graph = buildGraph();
 let settings = { ...DEFAULT_SETTINGS };
 let bgCanvas = null;
+// Flat per-edge road list, built once from `graph` (never rebuilt - graph
+// topology is settings-independent) and reused by drawRoads every frame.
+const edgeList = buildEdgeList(graph);
+// Pre-rendered city-light glow, rebuilt in bootSim alongside bgCanvas -
+// unlike bgCanvas it doesn't depend on any setting today, but re-baking it
+// on every Apply costs nothing next to respawning the whole fleet anyway.
+let glowCanvas = null;
 let trucks = [];
 // id -> truck lookup, rebuilt once whenever `trucks` itself is rebuilt
 // (bootSim only) rather than re-scanned with .find() every frame - ids are
@@ -279,6 +290,8 @@ el.btnSettingsApply.addEventListener("click", () => {
     showAllLabels: el.settingAllLabels.checked,
     showMedians: el.settingMedians.checked,
     showStateBorders: el.settingStateBorders.checked,
+    showDayNight: el.settingDayNight.checked,
+    showCityLights: el.settingCityLights.checked,
   };
   closeSettings();
   bootSim(newSettings);
@@ -293,6 +306,7 @@ function bootSim(newSettings) {
   settings = newSettings;
 
   bgCanvas = renderStaticBackground(graph, settings);
+  glowCanvas = renderCityGlow(graph);
   trucks = spawnFleet(graph, settings.fleetSize);
   truckById = new Map(trucks.map((t) => [t.id, t]));
 
@@ -383,7 +397,14 @@ function frame(now) {
     }
     camera.update();
 
-    drawFrame(ctx, canvas, camera, graph, bgCanvas, trucks, followed, { showAllLabels: settings.showAllLabels });
+    drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
+      showAllLabels: settings.showAllLabels,
+      showMedians: settings.showMedians,
+      showDayNight: settings.showDayNight,
+      showCityLights: settings.showCityLights,
+      gameSeconds: state.gameSeconds,
+      timeScale: state.timeScale,
+    });
     el.clock.textContent = formatClock(state.gameSeconds);
 
     // Whatever the Unit tab is currently showing refreshes live - a
