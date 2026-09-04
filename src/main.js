@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS = {
   showCityLights: true,
   showHeadlights: true,
   showCongestion: true,
-  showWeather: true,
+  showWeather: false,
   showRushHour: true,
 };
 
