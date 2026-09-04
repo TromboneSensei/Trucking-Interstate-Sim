@@ -165,6 +165,11 @@ function metricCard(title, value, sub, tone, drillKey) {
 // waiting for a gap to depart a city) plus every edge still queued in
 // remainingPath.
 function etaMilesOf(t) {
+  // A truck on a layover has no run in progress. Returning 0 would rank it
+  // as the closest thing in the fleet to arriving, which is exactly wrong -
+  // it would dominate the "Closest to Arrival" board with trucks that are
+  // parked and not going anywhere yet.
+  if (t.parkedAt) return Infinity;
   const currentLeg = t.edge ? t.edge.miles - t.s : (t.pendingEdge ? t.pendingEdge.miles : 0);
   return Math.max(0, currentLeg) + t.remainingPath.reduce((s, e) => s + e.miles, 0);
 }
@@ -611,17 +616,19 @@ function renderTruckDetails(truck, isControlled) {
     <div class="detail-header">
       <div>
         <div class="detail-title">${truck.name}</div>
-        <div class="detail-sub">${truck.contract.truckType.label} • ${truck.contract.cargo}</div>
+        <div class="detail-sub">${truck.contract.truckType.label} • ${truck.contract.cargo}${truck.parkedAt ? " (delivered)" : ""}</div>
       </div>
       <div style="text-align:right">
         <div class="archetype-badge" style="color:${archetype.color}">${archetype.label}</div>
         <div class="archetype-desc">${archetype.desc}</div>
       </div>
     </div>
-    <div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)} &bull; ${Math.round(etaMiles)} mi remaining</div>
+    ${truck.parkedAt
+      ? `<div class="detail-sub" style="margin-bottom:2px;">Parked at <strong>${truck.parkedAt}</strong> &bull; rolling out in ${truck.dwellHoursLeft < 1 ? "under an hour" : Math.ceil(truck.dwellHoursLeft) + "h"}</div>`
+      : `<div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)} &bull; ${Math.round(etaMiles)} mi remaining</div>`}
     ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);font-size:1.6rem;font-weight:700;">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
     ${controlBlock}
-    ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls are yours - the sim will pause and wait for you at the next fork.</div>` : ""}
+    ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls and load pickups are yours - the sim pauses and waits for you at the next fork, and at the load board when this run ends.</div>` : ""}
     <div class="metric-grid" style="margin-bottom:12px;">
       <div class="metric-card"><div class="metric-title">Speed</div><div class="metric-value">${Math.round(truck.speed)} mph</div></div>
       <div class="metric-card"><div class="metric-title">Odometer</div><div class="metric-value">${Math.round(truck.totalMilesDriven).toLocaleString()}</div></div>

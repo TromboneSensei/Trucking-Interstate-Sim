@@ -741,6 +741,14 @@ export function drawCityDots(ctx, graph, cull) {
 // CSS font shorthand, which is one of the more expensive things you can do
 // per label, so both the concatenation and the assignment are avoided
 // whenever the value has not actually changed.
+// Parked-truck badge: a small count tucked against the top-right of a
+// city's label. Drawn as outlined text rather than a pill so it costs two
+// text calls and no extra path work per label - at country zoom with the
+// label cascade open there can be a couple hundred of these on screen.
+const PARKED_BADGE_COLOR = "#f0b429";
+const PARKED_BADGE_OUTLINE = "rgba(6, 10, 18, 0.92)";
+const PARKED_BADGE_SCALE = 0.82; // relative to the city label's own font size
+
 const fontStrCache = new Map();
 function labelFont(px) {
   let s = fontStrCache.get(px);
@@ -751,7 +759,7 @@ function labelFont(px) {
   return s;
 }
 
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull) {
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts) {
   ctx.textAlign = "center";
   let lastFont = null;
   for (const name in graph.nodes) {
@@ -806,6 +814,25 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       ctx.restore();
     } else {
       ctx.fillText(node.name, node.x, node.y - radius - 5);
+    }
+
+    // Parked count, if any trucks are sitting here between loads.
+    const parked = parkedCounts ? parkedCounts.get(name) : 0;
+    if (parked) {
+      const labelY = counterRotation ? node.y - radius - 20 : node.y - radius - 5;
+      const half = ctx.measureText(node.name).width / 2;
+      const badgePx = fontPx * PARKED_BADGE_SCALE;
+      const badgeFont = labelFont(badgePx);
+      ctx.font = badgeFont;
+      lastFont = badgeFont;
+      const bx = node.x + half + badgePx * 0.55;
+      const by = labelY - fontPx * 0.42;
+      ctx.lineWidth = badgePx * 0.42;
+      ctx.strokeStyle = PARKED_BADGE_OUTLINE;
+      ctx.lineJoin = "round";
+      ctx.strokeText(parked, bx, by);
+      ctx.fillStyle = PARKED_BADGE_COLOR;
+      ctx.fillText(parked, bx, by);
     }
   }
 }
@@ -1033,7 +1060,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     onRouteCities = new Set(nodeSeq);
   }
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts);
 
   if (nodeSeq) {
     ctx.strokeStyle = "rgba(232, 163, 61, 0.85)";

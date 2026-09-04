@@ -11,7 +11,7 @@
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
 import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
-import { generateContract } from "./economy.js";
+import { generateContract, generateContractOffers, chooseOffer } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
 import { weatherSpeedMultAt } from "./weather.js";
@@ -59,6 +59,29 @@ const LANE_CHANGE_EASE = 2.0; // dt-multiplier for the visual lane-blend, same s
 const ARRIVAL_DECEL_BASE_MI = 0.5; // physically-plausible braking distance, unrelated to dot size
 const ARRIVAL_DECEL_PER_MPH = 0.06; // decel zone scales with the edge's speed limit
 const ARRIVAL_MIN_MPH = 12;
+
+// --- post-delivery layover ---------------------------------------------
+// A truck that has just delivered sits at the city before taking its next
+// load: unloading, paperwork, the driver's rest break. Expressed in GAME
+// hours, so it scales with the time slider like everything else.
+//
+// Which end of the range a driver lands on is their hustle: a high-hustle
+// driver turns around in about DWELL_MIN_HOURS, a low-hustle one takes
+// most of DWELL_MAX_HOURS. The jitter keeps two equally-hustling drivers
+// from moving in lockstep.
+const DWELL_MIN_HOURS = 2;
+const DWELL_MAX_HOURS = 12;
+const DWELL_JITTER_HOURS = 1.5;
+
+export function rollDwellHours(driver, rnd = Math.random) {
+  const span = DWELL_MAX_HOURS - DWELL_MIN_HOURS;
+  const base = DWELL_MAX_HOURS - span * driver.hustle;
+  const jitter = (rnd() - 0.5) * 2 * DWELL_JITTER_HOURS;
+  return Math.max(DWELL_MIN_HOURS, Math.min(DWELL_MAX_HOURS, base + jitter));
+}
+
+// How many loads a parked truck gets to choose between.
+const OFFER_COUNT = 3;
 
 // World-space length of an edge divided by its real mileage - varies
 // slightly edge to edge (geographic projection), so gap thresholds
@@ -117,6 +140,17 @@ export class Truck {
     this.pendingEdge = null; // set while stopped at a real city waiting for a gap to depart
     this.departureWaitS = 0; // real seconds spent waiting on pendingEdge
 
+    // Layover state. `parkedAt` is the city name while the truck is sitting
+    // between contracts (null the entire time it's driving), which is what
+    // the map's per-city parked counter and the UI's "PARKED" status both
+    // key off. `pendingOffers` is only populated for the player-controlled
+    // truck, whose choice of load is made by a human rather than by
+    // chooseOffer().
+    this.parkedAt = null;
+    this.dwellHoursLeft = 0;
+    this.pendingOffers = null;
+    this.awaitingContract = false;
+
     this._assignContract(graph, rnd);
   }
 
@@ -166,12 +200,38 @@ export class Truck {
     }
   }
 
-  _arriveAtDestination(graph, laneGroups) {
+  // Delivery complete: bank the payout and park. The truck deliberately
+  // keeps `contract` pointing at the load it just finished rather than
+  // nulling it - the details panel, the rankings and the economy tab all
+  // read that object every frame, and a parked truck showing its last run
+  // is both safe and more informative than a blank. It's replaced wholesale
+  // when the next load is accepted.
+  _arriveAtDestination(graph, rnd = Math.random) {
     this.earnings += this.contract.payout;
     this.contractsCompleted++;
     this.currentNode = this.contract.destination;
     this.edge = null;
-    this._assignContract(graph, Math.random, laneGroups);
+    this.pendingEdge = null;
+    this.speed = 0;
+    this.lane = 0;
+    this.laneT = 0;
+    this.passingLeaderId = null;
+    this.parkedAt = this.currentNode;
+    this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
+  }
+
+  // Accept a specific contract (chosen by the driver, or by the player for
+  // the controlled truck) and roll out. Mirrors _assignContract's tail, but
+  // takes the contract as given instead of generating one.
+  _takeContract(graph, contract, laneGroups) {
+    this.contract = contract;
+    this.remainingPath = contract.path ? [...contract.path] : [];
+    this.parkedAt = null;
+    this.dwellHoursLeft = 0;
+    this.pendingOffers = null;
+    this.awaitingContract = false;
+    if (this.remainingPath.length) this._advanceToNextEdge(graph, laneGroups, true);
+    else { this.edge = null; this.pendingEdge = null; }
   }
 
   // Player picked `chosenEdge` at a paused junction; commit to it and
@@ -612,7 +672,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // reads other trucks' pre-move positions (laneGroups/leaderMap), same
   // as before.
   for (const truck of trucks) {
-    if (truck.awaitingDecision || truck.pendingEdge || !truck.edge) continue;
+    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge) continue;
 
     let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult;
     // Environmental slowdowns are applied to the CRUISE target rather than
@@ -630,7 +690,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
 
   // Phase 2: integrate position from the speed each truck just settled on.
   for (const truck of trucks) {
-    if (truck.awaitingDecision || truck.pendingEdge || !truck.edge) continue;
+    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge) continue;
     const miles = truck.speed * gameHours;
     truck.s += miles;
     truck.totalMilesDriven += miles;
@@ -640,10 +700,32 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // clampOverlaps above for why this can't just be folded into phase 1).
   clampOverlaps(graph, laneGroups);
 
-  // Phase 4: arrivals, junction decisions, and departures, using the
-  // final (clamped) positions - unchanged from before this restructuring.
+  // Phase 4: layovers, arrivals, junction decisions, and departures, using
+  // the final (clamped) positions.
   for (const truck of trucks) {
-    if (truck.awaitingDecision) continue;
+    if (truck.awaitingDecision || truck.awaitingContract) continue;
+
+    // Parked between loads. Burn down the layover, then take a contract -
+    // the player picks for the controlled truck, the driver's own
+    // preferences pick for everyone else.
+    if (truck.parkedAt) {
+      truck.dwellHoursLeft -= gameHours;
+      if (truck.dwellHoursLeft > 0) continue;
+      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT);
+      if (!offers.length) {
+        // Nothing routable from here (shouldn't happen on this graph, but
+        // don't wedge the truck forever if it ever does) - wait and retry.
+        truck.dwellHoursLeft = 1;
+        continue;
+      }
+      if (truck === controlledTruck) {
+        truck.pendingOffers = offers;
+        truck.awaitingContract = true;
+        return truck;
+      }
+      truck._takeContract(graph, chooseOffer(offers, truck.driver), laneGroups);
+      continue;
+    }
 
     if (truck.pendingEdge) {
       tryDepartTruck(graph, truck, laneGroups, dt);
@@ -655,7 +737,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const node = truck.edge.to;
     truck.currentNode = node;
     if (node === truck.contract.destination) {
-      truck._arriveAtDestination(graph, laneGroups);
+      truck._arriveAtDestination(graph);
       continue;
     }
 

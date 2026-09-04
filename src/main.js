@@ -5,9 +5,14 @@ import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
+import { chooseOffer } from "./economy.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
+// The load board gets longer than a junction call: picking a haul is a
+// considered choice, not a reflex. On expiry the truck takes whatever
+// chooseOffer() would have picked for it, so an unattended sim never stalls.
+const CONTRACT_TIMEOUT = 20; // seconds
 const TAP_TOLERANCE_PX = 26;
 
 // Settings-panel defaults - also what the form resets to on first open.
@@ -41,6 +46,10 @@ const el = {
   decisionOverlay: document.getElementById("decision-overlay"),
   decisionOptions: document.getElementById("decision-options"),
   decisionTimerFill: document.getElementById("decision-timer-fill"),
+  contractOverlay: document.getElementById("contract-overlay"),
+  contractOptions: document.getElementById("contract-options"),
+  contractCity: document.getElementById("contract-city"),
+  contractTimerFill: document.getElementById("contract-timer-fill"),
   fatal: document.getElementById("fatal-error"),
   btnSettings: document.getElementById("btn-settings"),
   settingsOverlay: document.getElementById("settings-overlay"),
@@ -87,6 +96,10 @@ let trucks = [];
 // assigned once (Truck constructor's nextId++) and never reused, so the
 // cache stays valid for the whole life of a fleet.
 let truckById = new Map();
+// city name -> number of trucks parked there right now, rebuilt each frame
+// for the map's label badges. Reused rather than reallocated: at 3000
+// trucks this runs 60x a second.
+const parkedCounts = new Map();
 
 // Economy history: one sample every ECON_SAMPLE_MIN game-minutes, capped
 // at 48 game-hours. Instantaneous readouts (the Dispatch tiles) can't show
@@ -126,6 +139,10 @@ const state = {
   detailsView: null, // { kind: "truck", id } | { kind: "city", name } | null
   decisionTruck: null,
   decisionTimer: 0,
+  // Same shape as the junction pair above, for the load board shown when
+  // the controlled truck finishes a layover.
+  contractTruck: null,
+  contractTimer: 0,
   // Cargo-type id to spotlight on the map (everything else dims), or null.
   spotlightCargo: null,
 };
@@ -329,6 +346,41 @@ function showDecisionPanel(truck) {
   el.decisionOverlay.classList.remove("hidden");
 }
 
+// The controlled truck has finished its layover and needs a load. Same
+// contract that would have been picked for it by chooseOffer() is still
+// used if the timer runs out, so walking away never wedges the sim.
+function showContractPanel(truck) {
+  state.paused = true;
+  state.contractTruck = truck;
+  state.contractTimer = CONTRACT_TIMEOUT;
+
+  el.contractCity.textContent = truck.parkedAt || "";
+  el.contractOptions.innerHTML = "";
+  truck.pendingOffers.forEach((offer, idx) => {
+    const btn = document.createElement("button");
+    btn.className = "contract-btn";
+    btn.style.setProperty("--cargo", offer.truckType.color);
+    const rpm = offer.payout / Math.max(1, offer.optimalMiles);
+    btn.innerHTML = `<span class="c-type">${offer.truckType.label}</span>
+      <span class="c-cargo">${offer.cargo}</span>
+      <span class="c-dest">&rarr; ${offer.destination}</span>
+      <span class="c-meta"><span>${Math.round(offer.optimalMiles).toLocaleString()} mi &middot; $${rpm.toFixed(2)}/mi</span><span class="c-pay">$${offer.payout.toLocaleString()}</span></span>
+      <span class="c-key">[${idx + 1}]</span>`;
+    btn.addEventListener("click", () => resolveContract(offer));
+    el.contractOptions.appendChild(btn);
+  });
+  el.contractOverlay.classList.remove("hidden");
+}
+
+function resolveContract(offer) {
+  const truck = state.contractTruck;
+  if (!truck) return;
+  truck._takeContract(graph, offer, null);
+  el.contractOverlay.classList.add("hidden");
+  state.contractTruck = null;
+  state.paused = false;
+}
+
 function resolveDecision(chosenEdge) {
   const truck = state.decisionTruck;
   if (!truck) return;
@@ -339,9 +391,14 @@ function resolveDecision(chosenEdge) {
 }
 
 window.addEventListener("keydown", (ev) => {
-  if (!state.decisionTruck) return;
   const n = parseInt(ev.key, 10);
-  if (n >= 1 && n <= state.decisionTruck.pendingOptions.length) resolveDecision(state.decisionTruck.pendingOptions[n - 1]);
+  if (state.decisionTruck) {
+    if (n >= 1 && n <= state.decisionTruck.pendingOptions.length) resolveDecision(state.decisionTruck.pendingOptions[n - 1]);
+    return;
+  }
+  if (state.contractTruck) {
+    if (n >= 1 && n <= state.contractTruck.pendingOffers.length) resolveContract(state.contractTruck.pendingOffers[n - 1]);
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -458,6 +515,11 @@ function bootSim(newSettings) {
   el.btnNavToggle.classList.add("hidden");
   el.btnNavToggle.classList.remove("active");
   el.decisionOverlay.classList.add("hidden");
+  // Restarting mid-choice must also tear down the load board, or a dead
+  // overlay stays pinned over the map referencing a truck that no longer
+  // exists in the respawned fleet.
+  el.contractOverlay.classList.add("hidden");
+  state.contractTruck = null;
   el.fleetCount.textContent = `${trucks.length} UNITS`;
 
   camera.unfollow();
@@ -510,11 +572,23 @@ function frame(now) {
 
   try {
     if (state.paused) {
-      state.decisionTimer -= dt;
-      const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
-      el.decisionTimerFill.style.width = pct + "%";
-      if (state.decisionTimer <= 0 && state.decisionTruck) {
-        resolveDecision(state.decisionTruck.pendingOptions[0]);
+      if (state.contractTruck) {
+        state.contractTimer -= dt;
+        el.contractTimerFill.style.width = Math.max(0, state.contractTimer / CONTRACT_TIMEOUT) * 100 + "%";
+        if (state.contractTimer <= 0) {
+          // Timed out: fall back to the driver's own preference rather than
+          // just grabbing offer[0], so an unattended truck still behaves in
+          // character.
+          const t = state.contractTruck;
+          resolveContract(chooseOffer(t.pendingOffers, t.driver) || t.pendingOffers[0]);
+        }
+      } else {
+        state.decisionTimer -= dt;
+        const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
+        el.decisionTimerFill.style.width = pct + "%";
+        if (state.decisionTimer <= 0 && state.decisionTruck) {
+          resolveDecision(state.decisionTruck.pendingOptions[0]);
+        }
       }
     } else if (!state.settingsOpen) {
       state.gameSeconds += dt * BASE_TIME_SCALE * state.timeScale;
@@ -531,8 +605,12 @@ function frame(now) {
         showRushHour: settings.showRushHour,
         gameSeconds: state.gameSeconds,
       };
-      const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck(), env);
-      if (decisionTruck) showDecisionPanel(decisionTruck);
+      // updateFleet returns whichever truck needs the player: a junction
+      // choice mid-route, or a load choice at the end of a layover. The
+      // truck's own flags say which.
+      const waiting = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck(), env);
+      if (waiting && waiting.awaitingContract) showContractPanel(waiting);
+      else if (waiting) showDecisionPanel(waiting);
       sampleEconomy();
       checkDayRollover();
     }
@@ -557,6 +635,12 @@ function frame(now) {
     }
     camera.update();
 
+    parkedCounts.clear();
+    for (const t of trucks) {
+      if (!t.parkedAt) continue;
+      parkedCounts.set(t.parkedAt, (parkedCounts.get(t.parkedAt) || 0) + 1);
+    }
+
     drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
       showAllLabels: settings.showAllLabels,
       showMedians: settings.showMedians,
@@ -567,6 +651,7 @@ function frame(now) {
       showWeather: settings.showWeather,
       weather,
       spotlightCargo: state.spotlightCargo,
+      parkedCounts,
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
     });

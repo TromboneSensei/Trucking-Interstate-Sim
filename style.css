@@ -664,3 +664,72 @@ html, body {
   color: var(--dim);
 }
 #daily-digest .digest-star strong { color: var(--ink); }
+
+
+/* ---------------------------------------------------------------------
+   Load board: shown when the player-controlled truck finishes its layover
+   and has to pick its next contract. Deliberately mirrors the junction
+   decision overlay's geometry and z-index so the two never fight for the
+   same screen space - only one can ever be open, since both pause the sim.
+   --------------------------------------------------------------------- */
+#contract-overlay {
+  position: fixed;
+  left: 50%;
+  bottom: calc(45vh + 16px);
+  transform: translateX(-50%);
+  width: min(94vw, 620px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 14px 12px 12px;
+  z-index: 8;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+#contract-title {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--caution);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+#contract-city { color: var(--ink); }
+#contract-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+.contract-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cargo, var(--line));
+  border-radius: 4px;
+  padding: 9px 10px 8px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+}
+.contract-btn:active, .contract-btn:hover { background: #2a3441; border-color: var(--caution); }
+.contract-btn .c-cargo {
+  font-size: 0.78rem; font-weight: 700; line-height: 1.15;
+}
+.contract-btn .c-type {
+  font-size: 0.6rem; font-family: var(--font-mono); color: var(--cargo, var(--dim));
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.contract-btn .c-dest { font-size: 0.7rem; color: var(--ink); }
+.contract-btn .c-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.64rem; font-family: var(--font-mono); color: var(--dim);
+}
+.contract-btn .c-pay { color: var(--good); font-weight: 700; font-size: 0.78rem; }
+.contract-btn .c-key { font-size: 0.6rem; color: var(--caution); font-family: var(--font-mono); }
+#contract-timer { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); margin-top: 12px; overflow: hidden; }
+#contract-timer-fill { height: 100%; width: 100%; background: var(--caution); transform-origin: left; }
