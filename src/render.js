@@ -599,7 +599,36 @@ function lerpRgba(rgbaA, rgbaB, t) {
 // the sky grade, so a storm at night is correctly swallowed by the dark
 // rather than glowing through it. Only a handful of cells exist, so this
 // is a few gradient fills per frame.
-export function drawWeather(ctx, cells, cull) {
+// Weather reads as a FRONT, not as fog. The interior wash stays light on
+// purpose - a storm should never take over the map - so legibility comes
+// from a defined rim and a name rather than from opacity.
+//
+// The soft-gradient-only version was hardest to see in exactly the case
+// that matters most: zoomed in, the viewport can sit entirely INSIDE one
+// cell, so there is no edge anywhere on screen and no unaffected ground to
+// compare against. A uniform faint tint with no reference is invisible. A
+// rim gives the eye something to lock onto, and the label says what it is
+// without covering anything.
+//
+// Rain also had almost no hue contrast to fight with: its old blue-grey
+// sat a few points away from the land and road palette it was painted
+// over. These are pushed toward cyan so the same alpha reads as weather
+// instead of as a slightly different grey.
+const WEATHER_STYLE = {
+  rain: { fill: "96, 158, 216", rim: "132, 202, 250", label: "RAIN" },
+  snow: { fill: "214, 234, 255", rim: "240, 250, 255", label: "SNOW" },
+};
+// Below this on-screen radius a cell is too small to label without the
+// text becoming map clutter rather than information. Tuned so the larger
+// systems are named at country zoom - which is the view where you are
+// picking systems out of the whole map and most want to know which is
+// which. Zoomed in far enough to be inside a cell the label is off
+// screen anyway, and there the tint hue and the front arc carry it.
+const WEATHER_LABEL_MIN_PX = 44;
+
+export function drawWeather(ctx, cells, cull, camera) {
+  const zoom = camera ? camera.zoom : 1;
+  const visible = [];
   for (const c of cells) {
     if (cull.nav) {
       const dx = c.x - cull.cx, dy = c.y - cull.cy;
@@ -609,17 +638,61 @@ export function drawWeather(ctx, cells, cull) {
                c.y + c.r < cull.minY || c.y - c.r > cull.maxY) {
       continue;
     }
-    const snow = c.kind === "snow";
-    const rgb = snow ? "226, 236, 248" : "120, 150, 190";
+    visible.push(c);
+  }
+  if (!visible.length) return;
+
+  // Interior wash. Each cell needs its own gradient (they differ in
+  // centre, radius and intensity), so this one cannot batch.
+  for (const c of visible) {
+    const st = WEATHER_STYLE[c.kind] || WEATHER_STYLE.rain;
     const grad = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
-    grad.addColorStop(0, `rgba(${rgb}, ${0.30 * c.intensity})`);
-    grad.addColorStop(0.55, `rgba(${rgb}, ${0.17 * c.intensity})`);
-    grad.addColorStop(1, `rgba(${rgb}, 0)`);
+    grad.addColorStop(0, `rgba(${st.fill}, ${0.30 * c.intensity})`);
+    grad.addColorStop(0.55, `rgba(${st.fill}, ${0.16 * c.intensity})`);
+    grad.addColorStop(1, `rgba(${st.fill}, 0)`);
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // The fronts: one dashed path per kind rather than one per cell.
+  // setLineDash forces the path to be re-tessellated on stroke, so the
+  // number of dashed strokes is what costs, not the number of arcs in
+  // them. Rim alpha is fixed per kind for that reason - per-cell
+  // intensity would force a separate stroke each and is already carried
+  // by the wash underneath.
+  ctx.save();
+  ctx.lineWidth = 1.5 / zoom;
+  ctx.setLineDash([11 / zoom, 8 / zoom]);
+  for (const kind of ["rain", "snow"]) {
+    const list = visible.filter((c) => (c.kind === "snow" ? "snow" : "rain") === kind);
+    if (!list.length) continue;
+    ctx.strokeStyle = `rgba(${WEATHER_STYLE[kind].rim}, 0.62)`;
+    ctx.beginPath();
+    for (const c of list) {
+      // moveTo before each arc so the ring is its own subpath and no
+      // connecting line is drawn between cells.
+      ctx.moveTo(c.x + c.r * 0.94, c.y);
+      ctx.arc(c.x, c.y, c.r * 0.94, 0, Math.PI * 2);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Named near the top of the cell rather than dead centre, so the label
+  // does not sit on whatever city or interchange is under the middle of
+  // it. Only the larger systems get named - see WEATHER_LABEL_MIN_PX.
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.font = `600 ${11 / zoom}px "Oswald", sans-serif`;
+  for (const c of visible) {
+    if (c.r * zoom <= WEATHER_LABEL_MIN_PX) continue;
+    const st = WEATHER_STYLE[c.kind] || WEATHER_STYLE.rain;
+    ctx.fillStyle = `rgba(${st.rim}, ${0.45 + 0.4 * c.intensity})`;
+    ctx.fillText(st.label, c.x, c.y - c.r * 0.94 + 16 / zoom);
+  }
+  ctx.restore();
 }
 
 // City dots, per-frame (moved out of the static bake alongside roads so a
@@ -891,7 +964,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   const congestion = renderOpts.showCongestion ? tallyCongestion(edgeList, trucks) : null;
   drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false, congestion);
   drawCityDots(ctx, graph, roadCull);
-  if (renderOpts.showWeather && renderOpts.weather) drawWeather(ctx, renderOpts.weather, roadCull);
+  if (renderOpts.showWeather && renderOpts.weather) drawWeather(ctx, renderOpts.weather, roadCull, camera);
 
   // Darkness overlay: a world-space horizontal gradient sampled across the
   // visible X-range, drawn INSIDE the camera transform so rotation/tilt
