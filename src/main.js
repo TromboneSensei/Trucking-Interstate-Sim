@@ -5,7 +5,7 @@ import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 const TAP_TOLERANCE_PX = 26;
@@ -485,6 +485,10 @@ initUI({
     state.spotlightCargo = state.spotlightCargo === id ? null : id;
     renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
   },
+  // A newly revealed panel has been going unrefreshed while hidden, so
+  // force the periodic refresh to fire on the very next frame rather than
+  // leaving it stale (or blank) for up to 400ms.
+  onVisibleTabChange: () => { lastUiRefresh = 0; },
 });
 bootSim(DEFAULT_SETTINGS);
 
@@ -581,10 +585,17 @@ function frame(now) {
 
     if (now - lastUiRefresh > 400) {
       lastUiRefresh = now;
-      renderDispatchTab(trucks, graph);
-      renderRankingsTab(trucks, graph);
-      renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
-      if (state.detailsView && state.detailsView.kind === "city") {
+      // Only the tab the user is actually looking at gets rebuilt. These
+      // renders wipe and repopulate a whole panel's DOM and the ranking
+      // ones sort the entire fleet; doing that for two hidden panels 2.5
+      // times a second was a large, invisible cost at 3000 trucks. Each
+      // tab re-renders on the next tick after it's opened, so switching
+      // still shows current numbers immediately.
+      const tab = visibleTab();
+      if (tab === "overview") renderDispatchTab(trucks, graph);
+      else if (tab === "rankings") renderRankingsTab(trucks, graph);
+      else if (tab === "economy") renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
+      if (tab === "details" && state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }
     }

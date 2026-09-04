@@ -20,6 +20,11 @@ const el = {
 let onSelectTruck = null;
 let onSpotlightCargo = null;
 let onToggleControl = null;
+// Fired whenever which panel is on screen changes (tab switch, or the
+// sheet being collapsed/expanded). main.js only refreshes the visible tab
+// now, so it needs to know to render the newly-revealed one right away
+// instead of leaving it blank until the next periodic tick.
+let onVisibleTabChange = null;
 let dispatchDrill = null; // null = the Dispatch summary cards; "corridors" | "interstates" = drilled into that ranking
 let rankingsDrillKey = null; // null = the Rankings leader cards; a key (possibly "city:"-prefixed) = drilled into that ranking
 let selectedCityName = null; // set once a city is picked out of a city ranking - replaces the Rankings tab with that city's full page
@@ -30,6 +35,7 @@ export function initUI(callbacks) {
   onSelectTruck = callbacks.onSelectTruck;
   onToggleControl = callbacks.onToggleControl;
   onSpotlightCargo = callbacks.onSpotlightCargo;
+  onVisibleTabChange = callbacks.onVisibleTabChange;
 
   // Tapping a cargo row spotlights that cargo type on the map. Delegated
   // like the other panels, since the Economy tab is rebuilt wholesale on
@@ -39,7 +45,13 @@ export function initUI(callbacks) {
     if (row && onSpotlightCargo) onSpotlightCargo(row.dataset.cargo);
   });
 
-  el.handle.addEventListener("click", () => el.sheet.classList.toggle("minimized"));
+  el.handle.addEventListener("click", () => {
+    el.sheet.classList.toggle("minimized");
+    // Expanding the sheet reveals a panel that has not been refreshed
+    // while it was hidden, so it needs the same immediate rebuild a tab
+    // switch gets.
+    if (onVisibleTabChange) onVisibleTabChange();
+  });
   el.tabs.forEach((btn) => {
     btn.addEventListener("click", () => openTab(btn.dataset.tab));
   });
@@ -101,8 +113,20 @@ export function resetUIState() {
   el.detailsData.innerHTML = "";
 }
 
+// Which tab's panel is on screen. Only that one is worth re-rendering on
+// the periodic refresh - rebuilding the DOM of two hidden panels 2.5 times
+// a second was pure waste, and the rankings ones are the most expensive
+// renders in the app. Also tracks whether the sheet is collapsed, since a
+// minimized sheet shows no panel at all.
+let activeTabName = "overview";
+export function visibleTab() {
+  return el.sheet.classList.contains("minimized") ? null : activeTabName;
+}
+
 function openTab(name) {
   el.sheet.classList.remove("minimized");
+  activeTabName = name;
+  if (onVisibleTabChange) onVisibleTabChange();
   el.tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".content-panel").forEach((p) => p.classList.remove("active"));
   document.getElementById(`tab-${name}`).classList.add("active");
@@ -218,26 +242,79 @@ const TRUCK_STATS = {
 };
 
 // Same idea, for cities. population is static (from data.js); inbound/
-// outbound are live counts over the current fleet, so their `get` also
-// takes `trucks`.
+// outbound are live counts over the current fleet.
+//
+// `get` here takes a PRECOMPUTED tally rather than the raw truck array, and
+// that is load-bearing, not a style choice. These used to run
+// `trucks.filter(...)` inside the sort comparator, which made ranking the
+// ~343 cities cost O(cities x log(cities) x trucks): roughly 2,900
+// comparisons, each scanning all 3,000 trucks twice and allocating two
+// throwaway arrays. That is ~17 million truck visits per ranking, two
+// rankings per refresh, 2.5 refreshes a second - and it measured at 21-23%
+// of total CPU in a profile at 3,000 trucks. Tallying once up front makes
+// it O(trucks + cities x log(cities)) instead.
 const CITY_STATS = {
   population: { label: "Largest Cities", dir: "desc", get: (c) => c.pop || 0, fmt: (v) => v.toLocaleString(), unit: "" },
-  inbound: { label: "Most Inbound Traffic", dir: "desc", get: (c, trucks) => trucks.filter((t) => t.contract.destination === c.name).length, fmt: (v) => v, unit: " inbound" },
-  outbound: { label: "Most Outbound Traffic", dir: "desc", get: (c, trucks) => trucks.filter((t) => t.contract.origin === c.name).length, fmt: (v) => v, unit: " outbound" },
+  inbound: { label: "Most Inbound Traffic", dir: "desc", get: (c, tally) => tally.inbound.get(c.name) || 0, fmt: (v) => v, unit: " inbound" },
+  outbound: { label: "Most Outbound Traffic", dir: "desc", get: (c, tally) => tally.outbound.get(c.name) || 0, fmt: (v) => v, unit: " outbound" },
 };
+
+// One pass over the fleet produces both counts for every city at once.
+// Deliberately NOT cached across calls: a tally is a single 3,000-element
+// scan, and contracts turn over constantly, so caching it would trade a
+// negligible saving for a real risk of showing stale counts.
+function cityTally(trucks) {
+  const inbound = new Map(), outbound = new Map();
+  for (const t of trucks) {
+    const d = t.contract.destination, o = t.contract.origin;
+    inbound.set(d, (inbound.get(d) || 0) + 1);
+    outbound.set(o, (outbound.get(o) || 0) + 1);
+  }
+  return { inbound, outbound };
+}
+
+// Only the single leader is ever needed for the summary cards, so take it
+// in one linear scan rather than copying and fully sorting the fleet.
+// Sorting 3,000 trucks is ~34,600 comparisons; this is 3,000.
+function leaderTruckBy(trucks, key) {
+  const stat = TRUCK_STATS[key];
+  const asc = stat.dir === "asc";
+  let best = null, bestV = 0;
+  for (const t of trucks) {
+    const v = stat.get(t);
+    if (best === null || (asc ? v < bestV : v > bestV)) { best = t; bestV = v; }
+  }
+  return best;
+}
 
 function sortedTrucksBy(trucks, key) {
   const stat = TRUCK_STATS[key];
-  return [...trucks].sort((a, b) => stat.dir === "asc" ? stat.get(a) - stat.get(b) : stat.get(b) - stat.get(a));
+  // Decorate-sort-undecorate: stat.get runs once per truck instead of
+  // twice per comparison. For etaMiles in particular that matters a lot -
+  // its getter walks the truck's whole remaining path.
+  const decorated = trucks.map((t) => ({ t, v: stat.get(t) }));
+  decorated.sort(stat.dir === "asc" ? (a, b) => a.v - b.v : (a, b) => b.v - a.v);
+  return decorated.map((d) => d.t);
 }
 
+// The set of real cities is fixed for the life of the graph, so build the
+// array once instead of filtering 375 nodes on every ranking render.
+const realCitiesCache = new WeakMap();
 function realCities(graph) {
-  return Object.values(graph.nodes).filter((n) => n.t > 0);
+  let list = realCitiesCache.get(graph);
+  if (!list) {
+    list = Object.values(graph.nodes).filter((n) => n.t > 0);
+    realCitiesCache.set(graph, list);
+  }
+  return list;
 }
 
 function sortedCitiesBy(graph, trucks, key) {
   const stat = CITY_STATS[key];
-  return realCities(graph).sort((a, b) => stat.dir === "asc" ? stat.get(a, trucks) - stat.get(b, trucks) : stat.get(b, trucks) - stat.get(a, trucks));
+  const tally = cityTally(trucks);
+  const decorated = realCities(graph).map((c) => ({ c, v: stat.get(c, tally) }));
+  decorated.sort(stat.dir === "asc" ? (a, b) => a.v - b.v : (a, b) => b.v - a.v);
+  return decorated.map((d) => d.c);
 }
 
 function listRow(rank, mainText, subText, valueText, valueUnit, onClick, dataAttr) {
@@ -341,7 +418,7 @@ export function renderRankingsTab(trucks, graph) {
     fleetGrid.className = "metric-grid";
     for (const key in TRUCK_STATS) {
       const stat = TRUCK_STATS[key];
-      const leader = sortedTrucksBy(trucks, key)[0];
+      const leader = leaderTruckBy(trucks, key);
       const card = document.createElement("div");
       card.className = "metric-card good";
       card.dataset.drill = key;
@@ -357,13 +434,14 @@ export function renderRankingsTab(trucks, graph) {
 
     const cityGrid = document.createElement("div");
     cityGrid.className = "metric-grid";
+    const cardTally = cityTally(trucks);
     for (const key in CITY_STATS) {
       const stat = CITY_STATS[key];
       const leader = sortedCitiesBy(graph, trucks, key)[0];
       const card = document.createElement("div");
       card.className = "metric-card info";
       card.dataset.drill = "city:" + key;
-      card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader, trucks))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
+      card.innerHTML = `<div class="metric-title">${stat.label}</div><div class="metric-value">${stat.fmt(stat.get(leader, cardTally))}${stat.unit}</div><div class="metric-sub">${leader.name}</div>`;
       cityGrid.appendChild(card);
     }
     el.rankings.appendChild(cityGrid);
@@ -431,12 +509,13 @@ function renderCityDrilldown(trucks, graph, key) {
   el.rankings.appendChild(chipRow);
 
   const list = document.createElement("div");
+  const listTally = cityTally(trucks);
   sortedCitiesBy(graph, trucks, key).slice(0, 10).forEach((c, i) => {
     list.appendChild(listRow(
       i + 1,
       c.name,
       cityTierLabel(c.t),
-      stat.fmt(stat.get(c, trucks)),
+      stat.fmt(stat.get(c, listTally)),
       stat.unit,
       null,
       ["city", c.name]

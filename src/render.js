@@ -88,6 +88,11 @@ const DETAIL_MIN_PX = 18; // band width in screen px below which only the simple
 const DETAIL_FULL_PX = 34; // band width in screen px above which only full detail renders
 
 const MEDIAN_WIDTH = 0.7;
+// Stroke widths of the two thin road detail layers, in world units. Named
+// rather than inlined so drawRoads can compare them against the current
+// zoom and skip whichever would land under a screen pixel.
+const SHOULDER_LINE_WIDTH = 1.8;
+const FOG_LINE_WIDTH = 1.0;
 
 // Viewport-cull padding for the per-truck draw loop, in world units - only
 // covers the dot's own footprint (radius + selection ring + stroke), tied
@@ -459,6 +464,21 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
   }
 
   if (k > 0) {
+    // A stroke thinner than about three quarters of a screen pixel paints
+    // a faint smear that is indistinguishable from not drawing it at all -
+    // but it still costs a full pass over every visible edge plus the
+    // rasterisation of an antialiased hairline the length of the country.
+    // The fog lines (1.0 world unit) and the median (0.7) go sub-pixel
+    // below zoom ~1, which is exactly the mid-zoom range that profiled as
+    // the worst frame time in the app, so skipping them there removes real
+    // work and changes nothing you can see. Each layer is gated on its own
+    // on-screen width rather than on a single blanket zoom threshold.
+    const MIN_VISIBLE_PX = 0.75;
+    const onScreen = (worldWidth) => worldWidth * camera.zoom >= MIN_VISIBLE_PX;
+    const drawShoulders = onScreen(SHOULDER_LINE_WIDTH);
+    const drawFog = onScreen(FOG_LINE_WIDTH);
+    const drawMedian = onScreen(MEDIAN_WIDTH);
+
     ctx.globalAlpha = k;
     for (const kind of ["highway", "interstate"]) {
       const list = visible[kind];
@@ -475,31 +495,35 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
       ctx.stroke();
 
       // Shoulder outlines, both sides
-      ctx.strokeStyle = lerpColor(dayC.shoulder, nightC.shoulder, colorT);
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      for (const e of list) {
-        ctx.moveTo(e.ax + e.px * half, e.ay + e.py * half);
-        ctx.lineTo(e.bx + e.px * half, e.by + e.py * half);
-        ctx.moveTo(e.ax - e.px * half, e.ay - e.py * half);
-        ctx.lineTo(e.bx - e.px * half, e.by - e.py * half);
+      if (drawShoulders) {
+        ctx.strokeStyle = lerpColor(dayC.shoulder, nightC.shoulder, colorT);
+        ctx.lineWidth = SHOULDER_LINE_WIDTH;
+        ctx.beginPath();
+        for (const e of list) {
+          ctx.moveTo(e.ax + e.px * half, e.ay + e.py * half);
+          ctx.lineTo(e.bx + e.px * half, e.by + e.py * half);
+          ctx.moveTo(e.ax - e.px * half, e.ay - e.py * half);
+          ctx.lineTo(e.bx - e.px * half, e.by - e.py * half);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
 
       // Fog lines, both sides
-      ctx.strokeStyle = lerpColor(dayC.fog, nightC.fog, colorT);
-      ctx.lineWidth = 1.0;
-      ctx.beginPath();
-      for (const e of list) {
-        ctx.moveTo(e.ax + e.px * fog, e.ay + e.py * fog);
-        ctx.lineTo(e.bx + e.px * fog, e.by + e.py * fog);
-        ctx.moveTo(e.ax - e.px * fog, e.ay - e.py * fog);
-        ctx.lineTo(e.bx - e.px * fog, e.by - e.py * fog);
+      if (drawFog) {
+        ctx.strokeStyle = lerpColor(dayC.fog, nightC.fog, colorT);
+        ctx.lineWidth = FOG_LINE_WIDTH;
+        ctx.beginPath();
+        for (const e of list) {
+          ctx.moveTo(e.ax + e.px * fog, e.ay + e.py * fog);
+          ctx.lineTo(e.bx + e.px * fog, e.by + e.py * fog);
+          ctx.moveTo(e.ax - e.px * fog, e.ay - e.py * fog);
+          ctx.lineTo(e.bx - e.px * fog, e.by - e.py * fog);
+        }
+        ctx.stroke();
       }
-      ctx.stroke();
 
       // Median - interstates only, centerline
-      if (kind === "interstate" && showMedians) {
+      if (kind === "interstate" && showMedians && drawMedian) {
         ctx.strokeStyle = dayC.median;
         ctx.lineWidth = MEDIAN_WIDTH;
         ctx.beginPath();
@@ -640,8 +664,23 @@ export function drawCityDots(ctx, graph, cull) {
 // following a truck) shrinks every label NOT in the set an additional
 // OFF_ROUTE_LABEL_SCALE, on top of its normal tier size - de-emphasizing
 // everything off the followed truck's route ahead.
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities) {
+// Font strings are built once and reused. Assigning ctx.font re-parses a
+// CSS font shorthand, which is one of the more expensive things you can do
+// per label, so both the concatenation and the assignment are avoided
+// whenever the value has not actually changed.
+const fontStrCache = new Map();
+function labelFont(px) {
+  let s = fontStrCache.get(px);
+  if (s === undefined) {
+    s = `600 ${px}px "Oswald", sans-serif`;
+    fontStrCache.set(px, s);
+  }
+  return s;
+}
+
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull) {
   ctx.textAlign = "center";
+  let lastFont = null;
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     if (node.t === 0) continue;
@@ -649,10 +688,23 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       const mult = LABEL_TIER_ZOOM_MULT[node.t] ?? Infinity;
       if (zoom < baseZoom * mult) continue;
     }
+    // Viewport cull. Without this every one of the ~343 real cities was
+    // drawn on every frame once zoom passed the tier thresholds - a
+    // ctx.font assignment plus a fillText each - no matter how far off
+    // screen it was. Measured at max zoom, where a handful of cities are
+    // actually visible, this was still issuing 343 fillText calls a frame.
+    if (cull) {
+      if (cull.nav) {
+        if ((node.x - cull.cx) ** 2 + (node.y - cull.cy) ** 2 > cull.radiusSq) continue;
+      } else if (node.x < cull.minX || node.x > cull.maxX || node.y < cull.minY || node.y > cull.maxY) {
+        continue;
+      }
+    }
     const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
     let fontPx = LABEL_FONT_PX[node.t];
     if (onRouteCities && !onRouteCities.has(name)) fontPx *= OFF_ROUTE_LABEL_SCALE;
-    ctx.font = `600 ${fontPx}px "Oswald", sans-serif`;
+    const font = labelFont(fontPx);
+    if (font !== lastFont) { ctx.font = font; lastFont = font; }
     ctx.fillStyle = LABEL_COLOR[node.t];
     if (counterRotation) {
       // Nav view: labels should look like they're standing up off the
@@ -722,11 +774,20 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
   // real-world driving-on-the-right). The reverse-direction edge stores
   // bearing+180, so its right-vector is the negation of this one -
   // opposing traffic lands on the opposite side of the median for free.
-  const rad = (edge.bearing * Math.PI) / 180;
-  const rightX = Math.cos(rad), rightY = Math.sin(rad);
+  //
+  // An edge's bearing never changes, so the sin/cos pair is computed once
+  // and memoised on the edge itself. This runs for every truck on every
+  // frame - at 3000 trucks that was 6000 trig calls a frame purely to
+  // recompute constants.
+  let rightX = edge._rightX;
+  if (rightX === undefined) {
+    const rad = (edge.bearing * Math.PI) / 180;
+    rightX = edge._rightX = Math.cos(rad);
+    edge._rightY = Math.sin(rad);
+  }
   const off = RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT;
   out.x += rightX * off;
-  out.y += rightY * off;
+  out.y += edge._rightY * off;
   return out;
 }
 
@@ -899,7 +960,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     onRouteCities = new Set(nodeSeq);
   }
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull);
 
   if (nodeSeq) {
     ctx.strokeStyle = "rgba(232, 163, 61, 0.85)";
@@ -960,11 +1021,18 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // Headlights are only worth drawing when it's actually dark AND we're
   // zoomed in far enough for the road detail to be showing - at
   // country-wide zoom the cones would be sub-pixel confetti, and that's
-  // also exactly the zoom where the most trucks are on screen at once. So
-  // this is off precisely when it would cost the most, which is what keeps
-  // it affordable at 5000 trucks.
+  // also exactly the zoom where the most trucks are on screen at once.
+  //
+  // The gate is FULL road detail (factor 1, zoom > 1.0), not merely "some
+  // detail" (factor > 0, zoom > 0.53). The old threshold let cones switch
+  // on across a zoom range that still shows nearly half the map - a couple
+  // of thousand of them at a 3000 truck fleet - which profiled as the
+  // single largest cost at mid zoom. Above zoom 1.0 the viewport covers
+  // ~13% of the country, so the cone count stays naturally bounded, and
+  // that is also the range where a cone is big enough to actually read as
+  // a headlight rather than a speck.
   const headlightsOn = dayNightOn && renderOpts.showHeadlights !== false
-    && darkAtMid > 0.22 && roadDetailFactor(camera) > 0;
+    && darkAtMid > 0.22 && roadDetailFactor(camera) >= 1;
   headlightPts.length = 0;
 
   const scratchPos = { x: 0, y: 0 }; // reused across the whole loop - no per-truck allocation
@@ -1011,7 +1079,10 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
       ctx.lineTo(x + fx * HEADLIGHT_LEN + rx * HEADLIGHT_SPREAD, y + fy * HEADLIGHT_LEN + ry * HEADLIGHT_SPREAD);
       ctx.lineTo(x + fx * HEADLIGHT_LEN - rx * HEADLIGHT_SPREAD, y + fy * HEADLIGHT_LEN - ry * HEADLIGHT_SPREAD);
       ctx.lineTo(x - rx * HEADLIGHT_HALF_W, y - ry * HEADLIGHT_HALF_W);
-      ctx.closePath();
+      // No closePath: fill() already treats every subpath as closed, so it
+      // was a pure no-op visually - but one issued once per truck. It
+      // profiled at 17% of all CPU at mid-zoom with a few thousand cones
+      // in a single path.
     }
     ctx.fill();
     ctx.restore();
@@ -1024,15 +1095,31 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // cargo colour, "show me only the reefers" costs nothing extra - it's
   // just a different alpha per bucket, no filtering or extra passes.
   const spotlight = renderOpts.spotlightCargo || null;
+  // Below roughly a pixel and a half across, a circle and a square are the
+  // same handful of shaded pixels - but arc() has to flatten a curve into
+  // segments where rect() is four points. That difference is irrelevant for
+  // one dot and very much not irrelevant for three thousand, which is
+  // exactly the situation at country zoom: the dot is 3.5 world units, so
+  // under about zoom 0.43 every truck on screen is sub-pixel. Zoomed in,
+  // where the dots are big enough for the shape to read, they stay round.
+  const dotPx = TRUCK_DOT_RADIUS * camera.zoom;
+  const squareDots = dotPx < 1.5;
+  const dotSide = TRUCK_DOT_RADIUS * 2;
   for (const [id, b] of truckBuckets) {
     if (b.xs.length === 0) continue;
     ctx.globalAlpha = fleetAlpha * (spotlight && id !== spotlight ? 0.12 : 1);
     ctx.fillStyle = b.color;
     ctx.beginPath();
-    for (let i = 0; i < b.xs.length; i++) {
-      const x = b.xs[i], y = b.ys[i];
-      ctx.moveTo(x + TRUCK_DOT_RADIUS, y); // starts this dot's subpath without a connecting line from the previous one
-      ctx.arc(x, y, TRUCK_DOT_RADIUS, 0, Math.PI * 2);
+    if (squareDots) {
+      for (let i = 0; i < b.xs.length; i++) {
+        ctx.rect(b.xs[i] - TRUCK_DOT_RADIUS, b.ys[i] - TRUCK_DOT_RADIUS, dotSide, dotSide);
+      }
+    } else {
+      for (let i = 0; i < b.xs.length; i++) {
+        const x = b.xs[i], y = b.ys[i];
+        ctx.moveTo(x + TRUCK_DOT_RADIUS, y); // starts this dot's subpath without a connecting line from the previous one
+        ctx.arc(x, y, TRUCK_DOT_RADIUS, 0, Math.PI * 2);
+      }
     }
     ctx.fill();
   }
