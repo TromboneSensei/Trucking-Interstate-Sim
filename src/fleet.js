@@ -10,10 +10,11 @@
 // they're in, whether they're mid-pass, and whether they're stopped at
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
-import { pickEdgesFrom, findPath, edgeId } from "./geo.js";
+import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
 import { generateContract } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
+import { weatherSpeedMultAt } from "./weather.js";
 
 // Game-seconds of simulated time per real second at 1.0x speed. Tuned so
 // a cross-country haul takes on the order of a minute of real time to
@@ -255,6 +256,63 @@ function buildLaneGroups(trucks) {
     g.lane1.sort((a, b) => a.s - b.s);
   }
   return groups;
+}
+
+// --- environment: rush hour + weather ---------------------------------
+//
+// Both slow a truck's cruise target rather than capping it, so they layer
+// with car-following instead of fighting it. `env` is
+// { weather, showWeather, showRushHour, gameSeconds } supplied by main.js;
+// when it's null (as in the pure-simulation regression harnesses) nothing
+// here runs and the sim behaves exactly as it did before these existed.
+
+// Peak commuter windows, in LOCAL minutes at the truck's own longitude -
+// morning and evening rush genuinely happen at 8am/5pm local across the
+// country, not simultaneously everywhere, and the terminator math needed
+// to know that already exists in geo.js.
+const RUSH_WINDOWS = [[420, 555], [960, 1110]]; // 07:00-09:15, 16:00-18:30
+const RUSH_WORST = 0.62; // speed multiplier at peak, right at a major metro
+
+// How "metro" an edge is, 0..1, from the heavier of its two endpoints.
+// Cached on the edge object the first time it's asked for: edges are
+// created once in buildGraph and never mutated, and this is a pure
+// function of the graph, so recomputing it per truck per tick would be
+// pure waste.
+function edgeMetroFactor(graph, edge) {
+  if (edge._metro === undefined) {
+    const a = graph.nodes[edge.from], b = graph.nodes[edge.to];
+    const w = Math.max(a.w || 0, b.w || 0);
+    edge._metro = Math.max(0, Math.min(1, (w - 4.5) / 5.5)); // w<=4.5 rural -> 0, w>=10 megacity -> 1
+  }
+  return edge._metro;
+}
+
+function rushHourMult(graph, truck, gameSeconds) {
+  const metro = edgeMetroFactor(graph, truck.edge);
+  if (metro <= 0) return 1;
+  const node = graph.nodes[truck.edge.from];
+  const m = localMinutesAtX(node.x, gameSeconds);
+  for (const [start, end] of RUSH_WINDOWS) {
+    if (m < start || m > end) continue;
+    // Ramp in and out across the window instead of a step change, so the
+    // fleet visibly congeals and then loosens again.
+    const t = (m - start) / (end - start);
+    const peak = Math.sin(t * Math.PI);
+    return 1 - (1 - RUSH_WORST) * peak * metro;
+  }
+  return 1;
+}
+
+function environmentSpeedMult(graph, truck, env) {
+  let mult = 1;
+  if (env.showRushHour) mult *= rushHourMult(graph, truck, env.gameSeconds);
+  if (env.showWeather && env.weather) {
+    // Edge midpoint is plenty for weather sampling - cells are hundreds of
+    // world units across, far larger than any single edge.
+    const a = graph.nodes[truck.edge.from], b = graph.nodes[truck.edge.to];
+    mult *= weatherSpeedMultAt(env.weather, (a.x + b.x) / 2, (a.y + b.y) / 2);
+  }
+  return mult;
 }
 
 // Speed cap for a truck approaching a real city (tier > 0) at the end of
@@ -532,7 +590,7 @@ function clampOverlaps(graph, laneGroups) {
 // explicitly taken control of via the details panel, a separate,
 // narrower thing than merely being followed by the camera), so the
 // caller can pause the whole sim and show the decision panel.
-export function updateFleet(graph, trucks, dt, timeScale, controlledTruck) {
+export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env = null) {
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
   const laneGroups = buildLaneGroups(trucks);
 
@@ -557,6 +615,11 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck) {
     if (truck.awaitingDecision || truck.pendingEdge || !truck.edge) continue;
 
     let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult;
+    // Environmental slowdowns are applied to the CRUISE target rather than
+    // as a hard cap, so car-following and the arrival decel below still
+    // compose on top normally - a truck crawling through a blizzard still
+    // brakes for the truck in front of it.
+    if (env) targetSpeed *= environmentSpeedMult(graph, truck, env);
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
     targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed));
 

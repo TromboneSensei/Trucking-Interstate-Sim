@@ -12,11 +12,13 @@ const el = {
   tabs: document.querySelectorAll(".tab-btn"),
   overview: document.getElementById("tab-overview"),
   rankings: document.getElementById("tab-rankings"),
+  economy: document.getElementById("tab-economy"),
   detailsEmpty: document.getElementById("details-empty"),
   detailsData: document.getElementById("details-data"),
 };
 
 let onSelectTruck = null;
+let onSpotlightCargo = null;
 let onToggleControl = null;
 let dispatchDrill = null; // null = the Dispatch summary cards; "corridors" | "interstates" = drilled into that ranking
 let rankingsDrillKey = null; // null = the Rankings leader cards; a key (possibly "city:"-prefixed) = drilled into that ranking
@@ -27,6 +29,15 @@ let lastGraph = null;
 export function initUI(callbacks) {
   onSelectTruck = callbacks.onSelectTruck;
   onToggleControl = callbacks.onToggleControl;
+  onSpotlightCargo = callbacks.onSpotlightCargo;
+
+  // Tapping a cargo row spotlights that cargo type on the map. Delegated
+  // like the other panels, since the Economy tab is rebuilt wholesale on
+  // every refresh.
+  el.economy.addEventListener("click", (e) => {
+    const row = e.target.closest("[data-cargo]");
+    if (row && onSpotlightCargo) onSpotlightCargo(row.dataset.cargo);
+  });
 
   el.handle.addEventListener("click", () => el.sheet.classList.toggle("minimized"));
   el.tabs.forEach((btn) => {
@@ -550,4 +561,156 @@ function renderCityDetails(city, graph, trucks) {
   el.detailsEmpty.classList.add("hidden");
   el.detailsData.classList.remove("hidden");
   el.detailsData.innerHTML = cityDetailsHTML(city, graph, trucks);
+}
+
+// ---------------------------------------------------------------------
+// Economy tab
+//
+// Chart design notes, since these decisions are load-bearing rather than
+// cosmetic:
+//  * Every trend here is a SINGLE series, so each gets one hue and no
+//    legend - the title names it. The two hues (#b8802a money, #4780cc
+//    operations) were picked by running them through a palette validator
+//    against this panel's own surface (#1b212a): both sit inside the dark
+//    lightness band, clear the chroma floor, hold ~24 dE separation under
+//    protanopia/tritanopia, and pass 3:1 contrast.
+//  * The cargo bars are ONE colour, not seven. A bar chart of "revenue by
+//    cargo type" is a single measure, and giving each bar its own hue
+//    would burn the colour channel re-encoding what bar length already
+//    says. The cargo's own map colour appears as a small chip beside the
+//    label instead, so identity still ties back to the map without the
+//    quantitative encoding depending on it - which matters because the
+//    cargo palette itself fails CVD separation (Flatbed vs Tanker are
+//    only dE 11 apart even in normal vision).
+//  * No hover tooltips: this panel is rebuilt every ~400ms while the sim
+//    runs, so hover state cannot survive a refresh. Direct labels on the
+//    endpoint and on every bar carry the same information statically.
+// ---------------------------------------------------------------------
+const CHART_MONEY = "#b8802a";
+const CHART_OPS = "#4780cc";
+
+// Ring-buffer samples arrive oldest-first as
+// { min, earnings, contracts, avgSpeed, rolling }.
+function seriesFrom(history, pick) {
+  const out = [];
+  for (let i = 1; i < history.length; i++) {
+    const a = history[i - 1], b = history[i];
+    const hours = (b.min - a.min) / 60;
+    if (hours <= 0) continue;
+    out.push(pick(a, b, hours));
+  }
+  return out;
+}
+
+// Centred moving average. Per-sample rates are genuinely spiky - a
+// 15-game-minute window catches whatever handful of contracts happened to
+// land in it - and an unsmoothed line renders as a hairball that hides the
+// very trend the chart exists to show. The section is labelled "smoothed"
+// so this isn't passed off as raw data.
+function smooth(values, window = 5) {
+  if (values.length < window) return values;
+  const half = Math.floor(window / 2);
+  const out = new Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(values.length - 1, i + half); j++) { sum += values[j]; n++; }
+    out[i] = sum / n;
+  }
+  return out;
+}
+
+// A single-series sparkline: hairline baseline, soft area fill, 2px line,
+// one endpoint marker, and a direct label only at that endpoint.
+function sparkline(values, color, w = 240, h = 52) {
+  if (values.length < 2) {
+    return `<div class="chart-empty">gathering data…</div>`;
+  }
+  let min = Infinity, max = -Infinity;
+  for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
+  if (max - min < 1e-9) { max = min + 1; }
+  const pad = (max - min) * 0.12;
+  min -= pad; max += pad;
+  const x = (i) => (i / (values.length - 1)) * (w - 2) + 1;
+  const y = (v) => h - 6 - ((v - min) / (max - min)) * (h - 14);
+  let d = "", area = `M ${x(0)} ${h - 2}`;
+  for (let i = 0; i < values.length; i++) {
+    d += `${i ? "L" : "M"} ${x(i).toFixed(1)} ${y(values[i]).toFixed(1)} `;
+    area += ` L ${x(i).toFixed(1)} ${y(values[i]).toFixed(1)}`;
+  }
+  area += ` L ${x(values.length - 1)} ${h - 2} Z`;
+  const lastX = x(values.length - 1), lastY = y(values[values.length - 1]);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img">
+    <line x1="0" y1="${h - 2}" x2="${w}" y2="${h - 2}" class="spark-axis"/>
+    <path d="${area}" fill="${color}" opacity="0.14"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" fill="${color}"/>
+  </svg>`;
+}
+
+function trendCard(title, values, color, currentText) {
+  return `<div class="chart-card">
+    <div class="chart-head"><span class="chart-title">${title}</span><span class="chart-now">${currentText}</span></div>
+    ${sparkline(smooth(values), color)}
+  </div>`;
+}
+
+// Horizontal bars: one hue, rounded outer end, 2px gaps, direct value on
+// each row, and the cargo's map colour as an identity chip.
+function barChart(rows, unitFmt, spotlight) {
+  const max = Math.max(...rows.map((r) => r.value), 1);
+  return rows.map((r) => {
+    const pct = Math.max(1.5, (r.value / max) * 100);
+    const on = spotlight === r.id;
+    return `<div class="cargo-row${on ? " spotlit" : ""}" data-cargo="${r.id}" title="Tap to spotlight ${r.label} on the map">
+      <span class="cargo-chip" style="background:${r.color}"></span>
+      <span class="cargo-name">${r.label}</span>
+      <span class="cargo-track"><span class="cargo-bar" style="width:${pct.toFixed(1)}%"></span></span>
+      <span class="cargo-val">${unitFmt(r.value)}</span>
+    </div>`;
+  }).join("");
+}
+
+export function renderEconomyTab(trucks, graph, history, spotlight) {
+  if (!trucks.length) { el.economy.innerHTML = ""; return; }
+
+  preserveScroll(el.economy, () => {
+    const revPerHr = seriesFrom(history, (a, b, h) => (b.earnings - a.earnings) / h);
+    const conPerHr = seriesFrom(history, (a, b, h) => (b.contracts - a.contracts) / h);
+    const speed = history.slice(1).map((s) => s.avgSpeed);
+    const rolling = history.slice(1).map((s) => s.rolling);
+
+    const last = (arr) => (arr.length ? arr[arr.length - 1] : 0);
+    const money = (v) => "$" + Math.round(v).toLocaleString();
+
+    // Per-cargo aggregates in one pass over the fleet.
+    const agg = new Map();
+    for (const t of trucks) {
+      const tt = t.contract.truckType;
+      let a = agg.get(tt.id);
+      if (!a) { a = { id: tt.id, label: tt.label, color: tt.color, count: 0, payout: 0, earned: 0 }; agg.set(tt.id, a); }
+      a.count++;
+      a.payout += t.contract.payout;
+      a.earned += t.earnings;
+    }
+    const byCount = [...agg.values()].map((a) => ({ ...a, value: a.count })).sort((x, y) => y.value - x.value);
+    // Average payout per load, NOT total revenue - total would just
+    // restate the fleet mix, whereas this answers "which freight is
+    // actually worth hauling" independent of how many you run.
+    const byPayout = [...agg.values()].map((a) => ({ ...a, value: a.payout / a.count })).sort((x, y) => y.value - x.value);
+
+    el.economy.innerHTML = `
+      <div class="section-label">Trends &mdash; last 48 sim hours, smoothed</div>
+      <div class="chart-grid">
+        ${trendCard("Revenue / hr", revPerHr, CHART_MONEY, money(last(revPerHr)) + "/hr")}
+        ${trendCard("Contracts / hr", conPerHr, CHART_MONEY, last(conPerHr).toFixed(1) + "/hr")}
+        ${trendCard("Fleet Avg Speed", speed, CHART_OPS, Math.round(last(speed)) + " mph")}
+        ${trendCard("Trucks Rolling", rolling, CHART_OPS, Math.round(last(rolling)).toLocaleString())}
+      </div>
+      <div class="section-label">Fleet Mix &mdash; tap a cargo to spotlight it on the map</div>
+      <div class="cargo-chart">${barChart(byCount, (v) => v.toLocaleString(), spotlight)}</div>
+      <div class="section-label">Avg Payout per Load</div>
+      <div class="cargo-chart">${barChart(byPayout, money, spotlight)}</div>
+      ${spotlight ? `<div class="detail-sub" style="margin-top:10px">Spotlighting <strong style="color:var(--ink)">${agg.get(spotlight)?.label || spotlight}</strong> &mdash; tap it again to clear.</div>` : ""}
+    `;
+  });
 }

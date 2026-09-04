@@ -4,7 +4,8 @@ import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, resetUIState } from "./ui.js";
+import { createWeather, updateWeather } from "./weather.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 const TAP_TOLERANCE_PX = 26;
@@ -21,6 +22,10 @@ const DEFAULT_SETTINGS = {
   showStateBorders: true,
   showDayNight: true,
   showCityLights: true,
+  showHeadlights: true,
+  showCongestion: true,
+  showWeather: true,
+  showRushHour: true,
 };
 
 const canvas = document.getElementById("map");
@@ -48,9 +53,14 @@ const el = {
   settingStateBorders: document.getElementById("setting-state-borders"),
   settingDayNight: document.getElementById("setting-day-night"),
   settingCityLights: document.getElementById("setting-city-lights"),
+  settingHeadlights: document.getElementById("setting-headlights"),
+  settingCongestion: document.getElementById("setting-congestion"),
+  settingWeather: document.getElementById("setting-weather"),
+  settingRushHour: document.getElementById("setting-rush-hour"),
   btnSettingsCancel: document.getElementById("btn-settings-cancel"),
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
+  dailyDigest: document.getElementById("daily-digest"),
 };
 
 window.addEventListener("error", (e) => {
@@ -68,12 +78,34 @@ const edgeList = buildEdgeList(graph);
 // unlike bgCanvas it doesn't depend on any setting today, but re-baking it
 // on every Apply costs nothing next to respawning the whole fleet anyway.
 let glowCanvas = null;
+// Drifting weather systems - rebuilt per boot so a restart gets a fresh
+// map, and shared by reference with both the sim and the renderer.
+let weather = [];
 let trucks = [];
 // id -> truck lookup, rebuilt once whenever `trucks` itself is rebuilt
 // (bootSim only) rather than re-scanned with .find() every frame - ids are
 // assigned once (Truck constructor's nextId++) and never reused, so the
 // cache stays valid for the whole life of a fleet.
 let truckById = new Map();
+
+// Economy history: one sample every ECON_SAMPLE_MIN game-minutes, capped
+// at 48 game-hours. Instantaneous readouts (the Dispatch tiles) can't show
+// whether the network is speeding up or seizing; rates need two points in
+// time, so they get recorded rather than recomputed.
+const ECON_SAMPLE_MIN = 15;
+const ECON_MAX_SAMPLES = 193; // 48h at 15-min spacing, plus one to diff against
+let econHistory = [];
+let lastEconSampleMin = -Infinity;
+
+// Daily digest: the fleet-wide totals as they stood at the start of the
+// current game-day, plus each truck's earnings at that moment, so the
+// midnight rollover can report the DAY's deltas rather than all-time
+// numbers (which the Dispatch tab already shows and which stop being
+// interesting once they're large).
+let dayIndex = 0;
+let dayStart = { miles: 0, earnings: 0, contracts: 0 };
+let dayStartEarningsById = new Map();
+let digestTimer = null;
 
 const state = {
   paused: false, // true only while a junction decision is pending (see showDecisionPanel/resolveDecision)
@@ -94,7 +126,86 @@ const state = {
   detailsView: null, // { kind: "truck", id } | { kind: "city", name } | null
   decisionTruck: null,
   decisionTimer: 0,
+  // Cargo-type id to spotlight on the map (everything else dims), or null.
+  spotlightCargo: null,
 };
+
+// Records one economy sample when enough game-time has passed. Cheap
+// (one pass over the fleet every 15 game-minutes, not every frame) and
+// the buffer is capped, so this can run forever without growing.
+function sampleEconomy() {
+  const nowMin = state.gameSeconds / 60;
+  if (nowMin - lastEconSampleMin < ECON_SAMPLE_MIN) return;
+  lastEconSampleMin = nowMin;
+
+  let earnings = 0, contracts = 0, speedSum = 0, rolling = 0;
+  for (const t of trucks) {
+    earnings += t.earnings;
+    contracts += t.contractsCompleted;
+    if (t.edge) { rolling++; speedSum += t.speed; }
+  }
+  econHistory.push({
+    min: nowMin,
+    earnings,
+    contracts,
+    avgSpeed: rolling ? speedSum / rolling : 0,
+    rolling,
+  });
+  if (econHistory.length > ECON_MAX_SAMPLES) econHistory.shift();
+}
+
+// ---------------------------------------------------------------------
+// Daily digest
+// ---------------------------------------------------------------------
+function captureDayStart() {
+  let miles = 0, earnings = 0, contracts = 0;
+  dayStartEarningsById = new Map();
+  for (const t of trucks) {
+    miles += t.totalMilesDriven;
+    earnings += t.earnings;
+    contracts += t.contractsCompleted;
+    dayStartEarningsById.set(t.id, t.earnings);
+  }
+  dayStart = { miles, earnings, contracts };
+}
+
+function hideDigest() {
+  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
+  el.dailyDigest.classList.add("hidden");
+}
+
+// Called once per frame; fires only on a midnight boundary.
+function checkDayRollover() {
+  const nowDay = Math.floor(state.gameSeconds / 86400);
+  if (nowDay === dayIndex) return;
+  const finished = dayIndex + 1; // the day that just ended, 1-based like the HUD clock
+  dayIndex = nowDay;
+
+  let miles = 0, earnings = 0, contracts = 0, best = null, bestGain = 0;
+  for (const t of trucks) {
+    miles += t.totalMilesDriven;
+    earnings += t.earnings;
+    contracts += t.contractsCompleted;
+    const gain = t.earnings - (dayStartEarningsById.get(t.id) ?? t.earnings);
+    if (gain > bestGain) { bestGain = gain; best = t; }
+  }
+  const dMiles = Math.max(0, miles - dayStart.miles);
+  const dEarn = Math.max(0, earnings - dayStart.earnings);
+  const dJobs = Math.max(0, contracts - dayStart.contracts);
+
+  el.dailyDigest.innerHTML = `
+    <div class="digest-title">Day ${finished} Complete</div>
+    <div class="digest-line"><span>Miles driven</span><span>${Math.round(dMiles).toLocaleString()}</span></div>
+    <div class="digest-line"><span>Revenue</span><span>$${Math.round(dEarn).toLocaleString()}</span></div>
+    <div class="digest-line"><span>Loads delivered</span><span>${dJobs.toLocaleString()}</span></div>
+    ${best ? `<div class="digest-star">Driver of the day: <strong>${best.name}</strong> &mdash; $${Math.round(bestGain).toLocaleString()}</div>` : ""}`;
+  el.dailyDigest.classList.remove("hidden");
+
+  if (digestTimer) clearTimeout(digestTimer);
+  digestTimer = setTimeout(hideDigest, 9000);
+
+  captureDayStart();
+}
 
 function getFollowedTruck() {
   return state.followedTruckId == null ? null : truckById.get(state.followedTruckId) || null;
@@ -150,6 +261,7 @@ function unfollow() {
   el.btnNavToggle.classList.add("hidden");
 }
 el.btnExitFollow.addEventListener("click", unfollow);
+el.dailyDigest.addEventListener("click", hideDigest);
 
 el.btnNavToggle.addEventListener("click", () => {
   if (!getFollowedTruck()) return; // button is hidden otherwise, but guard defensively
@@ -266,6 +378,12 @@ function openSettings() {
   el.settingAllLabels.checked = settings.showAllLabels;
   el.settingMedians.checked = settings.showMedians;
   el.settingStateBorders.checked = settings.showStateBorders;
+  el.settingDayNight.checked = settings.showDayNight;
+  el.settingCityLights.checked = settings.showCityLights;
+  el.settingHeadlights.checked = settings.showHeadlights;
+  el.settingCongestion.checked = settings.showCongestion;
+  el.settingWeather.checked = settings.showWeather;
+  el.settingRushHour.checked = settings.showRushHour;
   el.settingsOverlay.classList.remove("hidden");
 }
 
@@ -292,6 +410,10 @@ el.btnSettingsApply.addEventListener("click", () => {
     showStateBorders: el.settingStateBorders.checked,
     showDayNight: el.settingDayNight.checked,
     showCityLights: el.settingCityLights.checked,
+    showHeadlights: el.settingHeadlights.checked,
+    showCongestion: el.settingCongestion.checked,
+    showWeather: el.settingWeather.checked,
+    showRushHour: el.settingRushHour.checked,
   };
   closeSettings();
   bootSim(newSettings);
@@ -307,8 +429,18 @@ function bootSim(newSettings) {
 
   bgCanvas = renderStaticBackground(graph, settings);
   glowCanvas = renderCityGlow(graph);
+  weather = createWeather();
+  econHistory = [];
+  lastEconSampleMin = -Infinity;
+  dayIndex = Math.floor(settings.startSeconds / 86400);
+  hideDigest();
   trucks = spawnFleet(graph, settings.fleetSize);
   truckById = new Map(trucks.map((t) => [t.id, t]));
+  // Must come AFTER the fleet exists: it snapshots per-truck earnings to
+  // diff against at midnight, so capturing it against the previous (or
+  // empty) fleet would leave every truck's daily gain at zero and the
+  // digest permanently without a driver of the day.
+  captureDayStart();
 
   state.paused = false;
   state.settingsOpen = false;
@@ -337,14 +469,23 @@ function bootSim(newSettings) {
   camera.minZoom = zoom * 0.6;
 
   resetUIState();
+  state.spotlightCargo = null;
   renderDispatchTab(trucks, graph);
   renderRankingsTab(trucks, graph);
+  renderEconomyTab(trucks, graph, econHistory, null);
 }
 
 // ---------------------------------------------------------------------
 // UI wiring + main loop
 // ---------------------------------------------------------------------
-initUI({ onSelectTruck: followTruck, onToggleControl: toggleControl });
+initUI({
+  onSelectTruck: followTruck,
+  onToggleControl: toggleControl,
+  onSpotlightCargo: (id) => {
+    state.spotlightCargo = state.spotlightCargo === id ? null : id;
+    renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
+  },
+});
 bootSim(DEFAULT_SETTINGS);
 
 let lastTime = performance.now();
@@ -373,8 +514,23 @@ function frame(now) {
       }
     } else if (!state.settingsOpen) {
       state.gameSeconds += dt * BASE_TIME_SCALE * state.timeScale;
-      const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck());
+      const gameHours = (dt * BASE_TIME_SCALE * state.timeScale) / 3600;
+      if (settings.showWeather) updateWeather(weather, gameHours);
+      // Everything the simulation needs to know about the world outside
+      // the trucks themselves. Passed fresh each tick rather than held in
+      // fleet.js so the sim stays a pure function of its inputs - which is
+      // what lets the headless regression harnesses run it with env=null
+      // and get the original, environment-free behaviour.
+      const env = {
+        weather,
+        showWeather: settings.showWeather,
+        showRushHour: settings.showRushHour,
+        gameSeconds: state.gameSeconds,
+      };
+      const decisionTruck = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck(), env);
       if (decisionTruck) showDecisionPanel(decisionTruck);
+      sampleEconomy();
+      checkDayRollover();
     }
 
     const followed = getFollowedTruck();
@@ -402,6 +558,11 @@ function frame(now) {
       showMedians: settings.showMedians,
       showDayNight: settings.showDayNight,
       showCityLights: settings.showCityLights,
+      showHeadlights: settings.showHeadlights,
+      showCongestion: settings.showCongestion,
+      showWeather: settings.showWeather,
+      weather,
+      spotlightCargo: state.spotlightCargo,
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
     });
@@ -422,6 +583,7 @@ function frame(now) {
       lastUiRefresh = now;
       renderDispatchTab(trucks, graph);
       renderRankingsTab(trucks, graph);
+      renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
       if (state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }

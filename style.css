@@ -522,3 +522,145 @@ html, body {
   #top-bar { font-size: 0.7rem; gap: 6px; padding: 7px 10px; }
   #time-slider { width: 58px; }
 }
+
+/* ---------------------------------------------------------------------
+   Economy tab charts. Recessive chrome throughout: hairline axes one
+   shade off the surface, no gridlines, thin marks. Values and labels wear
+   text tokens rather than the series colour - the coloured mark beside
+   them carries identity.
+--------------------------------------------------------------------- */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+.chart-card {
+  background: var(--panel-strong);
+  border-radius: 2px;
+  padding: 9px 11px 4px;
+}
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.chart-title {
+  font-family: var(--font-body);
+  font-size: 0.64rem;
+  color: var(--dim);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.chart-now {
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spark { display: block; width: 100%; height: 52px; overflow: visible; }
+.spark-axis { stroke: rgba(255, 255, 255, 0.10); stroke-width: 1; }
+.chart-empty {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  color: var(--dim);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
+.cargo-chart { display: flex; flex-direction: column; gap: 2px; }
+.cargo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  background: var(--panel-strong);
+}
+.cargo-row:active, .cargo-row:hover { background: #2a3441; }
+.cargo-row.spotlit { outline: 1px solid var(--caution); }
+.cargo-chip { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.cargo-name {
+  font-family: var(--font-body);
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--ink);
+  width: 9.6em;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cargo-track { flex: 1; height: 9px; background: rgba(255, 255, 255, 0.06); border-radius: 2px; overflow: hidden; }
+/* Rounded only on the data end, anchored flat to the baseline. */
+.cargo-bar { display: block; height: 100%; background: #b8802a; border-radius: 0 4px 4px 0; }
+.cargo-val {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  width: 4.6em;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Daily digest - a end-of-day dispatch summary that slides in at
+   midnight. Deliberately corner-anchored rather than modal: it reports,
+   it doesn't interrupt, and the sim keeps running behind it. */
+#daily-digest {
+  position: fixed;
+  left: max(10px, env(safe-area-inset-left));
+  bottom: calc(45vh + 14px);
+  z-index: 7;
+  width: min(88vw, 268px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--caution);
+  border-radius: 3px;
+  padding: 11px 13px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+  animation: digest-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes digest-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+#daily-digest .digest-title {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--caution);
+  margin-bottom: 7px;
+}
+#daily-digest .digest-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.76rem;
+  padding: 2px 0;
+}
+#daily-digest .digest-line span:first-child { color: var(--dim); }
+#daily-digest .digest-line span:last-child {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+#daily-digest .digest-star {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  font-size: 0.72rem;
+  color: var(--dim);
+}
+#daily-digest .digest-star strong { color: var(--ink); }

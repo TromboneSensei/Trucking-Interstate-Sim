@@ -296,3 +296,55 @@ export function findPath(graph, startName, goalName) {
     cachePath(cacheKey, null);
     return null;
 }
+
+// ---------------------------------------------------------------------
+// World time-of-day. Lives here rather than in render.js because it's
+// pure geography/time math with no drawing in it, and BOTH the simulation
+// (fleet.js's rush-hour slowdown) and the renderer (the day/night colour
+// grade, city lights, headlights) need it - the sim importing the
+// renderer just to ask what time it is would be backwards.
+//
+// World x=0 is lon -125 (west), x=WORLD_WIDTH is lon -66 (east): a 59deg
+// span, ~3.93 hours of solar time. TERMINATOR_SWEEP_MIN sweeps local time
+// across that span (the west is always earlier), so sunset visibly
+// crosses the country instead of the whole map flipping at once.
+// ---------------------------------------------------------------------
+export const TERMINATOR_SWEEP_MIN = 240;
+export const DAWN_MIN = 6 * 60;   // 06:00 - full daylight from here
+export const DUSK_MIN = 19 * 60;  // 19:00 - darkness starts accumulating
+const NIGHT_LEN = 1440 - (DUSK_MIN - DAWN_MIN); // 660
+export const NIGHT_DARKNESS_MAX = 0.65;
+
+// Mean of rawDarknessAtX over a full 24h cycle: 0 for (1440-660)/1440 of
+// the day, and a half-sine (mean 2/PI of its peak) for the rest.
+const AVG_DARKNESS = NIGHT_DARKNESS_MAX * (2 / Math.PI) * (NIGHT_LEN / 1440);
+
+// Minute-of-day [0, 1440) at a given world X - i.e. the LOCAL clock at
+// that longitude, which is what "is it rush hour here" and "how dark is
+// it here" both actually depend on.
+export function localMinutesAtX(worldX, gameSeconds) {
+    const pctWest = 1 - worldX / WORLD_WIDTH;
+    let m = (gameSeconds / 60 - pctWest * TERMINATOR_SWEEP_MIN) % 1440;
+    if (m < 0) m += 1440;
+    return m;
+}
+
+// Local darkness [0, NIGHT_DARKNESS_MAX] straight off the HUD clock,
+// before any time-scale damping.
+export function rawDarknessAtX(worldX, gameSeconds) {
+    const m = localMinutesAtX(worldX, gameSeconds);
+    if (m >= DAWN_MIN && m < DUSK_MIN) return 0;
+    const p = m >= DUSK_MIN ? m - DUSK_MIN : m + 1440 - DUSK_MIN;
+    return Math.sin((p / NIGHT_LEN) * Math.PI) * NIGHT_DARKNESS_MAX;
+}
+
+// At 1x a full game day passes in 36 real seconds (BASE_TIME_SCALE=2400
+// game-seconds per real second); at the slider's 8x cap, 4.5 seconds -
+// undamped, the sky would strobe between noon and midnight several times
+// a minute. This blends toward the day's mean as timeScale climbs, so 1x
+// still shows a full cycle while high speeds settle into a steady dusk.
+// Identity at timeScale <= 1, so the common case is untouched.
+export function effectiveDarkness(raw, timeScale) {
+    const blend = 1 / (1 + Math.max(0, timeScale - 1) * 0.6);
+    return raw * blend + AVG_DARKNESS * (1 - blend);
+}

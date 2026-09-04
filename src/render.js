@@ -9,13 +9,24 @@
 // tiers are visible depends on the live camera zoom, drawn fresh each
 // frame against camera.baseZoom (the initial fit-to-screen zoom set by
 // main.js).
-import { WORLD_WIDTH, WORLD_HEIGHT, hashStr, mulberry32 } from "./geo.js";
+import {
+  WORLD_WIDTH, WORLD_HEIGHT, hashStr, mulberry32,
+  localMinutesAtX, rawDarknessAtX, effectiveDarkness, NIGHT_DARKNESS_MAX,
+} from "./geo.js";
 import { STATE_BORDER_RINGS } from "./states-data.js";
 import { TILT_FACTOR } from "./camera.js";
 import { TRUCK_TYPES } from "./economy.js";
 
 const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
-const STATE_BORDER_COLOR = "rgba(255, 255, 255, 0.85)"; // bright white, high opacity so it reads clearly against the dark basemap
+// The basemap is baked at its NOON appearance: land is a legible slate
+// blue and the surrounding void is near-black. Everything darker or
+// warmer than this is produced by the per-frame sky grade tinting away
+// from it (see SKY_KEYFRAMES), which is what gives the day/night cycle
+// somewhere to travel - a uniformly near-black map, as this used to be,
+// has no dynamic range for "night" to mean anything.
+const VOID_COLOR = "#05080f";
+const LAND_COLOR = "#2b3648";
+const STATE_BORDER_COLOR = "rgba(168, 186, 214, 0.55)"; // a soft edge ON the land, not a bright line on a void
 const STATE_BORDER_WIDTH = 1.6;
 const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
 export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
@@ -55,9 +66,13 @@ const ROAD_DAY = {
   interstate: { band: "rgba(85, 110, 140, 0.95)", shoulder: "#60a5fa", fog: "#94a3b8", median: "#ffd700" },
   highway: { band: "rgba(120, 95, 70, 0.9)", shoulder: "#fb923c", fog: "#94a3b8" },
 };
+// At night the roads should read as LIT - the lanes are the one thing
+// still bright once the land has gone dark, which is what sells the
+// whole cycle. The previous highway night colour was far too timid to
+// register against the graded land; this is a proper sodium-lamp amber.
 const ROAD_NIGHT = {
-  interstate: { band: "rgba(170, 205, 230, 0.90)", shoulder: "#60a5fa", fog: "#94a3b8", median: "#ffd700" },
-  highway: { band: "rgba(150, 120, 95, 0.85)", shoulder: "#fb923c", fog: "#94a3b8" },
+  interstate: { band: "rgba(170, 205, 230, 0.92)", shoulder: "#7dd3fc", fog: "#cbd5e1", median: "#ffd700" },
+  highway: { band: "rgba(240, 180, 90, 0.92)", shoulder: "#fdba74", fog: "#cbd5e1" },
 };
 // Simplified (zoomed-out) atlas-style single line per road kind, day/night
 // tinted the same as the full band's asphalt color.
@@ -93,6 +108,16 @@ const ROAD_CULL_PAD_WORLD_UNITS = BAND_HALF + 8;
 // beginPath()/fill() pass instead of one pair per truck.
 const truckBuckets = new Map(Object.values(TRUCK_TYPES).map((tt) => [tt.id, { color: tt.color, xs: [], ys: [] }]));
 
+// Headlight cones, kept deliberately short and narrow so they read as a
+// truck's own lights on the pavement rather than searchlights. Flat
+// [x, y, bearing, ...] triples in one reused array - same
+// no-allocation-per-frame discipline as truckBuckets above.
+const HEADLIGHT_LEN = 13;      // world units of throw ahead of the dot
+const HEADLIGHT_HALF_W = 2.2;  // half-width at the truck itself
+const HEADLIGHT_SPREAD = 4.6;  // half-width at the far end of the beam
+const HEADLIGHT_COLOR = "rgba(255, 220, 150, 0.16)";
+const headlightPts = [];
+
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
 // onward; each further tier needs progressively more zoom-in, revealed
@@ -109,43 +134,61 @@ const ROUTE_HIGHLIGHT_COLOR = "rgba(232, 163, 61, 0.85)"; // same amber as the d
 // ---------------------------------------------------------------------
 // Day/night
 // ---------------------------------------------------------------------
-// World x=0 is lon -125 (west), x=WORLD_WIDTH is lon -66 (east) - a 59deg
-// span, ~3.93 hours of solar time. TERMINATOR_SWEEP_MIN sweeps local time
-// across that span (west is earlier), so the terminator visibly crosses
-// the map instead of the whole country flipping day/night at once.
-const TERMINATOR_SWEEP_MIN = 240;
-const DAWN_MIN = 6 * 60, DUSK_MIN = 19 * 60;
-const NIGHT_LEN = 1440 - (DUSK_MIN - DAWN_MIN); // 660
-export const NIGHT_DARKNESS_MAX = 0.65;
-// Mean of rawDarknessAtX over a full 24h cycle: darkness is 0 for
-// (1440-660)/1440 of the day and a half-sine (mean 2/PI of its peak) for
-// the rest - NIGHT_DARKNESS_MAX * (2/PI) * (NIGHT_LEN/1440).
-const AVG_DARKNESS = NIGHT_DARKNESS_MAX * (2 / Math.PI) * (NIGHT_LEN / 1440);
+// Time-of-day sky grade. The reference sim only hard-swapped between a
+// day and a night palette at a darkness threshold; this interpolates a
+// full keyframed colour ramp instead, so the map warms through sunrise,
+// sits neutral at midday, burns orange at golden hour and cools into deep
+// blue overnight. Each keyframe is [minute-of-day, r, g, b, alpha], and
+// alpha 0 at midday means the baked basemap shows through completely
+// untinted - i.e. the bake IS the noon look and everything else grades
+// away from it. Wraps around midnight.
+const SKY_KEYFRAMES = [
+  [0,    6,  12, 28, 0.72], // midnight - deep blue-black
+  [300,  10, 18, 42, 0.66], // 05:00 pre-dawn, slightly bluer
+  [375,  58, 42, 62, 0.44], // 06:15 civil twilight, violet
+  [435, 158, 96, 48, 0.30], // 07:15 sunrise gold
+  [540, 120, 124, 132, 0.08], // 09:00 morning haze, nearly clear
+  [720, 255, 255, 255, 0.0],  // 12:00 noon - untinted
+  [1020, 138, 120, 100, 0.07], // 17:00 warm afternoon
+  [1110, 176, 92, 34, 0.30],  // 18:30 sunset gold
+  [1170, 74,  42, 66, 0.48],  // 19:30 dusk violet
+  [1290, 6,   12, 28, 0.72],  // 21:30 full night
+];
 
-// Local darkness [0, NIGHT_DARKNESS_MAX] at a given world X and game-clock
-// time, independent of the time-scale strobing concern below - this is
-// the "true" instantaneous value straight off the HUD clock.
-export function rawDarknessAtX(worldX, gameSeconds) {
-  const pctWest = 1 - worldX / WORLD_WIDTH;
-  let m = (gameSeconds / 60 - pctWest * TERMINATOR_SWEEP_MIN) % 1440;
-  if (m < 0) m += 1440;
-  if (m >= DAWN_MIN && m < DUSK_MIN) return 0;
-  const p = m >= DUSK_MIN ? m - DUSK_MIN : m + 1440 - DUSK_MIN;
-  return Math.sin((p / NIGHT_LEN) * Math.PI) * NIGHT_DARKNESS_MAX;
+// Interpolated sky tint at a local minute-of-day, as {r,g,b,a}.
+function skyTintAtMinute(m) {
+  let i = 0;
+  while (i < SKY_KEYFRAMES.length - 1 && SKY_KEYFRAMES[i + 1][0] <= m) i++;
+  const a = SKY_KEYFRAMES[i];
+  const b = SKY_KEYFRAMES[(i + 1) % SKY_KEYFRAMES.length];
+  // The final segment wraps past midnight back to the first keyframe.
+  const span = (b[0] - a[0] + 1440) % 1440 || 1440;
+  const t = Math.max(0, Math.min(1, ((m - a[0] + 1440) % 1440) / span));
+  return {
+    r: Math.round(a[1] + (b[1] - a[1]) * t),
+    g: Math.round(a[2] + (b[2] - a[2]) * t),
+    b: Math.round(a[3] + (b[3] - a[3]) * t),
+    a: a[4] + (b[4] - a[4]) * t,
+  };
 }
 
-// At 1x, a full game day passes in 36 real seconds (BASE_TIME_SCALE=2400s
-// per real second); at the settings slider's 8x cap, 4.5 real seconds -
-// undamped, the sky would visibly strobe between noon and midnight several
-// times a minute. This blends the raw value toward the day's mean as
-// timeScale climbs, so fast simulation still shows *a* day/night cycle at
-// 1x but settles into a steady dusk-ish mid-tone at high speed instead of
-// flickering. A clean, swappable policy function - identity at
-// timeScale <= 1, so nothing changes for the common case.
-export function effectiveDarkness(raw, timeScale) {
+// The tint at a world X, damped for time-scale the same way darkness is
+// (see effectiveDarkness) so cranking the speed slider doesn't strobe the
+// whole palette - the alpha is pulled toward its daily mean, which leaves
+// a permanent gentle dusk rather than a flicker.
+function skyTintAtX(worldX, gameSeconds, timeScale) {
+  const tint = skyTintAtMinute(localMinutesAtX(Math.max(0, Math.min(WORLD_WIDTH, worldX)), gameSeconds));
   const blend = 1 / (1 + Math.max(0, timeScale - 1) * 0.6);
-  return raw * blend + AVG_DARKNESS * (1 - blend);
+  tint.a = tint.a * blend + SKY_AVG_ALPHA * (1 - blend);
+  return tint;
 }
+
+// Mean alpha across the keyframe ramp, for the time-scale damping above.
+const SKY_AVG_ALPHA = (() => {
+  let sum = 0;
+  for (let m = 0; m < 1440; m += 10) sum += skyTintAtMinute(m).a;
+  return sum / 144;
+})();
 
 function lerpColor(hexA, hexB, t) {
   const a = parseInt(hexA.slice(1), 16), b = parseInt(hexB.slice(1), 16);
@@ -226,24 +269,30 @@ export function renderStaticBackground(graph, opts = {}) {
   const ctx = bg.getContext("2d");
   ctx.scale(BG_SCALE, BG_SCALE);
 
-  ctx.fillStyle = "#12161c";
+  ctx.fillStyle = VOID_COLOR;
   ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
   ctx.lineCap = "round";
 
-  // State borders only - roads, medians and city dots moved to a
-  // per-frame pass (see buildEdgeList/drawRoads/drawCityDots below) so
-  // day/night can recolor them and full road detail stays crisp at any
-  // zoom instead of being baked soft into this 1.5x bitmap.
+  // The state rings are closed polygons, so filling them (rather than only
+  // stroking, as this used to) yields the whole continental landmass in one
+  // path - and because coastlines, the Great Lakes, Chesapeake Bay and
+  // Puget Sound are all already separate rings in the data, they fall out
+  // as correctly-unfilled water for free. This single fill is what turns
+  // the map from "lines floating in a void" into an actual map, and gives
+  // the day/night grade a surface to act on.
+  ctx.beginPath();
+  for (const ring of STATE_BORDER_RINGS) {
+    ctx.moveTo(ring[0], ring[1]);
+    for (let i = 2; i < ring.length; i += 2) ctx.lineTo(ring[i], ring[i + 1]);
+    ctx.closePath();
+  }
+  ctx.fillStyle = LAND_COLOR;
+  ctx.fill();
+  // Reuse the exact same path for the border strokes - no need to rebuild it.
   if (showStateBorders) {
     ctx.strokeStyle = STATE_BORDER_COLOR;
     ctx.lineWidth = STATE_BORDER_WIDTH;
-    ctx.beginPath();
-    for (const ring of STATE_BORDER_RINGS) {
-      ctx.moveTo(ring[0], ring[1]);
-      for (let i = 2; i < ring.length; i += 2) ctx.lineTo(ring[i], ring[i + 1]);
-      ctx.closePath();
-    }
     ctx.stroke();
   }
 
@@ -261,6 +310,12 @@ export function buildEdgeList(graph) {
   if (cached) return cached;
 
   const edges = [];
+  // Maps BOTH directed edge objects of a segment to that segment's index
+  // in `edges`. Keyed by object identity, so the per-frame congestion
+  // tally can find a truck's segment with a plain Map lookup instead of
+  // rebuilding an "a|b|route" string for every truck every frame - at
+  // 5000 trucks that string churn would dwarf the drawing itself.
+  const indexByEdge = new Map();
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     for (const e of graph.adjacency[name]) {
@@ -268,18 +323,47 @@ export function buildEdgeList(graph) {
       const other = graph.nodes[e.to];
       const dx = other.x - node.x, dy = other.y - node.y;
       const len = Math.hypot(dx, dy) || 1;
+      const idx = edges.length;
       edges.push({
         ax: node.x, ay: node.y, bx: other.x, by: other.y,
         kind: e.kind,
         px: -dy / len, py: dx / len,
+        len, // world-space length, so congestion can be a DENSITY not a raw count
         minX: Math.min(node.x, other.x), maxX: Math.max(node.x, other.x),
         minY: Math.min(node.y, other.y), maxY: Math.max(node.y, other.y),
       });
+      indexByEdge.set(e, idx);
+      // The reverse direction is a different object on the other node's
+      // adjacency list; find it so both directions of travel count toward
+      // the same physical segment's congestion.
+      const back = graph.adjacency[e.to].find((r) => r.to === name && r.route === e.route);
+      if (back) indexByEdge.set(back, idx);
     }
   }
-  cached = edges;
+  let totalLen = 0;
+  for (const e of edges) totalLen += e.len;
+  cached = { edges, indexByEdge, totalLen, counts: new Int32Array(edges.length) };
   edgeListCache.set(graph, cached);
   return cached;
+}
+
+// Live truck count per physical road segment, reusing one Int32Array
+// rather than allocating per frame. Also returns the network-wide mean
+// density, which the heat bands are expressed as multiples of: what
+// counts as "congested" has to be relative to how many trucks are out
+// there at all, or a 500-truck fleet would never light up anything and a
+// 5000-truck fleet would light up everything.
+function tallyCongestion(edgeList, trucks) {
+  const counts = edgeList.counts;
+  counts.fill(0);
+  let onRoad = 0;
+  for (const truck of trucks) {
+    if (!truck.edge) continue;
+    const idx = edgeList.indexByEdge.get(truck.edge);
+    if (idx !== undefined) { counts[idx]++; onRoad++; }
+  }
+  const meanDensity = (onRoad / edgeList.totalLen) * 100;
+  return { counts, meanDensity };
 }
 
 function edgeVisible(e, cull) {
@@ -295,22 +379,53 @@ function edgeVisible(e, cull) {
   return e.maxX >= cull.minX && e.minX <= cull.maxX && e.maxY >= cull.minY && e.minY <= cull.maxY;
 }
 
+// How far into "full road detail" the current zoom is, 0..1. Shared so
+// the headlight pass can gate on exactly the same threshold the road
+// detail does, instead of duplicating the formula and letting the two
+// silently drift apart.
+export function roadDetailFactor(camera) {
+  const bandPx = BAND_HALF * 2 * camera.zoom;
+  return Math.max(0, Math.min(1, (bandPx - DETAIL_MIN_PX) / (DETAIL_FULL_PX - DETAIL_MIN_PX)));
+}
+
+// Congestion is drawn as a few discrete heat bands rather than a
+// per-edge colour, specifically so the batching survives: a continuous
+// gradient would force one stroke() per segment, whereas bucketing keeps
+// the whole overlay to one stroke per band.
+//
+// Density is trucks per 100 world units of road, NOT a raw count -
+// counting per edge would call a handful of trucks spread over a 400-mile
+// desert run "as congested as" the same handful nose-to-tail through
+// Chicago, which is exactly backwards. `mult` is then a multiple of the
+// network-wide mean density, so the scale self-calibrates to fleet size.
+// Measured distribution (see the density calibration run): the mean sits
+// near the 60th percentile, so 1.7x/3x/5x lands roughly on the busiest
+// 20% / 8% / 2% of segments at any fleet size.
+const CONGESTION_BANDS = [
+  { mult: 1.7, color: "rgba(245, 182, 52, 0.75)" },
+  { mult: 3.0, color: "rgba(240, 112, 34, 0.86)" },
+  { mult: 5.0, color: "rgba(228, 46, 40, 0.94)" },
+];
+
 // Draws every road edge for the current frame: a zoom-driven cross-fade
 // between a simplified single line (whole-country/atlas view) and the
 // full asphalt-band + fog-lines + shoulder-outline + median treatment
 // (follow/nav view), day/night tinted. Batches one beginPath()/stroke()
 // per (kind x layer) so the whole road network costs at most ~8 stroke
 // calls regardless of fleet size.
-export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians) {
-  const bandPx = BAND_HALF * 2 * camera.zoom;
-  const k = Math.max(0, Math.min(1, (bandPx - DETAIL_MIN_PX) / (DETAIL_FULL_PX - DETAIL_MIN_PX)));
+export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, congestion) {
+  const k = roadDetailFactor(camera);
   ctx.lineCap = "butt";
   ctx.lineJoin = "round";
 
   const visible = { highway: [], interstate: [] };
-  for (const e of edgeList) {
+  const visibleIdx = { highway: [], interstate: [] };
+  const edges = edgeList.edges;
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
     if (!edgeVisible(e, cull)) continue;
     visible[e.kind].push(e);
+    visibleIdx[e.kind].push(i);
   }
 
   if (k < 1) {
@@ -346,7 +461,7 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians) {
       ctx.stroke();
 
       // Shoulder outlines, both sides
-      ctx.strokeStyle = dayC.shoulder; // shoulder/fog colors don't shift with day/night in the reference
+      ctx.strokeStyle = lerpColor(dayC.shoulder, nightC.shoulder, colorT);
       ctx.lineWidth = 1.8;
       ctx.beginPath();
       for (const e of list) {
@@ -358,7 +473,7 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians) {
       ctx.stroke();
 
       // Fog lines, both sides
-      ctx.strokeStyle = dayC.fog;
+      ctx.strokeStyle = lerpColor(dayC.fog, nightC.fog, colorT);
       ctx.lineWidth = 1.0;
       ctx.beginPath();
       for (const e of list) {
@@ -380,6 +495,45 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians) {
     }
     ctx.globalAlpha = 1;
   }
+
+  // Congestion heat, laid over the finished road so a jam reads as the
+  // pavement itself glowing hot. Widths track the same LOD cross-fade as
+  // the roads underneath, so the heat never floats wider than its road.
+  if (congestion && congestion.meanDensity > 0) {
+    const counts = congestion.counts, mean = congestion.meanDensity;
+    ctx.save();
+    // Deliberately opaque source-over rather than additive: the road
+    // should BECOME amber/red, not glow toward white. Additive blending
+    // over a blue interstate pushes hot segments to a pale pink that
+    // reads as "highlighted" rather than "jammed" - tried it, and the
+    // severity ordering was impossible to see at a glance.
+    for (const kind of ["highway", "interstate"]) {
+      const list = visible[kind], idxs = visibleIdx[kind];
+      if (!list.length) continue;
+      const half = kind === "interstate" ? BAND_HALF : HWY_BAND_HALF;
+      const wide = half * 2 * k + (SIMPLE_PX[kind] / camera.zoom) * (1 - k);
+      for (let bi = CONGESTION_BANDS.length - 1; bi >= 0; bi--) {
+        const band = CONGESTION_BANDS[bi];
+        const next = CONGESTION_BANDS[bi + 1];
+        const lo = band.mult * mean, hi = next ? next.mult * mean : Infinity;
+        let started = false;
+        for (let j = 0; j < list.length; j++) {
+          const e = list[j];
+          const d = (counts[idxs[j]] / e.len) * 100; // trucks per 100 world units
+          if (d < lo || d >= hi) continue;
+          if (!started) { ctx.beginPath(); started = true; }
+          ctx.moveTo(e.ax, e.ay);
+          ctx.lineTo(e.bx, e.by);
+        }
+        if (started) {
+          ctx.strokeStyle = band.color;
+          ctx.lineWidth = wide;
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+  }
 }
 
 function lerpRgba(rgbaA, rgbaB, t) {
@@ -390,6 +544,33 @@ function lerpRgba(rgbaA, rgbaB, t) {
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
   const al = a[3] + ((b[3] ?? 1) - a[3]) * t;
   return `rgba(${r}, ${g}, ${bl}, ${al})`;
+}
+
+// Weather systems as soft radial patches. Drawn over the roads but under
+// the sky grade, so a storm at night is correctly swallowed by the dark
+// rather than glowing through it. Only a handful of cells exist, so this
+// is a few gradient fills per frame.
+export function drawWeather(ctx, cells, cull) {
+  for (const c of cells) {
+    if (cull.nav) {
+      const dx = c.x - cull.cx, dy = c.y - cull.cy;
+      const reach = c.r + Math.sqrt(cull.radiusSq);
+      if (dx * dx + dy * dy > reach * reach) continue;
+    } else if (c.x + c.r < cull.minX || c.x - c.r > cull.maxX ||
+               c.y + c.r < cull.minY || c.y - c.r > cull.maxY) {
+      continue;
+    }
+    const snow = c.kind === "snow";
+    const rgb = snow ? "226, 236, 248" : "120, 150, 190";
+    const grad = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, c.r);
+    grad.addColorStop(0, `rgba(${rgb}, ${0.30 * c.intensity})`);
+    grad.addColorStop(0.55, `rgba(${rgb}, ${0.17 * c.intensity})`);
+    grad.addColorStop(1, `rgba(${rgb}, 0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 // City dots, per-frame (moved out of the static bake alongside roads so a
@@ -526,7 +707,7 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
 
 export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, selectedTruck, renderOpts = {}) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  ctx.fillStyle = "#12161c";
+  ctx.fillStyle = VOID_COLOR;
   ctx.fillRect(0, 0, w, h);
 
   const center = camera.visualCenter();
@@ -595,6 +776,14 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   }
   const anyDarkness = darkAtMin > 0.01 || darkAtMid > 0.01 || darkAtMax > 0.01;
   const colorT = Math.max(darkAtMin, darkAtMid, darkAtMax) / NIGHT_DARKNESS_MAX; // 0..1, for road/label day->night color lerp
+  // The sky grade is non-zero for far more of the day than `darkness` is
+  // (golden hour is a strong tint at zero darkness), so it needs its own
+  // fast-path test rather than reusing anyDarkness - otherwise sunrise and
+  // sunset would be skipped entirely.
+  const anySky = dayNightOn && (
+    skyTintAtX(visMinX, gameSeconds, timeScale).a > 0.004 ||
+    skyTintAtX(visMaxX, gameSeconds, timeScale).a > 0.004
+  );
 
   ctx.save();
   ctx.translate(center.x, center.y);
@@ -613,21 +802,29 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
 
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
-  drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false);
+  const congestion = renderOpts.showCongestion ? tallyCongestion(edgeList, trucks) : null;
+  drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false, congestion);
   drawCityDots(ctx, graph, roadCull);
+  if (renderOpts.showWeather && renderOpts.weather) drawWeather(ctx, renderOpts.weather, roadCull);
 
   // Darkness overlay: a world-space horizontal gradient sampled across the
   // visible X-range, drawn INSIDE the camera transform so rotation/tilt
   // handle themselves for free - no rotated-gradient math needed. 5 stops
   // is plenty; the underlying darkness curve is smooth.
-  if (dayNightOn && anyDarkness) {
+  // Sky grade: a horizontal gradient across the visible X range sampled
+  // from the keyframed time-of-day ramp, so at any instant you can see
+  // sunset actually crossing the country - warm on the eastern side while
+  // the west is still bright, deep blue behind it. Drawn INSIDE the world
+  // transform, so camera rotation and the nav tilt handle themselves.
+  // 7 stops rather than 5: the ramp moves fastest through golden hour and
+  // the extra samples keep that transition smooth across a wide viewport.
+  if (dayNightOn && anySky) {
     ctx.save();
     const grad = ctx.createLinearGradient(visMinX, 0, visMaxX, 0);
-    for (let i = 0; i <= 4; i++) {
-      const t = i / 4;
-      const x = visMinX + (visMaxX - visMinX) * t;
-      const d = effectiveDarkness(rawDarknessAtX(Math.max(0, Math.min(WORLD_WIDTH, x)), gameSeconds), timeScale);
-      grad.addColorStop(t, `rgba(6, 12, 28, ${d})`);
+    for (let i = 0; i <= 6; i++) {
+      const t = i / 6;
+      const tint = skyTintAtX(visMinX + (visMaxX - visMinX) * t, gameSeconds, timeScale);
+      grad.addColorStop(t, `rgba(${tint.r}, ${tint.g}, ${tint.b}, ${tint.a})`);
     }
     ctx.fillStyle = grad;
     ctx.fillRect(visMinX, nav ? cullCy - cullRadius : cullMinY, visMaxX - visMinX, nav ? cullRadius * 2 : cullMaxY - cullMinY);
@@ -735,6 +932,16 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // momentarily edge-less) keeps the plain dot via the normal batch.
   const drawArrowForSelected = nav && selectedTruck && !!selectedTruck.edge;
 
+  // Headlights are only worth drawing when it's actually dark AND we're
+  // zoomed in far enough for the road detail to be showing - at
+  // country-wide zoom the cones would be sub-pixel confetti, and that's
+  // also exactly the zoom where the most trucks are on screen at once. So
+  // this is off precisely when it would cost the most, which is what keeps
+  // it affordable at 5000 trucks.
+  const headlightsOn = dayNightOn && renderOpts.showHeadlights !== false
+    && darkAtMid > 0.22 && roadDetailFactor(camera) > 0;
+  headlightPts.length = 0;
+
   const scratchPos = { x: 0, y: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
     if (drawArrowForSelected && truck === selectedTruck) continue;
@@ -753,13 +960,48 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     const bucket = truckBuckets.get(truck.contract.truckType.id);
     bucket.xs.push(p.x);
     bucket.ys.push(p.y);
+    // Only moving trucks throw light, and only ones actually on an edge
+    // have a bearing to throw it along.
+    if (headlightsOn && truck.edge && truck.speed > 1) {
+      headlightPts.push(p.x, p.y, truck.edge.bearing);
+    }
+  }
+
+  // One path, one fill, for every headlight on screen - the whole reason
+  // this is cheap enough to keep. "lighter" makes overlapping beams pool
+  // brighter the way real headlights do on a busy lane.
+  if (headlightPts.length) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = HEADLIGHT_COLOR;
+    ctx.beginPath();
+    for (let i = 0; i < headlightPts.length; i += 3) {
+      const x = headlightPts[i], y = headlightPts[i + 1];
+      const rad = (headlightPts[i + 2] * Math.PI) / 180;
+      const fx = Math.sin(rad), fy = -Math.cos(rad);
+      const rx = Math.cos(rad), ry = Math.sin(rad);
+      // Deliberately a short, narrow cone - it should read as a truck's
+      // own lights on the pavement just ahead of it, not a searchlight.
+      ctx.moveTo(x + rx * HEADLIGHT_HALF_W, y + ry * HEADLIGHT_HALF_W);
+      ctx.lineTo(x + fx * HEADLIGHT_LEN + rx * HEADLIGHT_SPREAD, y + fy * HEADLIGHT_LEN + ry * HEADLIGHT_SPREAD);
+      ctx.lineTo(x + fx * HEADLIGHT_LEN - rx * HEADLIGHT_SPREAD, y + fy * HEADLIGHT_LEN - ry * HEADLIGHT_SPREAD);
+      ctx.lineTo(x - rx * HEADLIGHT_HALF_W, y - ry * HEADLIGHT_HALF_W);
+      ctx.closePath();
+    }
+    ctx.fill();
+    ctx.restore();
   }
 
   // Night dimming for the fleet only - labels are drawn after the
   // darkness overlay above so they stay fully readable regardless.
-  if (dayNightOn && darkAtMid > 0.01) ctx.globalAlpha = 1 - darkAtMid * 0.2;
-  for (const b of truckBuckets.values()) {
+  const fleetAlpha = dayNightOn && darkAtMid > 0.01 ? 1 - darkAtMid * 0.2 : 1;
+  // Cargo spotlight: because the fleet is already batched one pass per
+  // cargo colour, "show me only the reefers" costs nothing extra - it's
+  // just a different alpha per bucket, no filtering or extra passes.
+  const spotlight = renderOpts.spotlightCargo || null;
+  for (const [id, b] of truckBuckets) {
     if (b.xs.length === 0) continue;
+    ctx.globalAlpha = fleetAlpha * (spotlight && id !== spotlight ? 0.12 : 1);
     ctx.fillStyle = b.color;
     ctx.beginPath();
     for (let i = 0; i < b.xs.length; i++) {
