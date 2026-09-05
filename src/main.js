@@ -1,6 +1,6 @@
 // main.js - boot + the single game loop. Ties the graph, fleet
 // simulation, camera, renderer, and dashboard together.
-import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
+import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
@@ -19,7 +19,7 @@ const TAP_TOLERANCE_PX = 26;
 // Everything here is applied at (re)boot time via bootSim(); nothing
 // here is read mid-simulation.
 const DEFAULT_SETTINGS = {
-  fleetSize: 500,
+  fleetSize: 1000,
   startSeconds: 6 * 3600, // 6:00 AM
   defaultTimeScale: 1,
   showAllLabels: false,
@@ -324,21 +324,40 @@ function shieldLabel(route) {
   return route.replace("US-", "US ").replace(" (West)", "").replace(" (East)", "");
 }
 
+// "North" -> "N", "Southwest" -> "SW". travelDirectionLabel already honors
+// the route's fixed axis where one applies, so a north-south interstate
+// reads N/S the whole way even through a stretch that briefly angles east.
+const DIR_ABBR = {
+  North: "N", South: "S", East: "E", West: "W",
+  Northeast: "NE", Northwest: "NW", Southeast: "SE", Southwest: "SW",
+};
+function routeWithDirection(edge) {
+  const dir = DIR_ABBR[travelDirectionLabel(edge)] || "";
+  return shieldLabel(edge.route) + (dir ? " " + dir : "");
+}
+
 function showDecisionPanel(truck) {
   state.paused = true;
   state.decisionTruck = truck;
   state.decisionTimer = DECISION_TIMEOUT;
 
   el.decisionOptions.innerHTML = "";
+  // rankAndCapOptions puts the truck's own planned next edge first, so
+  // option 0 is by definition "stay on the pre-planned route". Anything
+  // else re-routes, and resolveDecision recomputes the rest of the trip
+  // from wherever the player sends it.
+  const plannedEdge = truck.remainingPath[0];
   truck.pendingOptions.forEach((opt, idx) => {
     const btn = document.createElement("button");
     btn.className = "decision-btn";
-    const isStraight = opt.route === truck.edge.route;
+    const isPlanned = !!plannedEdge && opt.to === plannedEdge.to && opt.route === plannedEdge.route;
+    if (isPlanned) btn.classList.add("planned");
     const isInterstate = opt.route.startsWith("I-");
     const label = shieldLabel(opt.route);
     btn.innerHTML = `<div class="shield${isInterstate ? "" : " hwy"}"><span class="shield-num">${label.replace(/^I-/, "")}</span></div>
-      <span class="dcity">${isStraight ? "Continue " : "Turn to "}${opt.control}</span>
-      <span class="ddist">${opt.dirLabel} &middot; ${Math.round(opt.miles)} mi to ${opt.to}</span>
+      <span class="droute">${routeWithDirection(opt)}</span>
+      <span class="dcity">${isPlanned ? "Continue to " : "Re-route to "}${opt.control}</span>
+      <span class="ddist">${Math.round(opt.miles)} mi to ${opt.to}</span>
       <span class="dkey">[${idx + 1}]</span>`;
     btn.addEventListener("click", () => resolveDecision(opt));
     el.decisionOptions.appendChild(btn);

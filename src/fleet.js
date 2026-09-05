@@ -253,9 +253,20 @@ export class Truck {
   }
 }
 
-function rankAndCapOptions(graph, options) {
-  const ranked = [...options].sort((a, b) => (graph.nodes[b.control]?.w || 0) - (graph.nodes[a.control]?.w || 0));
-  return ranked.slice(0, MAX_DECISION_OPTIONS);
+// Options for a junction the player has to call. The truck's own planned
+// next edge is always first and always present, even if its control city
+// would have ranked it off the end of the list - it's the route the driver
+// is already committed to, so it has to be the obvious default rather than
+// something the player has to hunt for. The rest follow by control-city
+// importance.
+function rankAndCapOptions(graph, options, plannedEdge) {
+  const isPlanned = (e) => plannedEdge && e.to === plannedEdge.to && e.route === plannedEdge.route;
+  const planned = options.find(isPlanned) || null;
+  const rest = options
+    .filter((e) => e !== planned)
+    .sort((a, b) => (graph.nodes[b.control]?.w || 0) - (graph.nodes[a.control]?.w || 0));
+  const capped = rest.slice(0, MAX_DECISION_OPTIONS - (planned ? 1 : 0));
+  return planned ? [planned, ...capped] : capped;
 }
 
 // Weighted by city `w` (roulette-wheel, same shape as economy.js's
@@ -744,7 +755,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     if (truck === controlledTruck) {
       const options = pickEdgesFrom(graph, node, truck.edge);
       if (options.length > 1) {
-        truck.pendingOptions = rankAndCapOptions(graph, options);
+        truck.pendingOptions = rankAndCapOptions(graph, options, truck.remainingPath[0]);
         truck.awaitingDecision = true;
         return truck;
       }

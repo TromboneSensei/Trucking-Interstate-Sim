@@ -28,7 +28,12 @@ const VOID_COLOR = "#05080f";
 const LAND_COLOR = "#2b3648";
 const STATE_BORDER_COLOR = "rgba(168, 186, 214, 0.55)"; // a soft edge ON the land, not a bright line on a void
 const STATE_BORDER_WIDTH = 1.6;
-const CITY_DOT_COLOR = ["#4b5568", "#5b6b84", "#647089", "#6d7a93"]; // by tier 1..4 (dimmer for smaller tiers)
+// City dots, tier 1..4. A single gold ramp that darkens with tier: bright
+// golden yellow for the major hubs down to a dark orange-brown for small
+// towns, so importance reads from colour as well as size. Deliberately warm
+// against the cool blue-grey road/land palette, which is what makes them
+// pop out at country zoom where they were previously getting lost.
+const CITY_DOT_COLOR = ["#ffd24a", "#e0a52c", "#bd7d1e", "#8f5c18"];
 export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passing gaps are sized off this
 
 // Two-lanes-per-direction offsets, interstate-only (highways stay
@@ -43,6 +48,17 @@ export const TRUCK_DOT_RADIUS = 3.5; // exported: fleet.js's car-following/passi
 // CROSS_LANE_TARGET_WORLD_UNITS there.
 export const LEFT_LANE_OFFSET = TRUCK_DOT_RADIUS + 1; // exported: fleet.js's overlap clamp needs the exact rendered offset
 export const RIGHT_LANE_OFFSET = LEFT_LANE_OFFSET + 2 * TRUCK_DOT_RADIUS - 2;
+
+// US highways are single-lane each way, but opposing traffic still needs to
+// look like it has its own side of the road rather than sharing one
+// centerline. Chosen against the highway's real dimensions rather than by
+// eye: the dot is 3.5 across the radius, the fog line sits at 5.0 and the
+// asphalt ends at 8.0 (HWY_FOG / HWY_BAND_HALF below), so at 4.5 the two
+// directions clear each other by 2.0 units while the outer edge of a dot
+// lands exactly on the asphalt edge. That is the most separation available
+// without putting trucks off the pavement - it does overlap the shoulder
+// strip, which is the better of the two compromises.
+const HIGHWAY_LANE_OFFSET = 4.5;
 
 // ---------------------------------------------------------------------
 // Road geometry - every offset below is arithmetic on the lane constants
@@ -132,6 +148,24 @@ const LABEL_TIER_ZOOM_MULT = { 1: 1.0, 2: 1.7, 3: 3.2, 4: 5.5 };
 // tier directly above it (20*0.75=15, 15*0.75=11.25->11, 11*0.75=8.25->8) -
 // a steeper cascade than the old {25,24,23,22}.
 const LABEL_FONT_PX = { 1: 20, 2: 15, 3: 11, 4: 8 };
+
+// Dot size follows the SAME cascade as the label font, so a tier's dot and
+// its label shrink together rather than drifting apart if either is
+// retuned - derived from LABEL_FONT_PX rather than restated as its own
+// table. Tier 1 additionally gets a 25% boost on top so the major hubs
+// clearly anchor the map.
+const DOT_TIER1_BOOST = 1.25;
+const CITY_DOT_SCALE = {};
+for (const t of [1, 2, 3, 4]) CITY_DOT_SCALE[t] = DOT_TIER1_BOOST * (LABEL_FONT_PX[t] / LABEL_FONT_PX[1]);
+
+// The one place the dot radius is computed. Three separate call sites used
+// to inline this same expression (the dot pass, the label offset, and the
+// route highlight ring); the ring in particular has to agree exactly with
+// the dot or it stops hugging it.
+export function cityDotRadius(node) {
+  const base = Math.max(2, Math.min(9, 2 + node.w * 0.7));
+  return base * (CITY_DOT_SCALE[node.t] || 1);
+}
 // Every tier is pure white. The old off-white-to-grey cascade was tuned
 // against a near-black basemap; against the filled slate landmass and the
 // grey asphalt bands the lower tiers greyed out into the terrain. Tier is
@@ -420,10 +454,20 @@ export function roadDetailFactor(camera) {
 // Measured distribution (see the density calibration run): the mean sits
 // near the 60th percentile, so 1.7x/3x/5x lands roughly on the busiest
 // 20% / 8% / 2% of segments at any fleet size.
+// Thresholds as multiples of the network's own mean truck density, so they
+// self-calibrate to fleet size instead of needing a retune every time the
+// truck count changes.
+//
+// Calibrated against a warmed-up sim rather than by eye. The original
+// 1.7/3.0/5.0 lit up ~25% of all 543 segments at every fleet size, which
+// made congestion the map's default state rather than a signal. At
+// 4.0/7.0/11.0 a 500-truck fleet shows roughly 32 amber / 7 orange / 1 red
+// - a handful of genuinely busy corridors and a rare real jam, which is
+// what the colour is meant to mean.
 const CONGESTION_BANDS = [
-  { mult: 1.7, color: "rgba(245, 182, 52, 0.75)" },
-  { mult: 3.0, color: "rgba(240, 112, 34, 0.86)" },
-  { mult: 5.0, color: "rgba(228, 46, 40, 0.94)" },
+  { mult: 4.0, color: "rgba(245, 182, 52, 0.75)" },
+  { mult: 7.0, color: "rgba(240, 112, 34, 0.86)" },
+  { mult: 11.0, color: "rgba(228, 46, 40, 0.94)" },
 ];
 
 // Draws every road edge for the current frame: a zoom-driven cross-fade
@@ -716,7 +760,7 @@ export function drawCityDots(ctx, graph, cull) {
     ctx.fillStyle = CITY_DOT_COLOR[tier];
     ctx.beginPath();
     for (const node of list) {
-      const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
+      const radius = cityDotRadius(node);
       ctx.moveTo(node.x + radius, node.y);
       ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     }
@@ -781,12 +825,13 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
         continue;
       }
     }
-    const radius = Math.max(2, Math.min(9, 2 + node.w * 0.7));
+    const radius = cityDotRadius(node);
     let fontPx = LABEL_FONT_PX[node.t];
     if (onRouteCities && !onRouteCities.has(name)) fontPx *= OFF_ROUTE_LABEL_SCALE;
     const font = labelFont(fontPx);
     if (font !== lastFont) { ctx.font = font; lastFont = font; }
     ctx.fillStyle = LABEL_COLOR[node.t];
+    const parked = parkedCounts ? parkedCounts.get(name) : 0;
     if (counterRotation) {
       // Nav view: labels should look like they're standing up off the
       // tilted ground rather than lying flat on it - a stem rising from
@@ -811,30 +856,38 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       ctx.fillText(node.name, 1.5, -stemH - 3.5);
       ctx.fillStyle = LABEL_COLOR[node.t];
       ctx.fillText(node.name, 0, -stemH - 5);
+      // The badge is drawn INSIDE this same counter-rotated, un-squashed
+      // frame as the label it belongs to. Drawn outside it (as it first
+      // was) it stayed flat on the tilted ground while the label stood up,
+      // so in nav view the number visibly detached from its own label.
+      if (parked) drawParkedBadge(ctx, parked, ctx.measureText(node.name).width / 2, -stemH - 5, fontPx);
       ctx.restore();
+      lastFont = null; // the badge changed ctx.font inside a restored frame
     } else {
       ctx.fillText(node.name, node.x, node.y - radius - 5);
-    }
-
-    // Parked count, if any trucks are sitting here between loads.
-    const parked = parkedCounts ? parkedCounts.get(name) : 0;
-    if (parked) {
-      const labelY = counterRotation ? node.y - radius - 20 : node.y - radius - 5;
-      const half = ctx.measureText(node.name).width / 2;
-      const badgePx = fontPx * PARKED_BADGE_SCALE;
-      const badgeFont = labelFont(badgePx);
-      ctx.font = badgeFont;
-      lastFont = badgeFont;
-      const bx = node.x + half + badgePx * 0.55;
-      const by = labelY - fontPx * 0.42;
-      ctx.lineWidth = badgePx * 0.42;
-      ctx.strokeStyle = PARKED_BADGE_OUTLINE;
-      ctx.lineJoin = "round";
-      ctx.strokeText(parked, bx, by);
-      ctx.fillStyle = PARKED_BADGE_COLOR;
-      ctx.fillText(parked, bx, by);
+      if (parked) {
+        drawParkedBadge(ctx, parked, node.x + ctx.measureText(node.name).width / 2, node.y - radius - 5, fontPx);
+        lastFont = null;
+      }
     }
   }
+}
+
+// Shared by both label orientations. `anchorX` is the right edge of the
+// label text and `baseY` its baseline, both in whatever frame the caller
+// is currently in - which is what lets the nav-view path draw it inside
+// its counter-rotated frame without any special-casing here.
+function drawParkedBadge(ctx, count, anchorX, baseY, fontPx) {
+  const badgePx = fontPx * PARKED_BADGE_SCALE;
+  ctx.font = labelFont(badgePx);
+  const bx = anchorX + badgePx * 0.55;
+  const by = baseY - fontPx * 0.42;
+  ctx.lineWidth = badgePx * 0.42;
+  ctx.strokeStyle = PARKED_BADGE_OUTLINE;
+  ctx.lineJoin = "round";
+  ctx.strokeText(count, bx, by);
+  ctx.fillStyle = PARKED_BADGE_COLOR;
+  ctx.fillText(count, bx, by);
 }
 
 // The point on the road's centerline (median, for a divided interstate)
@@ -863,7 +916,7 @@ export function truckCenterlinePos(graph, truck, out = { x: 0, y: 0 }) {
 // (main.js, the route-preview line below) omits it and gets today's exact
 // fresh-object behavior for free.
 export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
-  if (!truck.edge || truck.edge.kind !== "interstate") return truckCenterlinePos(graph, truck, out);
+  if (!truck.edge) return truckCenterlinePos(graph, truck, out);
 
   const edge = truck.edge;
   truckCenterlinePos(graph, truck, out); // writes the centerline position into `out`
@@ -885,7 +938,13 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
     rightX = edge._rightX = Math.cos(rad);
     edge._rightY = Math.sin(rad);
   }
-  const off = RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT;
+  // Interstates blend between two lanes as trucks pass; highways have a
+  // single lane each way, so they take a fixed offset with no laneT term.
+  // The reverse-direction edge negates the right-vector for free (see
+  // above), which is what puts opposing highway traffic on the far side.
+  const off = edge.kind === "interstate"
+    ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT
+    : HIGHWAY_LANE_OFFSET;
   out.x += rightX * off;
   out.y += edge._rightY * off;
   return out;
@@ -1063,17 +1122,27 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts);
 
   if (nodeSeq) {
-    ctx.strokeStyle = "rgba(232, 163, 61, 0.85)";
-    ctx.lineWidth = 2.5 / camera.zoom;
-    ctx.setLineDash([10 / camera.zoom, 8 / camera.zoom]);
-    ctx.beginPath();
+    // Built once and stroked twice: a dark casing underneath, then the
+    // amber dashes on top. The route line has to stay readable crossing
+    // both pale interstate bands and dark empty terrain, and a single
+    // stroke could not do both.
+    const routePath = new Path2D();
     const p0 = truckCenterlinePos(graph, selectedTruck);
-    ctx.moveTo(p0.x, p0.y);
+    routePath.moveTo(p0.x, p0.y);
     for (const name of nodeSeq) {
       const n = graph.nodes[name];
-      ctx.lineTo(n.x, n.y);
+      routePath.lineTo(n.x, n.y);
     }
-    ctx.stroke();
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(10, 14, 22, 0.55)";
+    ctx.lineWidth = 6.5 / camera.zoom;
+    ctx.stroke(routePath);
+    ctx.strokeStyle = "#ffc457";
+    ctx.lineWidth = 3.6 / camera.zoom;
+    ctx.setLineDash([13 / camera.zoom, 7 / camera.zoom]);
+    ctx.stroke(routePath);
+    ctx.restore();
     ctx.setLineDash([]);
 
     ctx.fillStyle = "#e8a33d";
@@ -1095,7 +1164,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     for (const name of nodeSeq) {
       const n = graph.nodes[name];
       if (n.t === 0) continue;
-      const dotRadius = Math.max(2, Math.min(9, 2 + n.w * 0.7));
+      const dotRadius = cityDotRadius(n);
       ctx.beginPath();
       ctx.arc(n.x, n.y, dotRadius + 2, 0, Math.PI * 2);
       ctx.stroke();
