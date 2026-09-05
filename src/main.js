@@ -3,7 +3,7 @@
 import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
 import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
-import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
+import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos, truckPose } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
 import { chooseOffer } from "./economy.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
@@ -100,6 +100,11 @@ let truckById = new Map();
 // for the map's label badges. Reused rather than reallocated: at 3000
 // trucks this runs 60x a second.
 const parkedCounts = new Map();
+// Network-wide congested-segment count, refreshed from drawFrame's return
+// every frame and read by the Dispatch tab on its own slower UI tick -
+// the renderer already computes it as part of the congestion overlay, so
+// this avoids a second fleet-wide scan just for the HUD number.
+let lastCongestedSegments = 0;
 
 // Economy history: one sample every ECON_SAMPLE_MIN game-minutes, capped
 // at 48 game-hours. Instantaneous readouts (the Dispatch tiles) can't show
@@ -299,7 +304,7 @@ function handleTap(wx, wy) {
   let best = null, bestDist = tol;
   for (const t of trucks) {
     if (t.parkedAt) continue; // parked trucks draw no dot (render.js) - let the tap fall through to the city underneath
-    const p = truckWorldPos(graph, t);
+    const p = truckPose(graph, t); // same corner-blended position the dot is actually drawn at (render.js)
     const d = Math.hypot(p.x - wx, p.y - wy);
     if (d < bestDist) { bestDist = d; best = t; }
   }
@@ -369,6 +374,15 @@ function showDecisionPanel(truck) {
 // The controlled truck has finished its layover and needs a load. Same
 // contract that would have been picked for it by chooseOffer() is still
 // used if the timer runs out, so walking away never wedges the sim.
+// "19h 40m" - drive-time estimate for a load-board offer, from
+// economy.js's optimalHours (the same cost the A* router itself
+// minimizes, so it already accounts for the highway-route time penalty).
+function formatDriveHours(hours) {
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 function showContractPanel(truck) {
   state.paused = true;
   state.contractTruck = truck;
@@ -384,7 +398,7 @@ function showContractPanel(truck) {
     btn.innerHTML = `<span class="c-type">${offer.truckType.label}</span>
       <span class="c-cargo">${offer.cargo}</span>
       <span class="c-dest">&rarr; ${offer.destination}</span>
-      <span class="c-meta"><span>${Math.round(offer.optimalMiles).toLocaleString()} mi &middot; $${rpm.toFixed(2)}/mi</span><span class="c-pay">$${offer.payout.toLocaleString()}</span></span>
+      <span class="c-meta"><span>${Math.round(offer.optimalMiles).toLocaleString()} mi &middot; ${formatDriveHours(offer.optimalHours)} &middot; $${rpm.toFixed(2)}/mi</span><span class="c-pay">$${offer.payout.toLocaleString()}</span></span>
       <span class="c-key">[${idx + 1}]</span>`;
     btn.addEventListener("click", () => resolveContract(offer));
     el.contractOptions.appendChild(btn);
@@ -477,7 +491,7 @@ el.settingDefaultSpeed.addEventListener("input", (e) => {
 });
 
 el.btnSettingsApply.addEventListener("click", () => {
-  const fleetSize = Math.max(10, Math.min(5000, parseInt(el.settingFleetSize.value, 10) || DEFAULT_SETTINGS.fleetSize));
+  const fleetSize = Math.max(10, Math.min(10000, parseInt(el.settingFleetSize.value, 10) || DEFAULT_SETTINGS.fleetSize));
   const newSettings = {
     fleetSize,
     startSeconds: parseInt(el.settingStartTime.value, 10),
@@ -552,7 +566,7 @@ function bootSim(newSettings) {
 
   resetUIState();
   state.spotlightCargo = null;
-  renderDispatchTab(trucks, graph);
+  renderDispatchTab(trucks, graph, lastCongestedSegments);
   renderRankingsTab(trucks, graph);
   renderEconomyTab(trucks, graph, econHistory, null);
 }
@@ -638,11 +652,12 @@ function frame(now) {
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";
     if (isFollowMode && followed) {
-      camera.followTarget = truckWorldPos(graph, followed);
+      const pose = truckPose(graph, followed);
+      camera.followTarget = pose;
       // Hold the last known heading while the truck is stopped/between
       // edges (edge briefly null) rather than snapping to 0 - avoids a
       // spurious rotation flash right as a truck departs/arrives a city.
-      if (followed.edge) camera.targetHeading = (followed.edge.bearing * Math.PI) / 180;
+      if (followed.edge) camera.targetHeading = (pose.heading * Math.PI) / 180;
     } else if (isFollowMode && !followed) {
       unfollow();
     } else if (!isFollowMode && state.followedTruckId != null) {
@@ -661,7 +676,7 @@ function frame(now) {
       parkedCounts.set(t.parkedAt, (parkedCounts.get(t.parkedAt) || 0) + 1);
     }
 
-    drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
+    const frameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
       showAllLabels: settings.showAllLabels,
       showMedians: settings.showMedians,
       showDayNight: settings.showDayNight,
@@ -675,6 +690,7 @@ function frame(now) {
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
     });
+    lastCongestedSegments = frameStats.congestedSegments;
     el.clock.textContent = formatClock(state.gameSeconds);
 
     // Whatever the Unit tab is currently showing refreshes live - a
@@ -697,7 +713,7 @@ function frame(now) {
       // tab re-renders on the next tick after it's opened, so switching
       // still shows current numbers immediately.
       const tab = visibleTab();
-      if (tab === "overview") renderDispatchTab(trucks, graph);
+      if (tab === "overview") renderDispatchTab(trucks, graph, lastCongestedSegments);
       else if (tab === "rankings") renderRankingsTab(trucks, graph);
       else if (tab === "economy") renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
       if (tab === "details" && state.detailsView && state.detailsView.kind === "city") {

@@ -2,7 +2,17 @@
 import { masterCities, interstateRoutes, highwayRoutes, terrainModifiers } from "./data.js";
 
 const DEFAULT_INTERSTATE_MPH = 70;
-const DEFAULT_HIGHWAY_MPH = 55;
+// A US-numbered route through towns, signals and no-passing two-lanes
+// realistically averages well under its posted limit for a commercial
+// truck - 48 (not 55) is what stops A* treating it as interstate-
+// equivalent per mile.
+const DEFAULT_HIGHWAY_MPH = 48;
+// A* below costs edges by travel TIME, not distance, but real carriers
+// still prefer limited-access roads at a small time cost (fuel stops,
+// weigh stations, no low bridges/weight limits) - this multiplies a
+// highway edge's time cost so a merely-slightly-faster highway detour
+// doesn't win over a proper interstate route.
+export const HIGHWAY_ROUTE_PENALTY = 1.15;
 
 // Fixed lat/lon bounds for the continental US, projected into a static
 // "world space" once per node so rendering never has to reproject a
@@ -176,7 +186,20 @@ export function buildGraph() {
     ingestRouteTable(interstateRoutes, "interstate", DEFAULT_INTERSTATE_MPH);
     ingestRouteTable(highwayRoutes, "highway", DEFAULT_HIGHWAY_MPH);
 
-    return { nodes, adjacency };
+    // The true fastest speedLimit anywhere on the graph - findPath's time
+    // heuristic divides straight-line miles by this, which is what keeps
+    // it admissible (no real route can beat great-circle distance at
+    // less than this many hours per mile). Computed from the actual
+    // edges rather than hardcoded, so a future terrainModifiers entry
+    // above today's max can never silently break admissibility.
+    let maxMph = DEFAULT_INTERSTATE_MPH;
+    for (const name in adjacency) {
+        for (const e of adjacency[name]) {
+            if (e.speedLimit > maxMph) maxMph = e.speedLimit;
+        }
+    }
+
+    return { nodes, adjacency, maxMph };
 }
 
 // All legal next edges from `node`, excluding a straight U-turn back the
@@ -191,9 +214,15 @@ export function pickEdgesFrom(graph, node, excludeReverseOf) {
 // ---------------------------------------------------------------------
 // A* pathfinding: a binary min-heap open set (O(log n) push/pop instead
 // of an O(n) sorted-array insert) plus a small bounded path cache, since
-// many trucks will request routes. Cost = real miles; heuristic =
-// straight-line miles to the goal, which is always <= the true remaining
-// road distance, so it's admissible.
+// many trucks will request routes. Cost = travel TIME in hours (real
+// miles / speedLimit, with a highway route penalty - see
+// HIGHWAY_ROUTE_PENALTY), not raw distance: costing by distance alone
+// let a 55mph two-lane beat a 70mph interstate any time it was even
+// slightly shorter, which is not how real routing works. Heuristic =
+// straight-line miles to the goal divided by graph.maxMph (the fastest
+// speedLimit anywhere on the graph), which is always <= the true
+// remaining travel time (no road can be faster than the fastest road,
+// and great-circle distance <= true road distance), so it's admissible.
 // ---------------------------------------------------------------------
 class MinHeap {
     constructor(scoreOf) {
@@ -237,7 +266,7 @@ class MinHeap {
     }
 }
 
-const PATH_CACHE_MAX = 5000;
+const PATH_CACHE_MAX = 20000;
 const pathCache = new Map();
 
 function cachePath(key, value) {
@@ -257,8 +286,9 @@ export function findPath(graph, startName, goalName) {
     const goalNode = graph.nodes[goalName];
     if (!graph.nodes[startName] || !goalNode) return null;
 
+    const maxMph = graph.maxMph || DEFAULT_INTERSTATE_MPH;
     const gScore = new Map([[startName, 0]]);
-    const fScore = new Map([[startName, haversineMiles(graph.nodes[startName], goalNode)]]);
+    const fScore = new Map([[startName, haversineMiles(graph.nodes[startName], goalNode) / maxMph]]);
     const cameFromEdge = new Map();
     const closed = new Set();
 
@@ -283,11 +313,12 @@ export function findPath(graph, startName, goalName) {
 
         for (const e of graph.adjacency[current] || []) {
             if (closed.has(e.to)) continue;
-            const tentativeG = (gScore.get(current) ?? Infinity) + e.miles;
+            const edgeHours = (e.miles / e.speedLimit) * (e.kind === "highway" ? HIGHWAY_ROUTE_PENALTY : 1);
+            const tentativeG = (gScore.get(current) ?? Infinity) + edgeHours;
             if (tentativeG < (gScore.get(e.to) ?? Infinity)) {
                 cameFromEdge.set(e.to, e);
                 gScore.set(e.to, tentativeG);
-                fScore.set(e.to, tentativeG + haversineMiles(graph.nodes[e.to], goalNode));
+                fScore.set(e.to, tentativeG + haversineMiles(graph.nodes[e.to], goalNode) / maxMph);
                 heap.push(e.to);
             }
         }

@@ -80,6 +80,41 @@ export function rollDwellHours(driver, rnd = Math.random) {
   return Math.max(DWELL_MIN_HOURS, Math.min(DWELL_MAX_HOURS, base + jitter));
 }
 
+// --- fuel -----------------------------------------------------------------
+const FUEL_BURN_PER_MILE = 0.066; // base burn (0-100 fuel scale) per mile at fuelBurnMult=1, no drag
+const FUEL_DRAG_SPEED_MPH = 65; // above this cruise speed, aerodynamic drag starts costing extra fuel
+const FUEL_LOW_THRESHOLD = 15; // stop and refuel at or below this
+const FUEL_PRICE_PER_UNIT = 3.5; // $ per fuel unit refilled
+const FUEL_STOP_HOURS = 1.0; // game hours spent refueling at a node
+const FUEL_TOW_COST = 750; // $ penalty for running dry mid-edge
+const FUEL_DISABLED_SERVICE_MIN_HOURS = 1;
+const FUEL_DISABLED_SERVICE_MAX_HOURS = 3;
+const FUEL_REFILL_MARGIN = 1.15; // refuel to cover the next leg with this much headroom, not just to a flat 100
+
+// --- fatigue / circadian rest ----------------------------------------------
+const FATIGUE_PER_HOUR = 6.0;
+const FATIGUE_REST_THRESHOLD = 50;
+const REST_MIN_HOURS = 4.0;
+const REST_MAX_HOURS = 6.0;
+const STANDARD_SLEEP_START_MIN = 21 * 60; // 21:00 local
+const STANDARD_SLEEP_END_MIN = 3 * 60;    // 03:00 local (wraps midnight)
+const NIGHT_OWL_SLEEP_START_MIN = 9 * 60;  // 09:00 local
+const NIGHT_OWL_SLEEP_END_MIN = 15 * 60;   // 15:00 local
+
+// --- breakdowns -------------------------------------------------------------
+// Calibrated (see routing_ab-style soak test) to hold roughly one
+// concurrently-disabled truck per 1000 in the fleet, given a ~13.5-hour
+// mean repair and drivers no longer spending 100% of their time driving
+// (they now also layover, rest, and refuel).
+const BREAKDOWN_PER_MILE = 1.0e-6;
+const BREAKDOWN_REPAIR_MIN_HOURS = 3;
+const BREAKDOWN_REPAIR_MAX_HOURS = 24;
+const BREAKDOWN_MILES_SINCE_STOP_SCALE = 1500;
+
+// --- rubbernecking -----------------------------------------------------------
+const RUBBERNECK_RANGE_SAFE_MULT = 4; // approach zone, in multiples of minSafeMiles (anchors the zone to the render scale, not an absolute mile count - see minSafeMiles)
+const RUBBERNECK_WORST_MULT = 0.45; // cruise-speed multiplier right alongside a disabled truck
+
 // How many loads a parked truck gets to choose between.
 const OFFER_COUNT = 3;
 
@@ -150,6 +185,31 @@ export class Truck {
     this.dwellHoursLeft = 0;
     this.pendingOffers = null;
     this.awaitingContract = false;
+    // Discriminates why a parked truck is parked: "LAYOVER" (between
+    // contracts - takes a new load on wake) vs "REST"/"FUEL" (mid-route -
+    // resumes the SAME contract on wake). Reusing parkedAt/dwellHoursLeft
+    // for all three keeps the map's parked-badge tally, the "hide the dot"
+    // render rule, and the tap-falls-through-to-city behavior working for
+    // REST/FUEL with no changes - they all key off parkedAt alone.
+    this.stopReason = null;
+
+    // Resources (Phase 3/4): fuel, fatigue, and breakdown condition.
+    this.fuel = 100;
+    this.fatigue = 0;
+    this.milesSinceStop = 0; // wear tracker for the breakdown roll; resets on any real stop
+    // > 0 while broken down or dry-tanked ON THE SHOULDER mid-edge - this
+    // is deliberately NOT `parkedAt` (the truck never reached a node, so
+    // it keeps its edge/.s and must stay fully rendered and rubberneck-
+    // visible, unlike a parked truck's hidden dot).
+    this.disabledHoursLeft = 0;
+    this.disabledReason = null; // "BREAKDOWN" | "FUEL"
+    this.fuelSpend = 0;
+    this.downtimeHours = 0;
+    // The edge just completed - used to avoid an immediate U-turn when
+    // resuming from a full stop (parkedAt/disabled clears `edge`, so the
+    // junction/departure logic needs this to know what NOT to reverse
+    // back onto), and later reused for junction corner-blending.
+    this.prevEdge = null;
 
     this._assignContract(graph, rnd);
   }
@@ -172,22 +232,24 @@ export class Truck {
 
   // Moves to the next queued edge. The full stop-and-wait-for-a-gap
   // treatment (see tryDepartTruck in updateFleet) only applies when this
-  // is the start of a brand-new contract's route AND the node being LEFT
-  // is a real city (not a tier-0 highway-interchange filler node) -
-  // i.e. an actual delivery pickup, not just a waypoint the route happens
-  // to route through. A truck passing through a real city mid-route
-  // (this edge is just the next leg of an already-underway haul) carries
-  // straight through at full speed and in whatever lane it was already
-  // in instead - same as a tier-0 junction always has (see
-  // arrivalSpeedCap, which only decelerates a truck's actual final leg,
-  // and placeOnEdge, which no longer resets lane/laneT itself) - real
-  // continuity through the node, not just "no hard stop". It still needs
-  // `placeOnEdge`'s conflict nudge either way (`laneGroups` may be
-  // undefined only when spawning a fresh truck, which always starts at a
-  // real city and never reaches this branch).
-  _advanceToNextEdge(graph, laneGroups, isNewContractStart = false) {
+  // is a genuine departure FROM A FULL STOP - a brand-new contract's
+  // route, or a truck waking from a REST/FUEL stop to resume its existing
+  // route - AND the node being LEFT is a real city (not a tier-0 highway-
+  // interchange filler node), i.e. an actual stop, not just a waypoint
+  // the route happens to route through. A truck passing through a real
+  // city mid-route (this edge is just the next leg of an already-
+  // underway haul, no stop involved) carries straight through at full
+  // speed and in whatever lane it was already in instead - same as a
+  // tier-0 junction always has (see arrivalSpeedCap, which only
+  // decelerates a truck's actual final leg, and placeOnEdge, which no
+  // longer resets lane/laneT itself) - real continuity through the node,
+  // not just "no hard stop". It still needs `placeOnEdge`'s conflict
+  // nudge either way (`laneGroups` may be undefined only when spawning a
+  // fresh truck, which always starts at a real city and never reaches
+  // this branch).
+  _advanceToNextEdge(graph, laneGroups, fromFullStop = false) {
     const next = this.remainingPath.shift();
-    if (isNewContractStart && graph.nodes[next.from].t > 0) {
+    if (fromFullStop && graph.nodes[next.from].t > 0) {
       this.edge = null;
       this.pendingEdge = next;
       this.speed = 0;
@@ -218,6 +280,8 @@ export class Truck {
     this.passingLeaderId = null;
     this.parkedAt = this.currentNode;
     this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
+    this.stopReason = "LAYOVER";
+    this.milesSinceStop = 0; // a delivery + layover counts as a real stop for breakdown wear
   }
 
   // Accept a specific contract (chosen by the driver, or by the player for
@@ -228,6 +292,7 @@ export class Truck {
     this.remainingPath = contract.path ? [...contract.path] : [];
     this.parkedAt = null;
     this.dwellHoursLeft = 0;
+    this.stopReason = null;
     this.pendingOffers = null;
     this.awaitingContract = false;
     if (this.remainingPath.length) this._advanceToNextEdge(graph, laneGroups, true);
@@ -313,11 +378,28 @@ export function spawnFleet(graph, count, rnd = Math.random) {
 // `.s`, so it's safe to trust this order - anything reading `lane0`/
 // `lane1` AFTER Phase 2 has run (clampOverlaps) must re-sort by current
 // `.s` rather than trusting this snapshot's order.
-function buildLaneGroups(trucks) {
+// `disabledByEdge` collects the `.s` of every broken-down/dry-tanked
+// truck, keyed by edgeId, so the rest of the tick can find them without a
+// second pass over `trucks`. A disabled truck is deliberately excluded
+// from `groups` (and therefore from every lane-physics consumer below -
+// leaderMap, applyFollowAndPassing, clampOverlaps, tryDepartTruck,
+// placeOnEdge's occupant scan all read `groups`, never `trucks`) since it
+// sits on the shoulder, not in the travel lane: a 0-speed "leader" would
+// otherwise propagate a permanent full-stop backward through every
+// follower, and clampOverlaps would pin them at its position forever -
+// a corridor-wide deadlock immune to any speed logic. Other trucks
+// driving straight through its position is the correct, intended result.
+function buildLaneGroups(trucks, disabledByEdge) {
   const groups = new Map();
   for (const truck of trucks) {
     if (!truck.edge) continue;
     const key = edgeId(truck.edge);
+    if (truck.disabledHoursLeft > 0) {
+      let arr = disabledByEdge.get(key);
+      if (!arr) { arr = []; disabledByEdge.set(key, arr); }
+      arr.push(truck.s);
+      continue;
+    }
     let g = groups.get(key);
     if (!g) { g = { lane0: [], lane1: [], edge: truck.edge }; groups.set(key, g); }
     (truck.lane === 1 ? g.lane1 : g.lane0).push(truck);
@@ -326,6 +408,7 @@ function buildLaneGroups(trucks) {
     g.lane0.sort((a, b) => a.s - b.s);
     g.lane1.sort((a, b) => a.s - b.s);
   }
+  for (const arr of disabledByEdge.values()) arr.sort((a, b) => a - b);
   return groups;
 }
 
@@ -374,16 +457,20 @@ function rushHourMult(graph, truck, gameSeconds) {
   return 1;
 }
 
-function environmentSpeedMult(graph, truck, env) {
-  let mult = 1;
-  if (env.showRushHour) mult *= rushHourMult(graph, truck, env.gameSeconds);
-  if (env.showWeather && env.weather) {
-    // Edge midpoint is plenty for weather sampling - cells are hundreds of
-    // world units across, far larger than any single edge.
-    const a = graph.nodes[truck.edge.from], b = graph.nodes[truck.edge.to];
-    mult *= weatherSpeedMultAt(env.weather, (a.x + b.x) / 2, (a.y + b.y) / 2);
-  }
-  return mult;
+// Weather alone (no rush hour) - kept separate from rush hour so Phase 1
+// can snapshot `truck.freeFlowSpeed` (what this truck would be doing on
+// an open road right now, weather included) BEFORE rush hour, rubberneck,
+// follow, and arrival caps apply. The congestion detector (render.js's
+// tallyCongestion) compares live speed against this snapshot to measure
+// actual slowdown - weather counts as "the road is just slow today", not
+// congestion, but rush hour and a real jam both should read as congested,
+// so they're excluded from the baseline instead.
+function weatherOnlyMult(graph, truck, env) {
+  if (!(env.showWeather && env.weather)) return 1;
+  // Edge midpoint is plenty for weather sampling - cells are hundreds of
+  // world units across, far larger than any single edge.
+  const a = graph.nodes[truck.edge.from], b = graph.nodes[truck.edge.to];
+  return weatherSpeedMultAt(env.weather, (a.x + b.x) / 2, (a.y + b.y) / 2);
 }
 
 // Speed cap for a truck approaching a real city (tier > 0) at the end of
@@ -655,15 +742,162 @@ function clampOverlaps(graph, laneGroups) {
   }
 }
 
+// --- fuel / fatigue / breakdown helpers -------------------------------
+
+// Fuel burn for the miles just driven: base rate x this driver's
+// fuelBurnMult x an aerodynamic drag penalty that only kicks in above
+// FUEL_DRAG_SPEED_MPH (an aggressive driver cruising fast pays for it).
+function burnPerMile(truck) {
+  const drag = 1.0 + Math.pow(Math.max(0, truck.speed / FUEL_DRAG_SPEED_MPH - 1.0), 2);
+  return FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * drag;
+}
+
+// Rough remaining range in miles at this truck's current fuel level, for
+// the detail panel's gauge - the no-drag rate is a fine estimate for a
+// forward-looking display (drag only matters above FUEL_DRAG_SPEED_MPH).
+export function estimatedRangeMiles(truck) {
+  return truck.fuel / (FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult);
+}
+
+// Fuel needed to cover `miles` more of driving, with FUEL_REFILL_MARGIN
+// headroom - the no-drag rate is a fine estimate since drag only applies
+// to a small speed band.
+function fuelNeededFor(truck, miles) {
+  return miles * FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * FUEL_REFILL_MARGIN;
+}
+
+// How much fuel a refuel (at a node, or recovering from a dry-tank
+// breakdown) should top off to - never a flat 100, which would re-strand
+// a truck on an edge longer than a full tank's range. Covers whatever
+// distance is actually still ahead: the rest of the CURRENT edge if the
+// truck is disabled mid-edge, or the next queued edge if it's parked at
+// a node about to depart.
+function refuelAmountNeeded(truck) {
+  let remainingMiles = 0;
+  if (truck.edge) remainingMiles = truck.edge.miles - truck.s;
+  else if (truck.remainingPath[0]) remainingMiles = truck.remainingPath[0].miles;
+  const minFuel = remainingMiles > 0 ? fuelNeededFor(truck, remainingMiles) : 0;
+  return Math.max(100, minFuel);
+}
+
+function applyRefuel(truck) {
+  const before = truck.fuel;
+  const after = refuelAmountNeeded(truck);
+  const cost = Math.max(0, after - before) * FUEL_PRICE_PER_UNIT;
+  truck.earnings -= cost;
+  truck.fuelSpend += cost;
+  truck.fuel = after;
+}
+
+// True if minute-of-day `m` falls in [start, end), where the window may
+// wrap past midnight (start > end, e.g. 21:00-03:00).
+function isInWindow(m, start, end) {
+  return start <= end ? (m >= start && m < end) : (m >= start || m < end);
+}
+
+// Fuel takes priority (a physical necessity); circadian rest only checked
+// if fuel is fine. `env` is null in the headless harness path (no game
+// clock to read local time from), so rest simply never fires there -
+// fuel and breakdowns are both deterministic and still fully exercised.
+function nodeStopReason(graph, truck, node, env) {
+  const nextEdge = truck.remainingPath[0];
+  if (truck.fuel <= FUEL_LOW_THRESHOLD || (nextEdge && truck.fuel < fuelNeededFor(truck, nextEdge.miles))) {
+    return "FUEL";
+  }
+  if (env && !truck.driver.isOutlaw && truck.fatigue > FATIGUE_REST_THRESHOLD) {
+    const m = localMinutesAtX(graph.nodes[node].x, env.gameSeconds);
+    const inWindow = truck.driver.isNightOwl
+      ? isInWindow(m, NIGHT_OWL_SLEEP_START_MIN, NIGHT_OWL_SLEEP_END_MIN)
+      : isInWindow(m, STANDARD_SLEEP_START_MIN, STANDARD_SLEEP_END_MIN);
+    if (inWindow) return "REST";
+  }
+  return null;
+}
+
+// Parks a truck at a real-city node for a REST or FUEL stop - same
+// parkedAt/dwellHoursLeft fields a delivery layover uses (see the
+// `stopReason` field comment on Truck), so every parkedAt-keyed system
+// (badge tally, hidden dot, tap fall-through) needs no changes to cover
+// these two new stop kinds.
+function parkForStop(truck, node, reason, rnd) {
+  truck.edge = null;
+  truck.pendingEdge = null;
+  truck.speed = 0;
+  truck.lane = 0;
+  truck.laneT = 0;
+  truck.passingLeaderId = null;
+  truck.parkedAt = node;
+  truck.stopReason = reason;
+  truck.dwellHoursLeft = reason === "FUEL"
+    ? FUEL_STOP_HOURS
+    : REST_MIN_HOURS + rnd() * (REST_MAX_HOURS - REST_MIN_HOURS);
+}
+
+// Disables a truck ON THE SHOULDER, mid-edge - see the `disabledHoursLeft`
+// field comment on Truck for why this is distinct from parkedAt.
+function disableTruck(truck, reason, hours) {
+  truck.speed = 0;
+  truck.disabledHoursLeft = hours;
+  truck.disabledReason = reason;
+}
+
+// Speed multiplier from "rubbernecking" a disabled truck ahead on the
+// same edge: deepens monotonically as a truck closes the gap, and is
+// exactly 1 (no effect) the instant its `.s` passes the disabled truck's
+// - "out of potential traffic once they pass." `sortedS` is ascending, so
+// gap = ds - truck.s increases monotonically as we walk it: once gap
+// exceeds `range` every later entry is farther still, so it's safe to
+// stop scanning. The zone is sized off minSafeMiles (a multiple of the
+// render-scale anti-overlap floor), NOT an absolute mile count - at this
+// map's projection a couple of real miles is sub-pixel, and would be
+// invisible on screen and too short to ever stack a visible queue.
+function rubberneckMult(sortedS, graph, truck) {
+  if (!sortedS || !sortedS.length) return 1;
+  const range = minSafeMiles(graph, truck.edge) * RUBBERNECK_RANGE_SAFE_MULT;
+  let mult = 1;
+  for (const ds of sortedS) {
+    const gap = ds - truck.s;
+    if (gap > range) break;
+    if (gap <= 0) continue;
+    const closeness = 1 - gap / range;
+    const m = 1 - (1 - RUBBERNECK_WORST_MULT) * closeness;
+    if (m < mult) mult = m;
+  }
+  return mult;
+}
+
+// Departs a truck from a full stop at a node - either a fresh contract
+// leg it was always going to take, or the SAME contract's next leg after
+// waking from a REST/FUEL park. `reverseOfEdge` is the edge the truck
+// just arrived on (excluded from the controlled-truck's junction options
+// so it isn't offered an immediate U-turn); `fromFullStop` is forwarded
+// to `_advanceToNextEdge` to decide whether this departure gets the
+// stop-and-wait-for-a-gap treatment.
+function departFromNode(graph, truck, laneGroups, controlledTruck, reverseOfEdge, fromFullStop) {
+  if (truck === controlledTruck) {
+    const options = pickEdgesFrom(graph, truck.currentNode, reverseOfEdge);
+    if (options.length > 1) {
+      truck.pendingOptions = rankAndCapOptions(graph, options, truck.remainingPath[0]);
+      truck.awaitingDecision = true;
+      return truck;
+    }
+  }
+  truck._advanceToNextEdge(graph, laneGroups, fromFullStop);
+  return null;
+}
+
 // Advances every truck by `dt` real seconds at the given time-scale
 // multiplier. Returns the truck awaiting a junction decision, if any
 // (only possible for `controlledTruck` - the one truck the player has
 // explicitly taken control of via the details panel, a separate,
 // narrower thing than merely being followed by the camera), so the
-// caller can pause the whole sim and show the decision panel.
-export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env = null) {
+// caller can pause the whole sim and show the decision panel. `rnd`
+// defaults to Math.random but accepts a seeded generator for the
+// headless soak-test harness.
+export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env = null, rnd = Math.random) {
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
-  const laneGroups = buildLaneGroups(trucks);
+  const disabledByEdge = new Map();
+  const laneGroups = buildLaneGroups(trucks, disabledByEdge);
 
   // Precomputed once per tick, before Phase 1 mutates anything: each
   // truck's leader (the next entry in its lane array, or null), from the
@@ -683,14 +917,29 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // reads other trucks' pre-move positions (laneGroups/leaderMap), same
   // as before.
   for (const truck of trucks) {
-    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge) continue;
+    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge || truck.disabledHoursLeft > 0) continue;
 
     let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult;
     // Environmental slowdowns are applied to the CRUISE target rather than
     // as a hard cap, so car-following and the arrival decel below still
     // compose on top normally - a truck crawling through a blizzard still
     // brakes for the truck in front of it.
-    if (env) targetSpeed *= environmentSpeedMult(graph, truck, env);
+    if (env) {
+      targetSpeed *= weatherOnlyMult(graph, truck, env);
+      // Snapshot BEFORE rush hour/rubberneck/follow/arrival - this is what
+      // the truck would be doing on an open road right now (weather
+      // included; weather is "the road is slow today", not congestion).
+      // render.js's tallyCongestion compares live speed against this to
+      // detect a genuine slowdown, independent of fleet size.
+      truck.freeFlowSpeed = targetSpeed;
+      if (env.showRushHour) targetSpeed *= rushHourMult(graph, truck, env.gameSeconds);
+    } else {
+      truck.freeFlowSpeed = targetSpeed;
+    }
+    // Rubbernecking a disabled truck ahead - also a target-level
+    // multiplier (not a hard cap) for the same reason, and composes with
+    // the follow cap below since it's applied before that Math.min.
+    targetSpeed *= rubberneckMult(disabledByEdge.get(edgeId(truck.edge)), graph, truck);
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
     targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed));
 
@@ -699,30 +948,83 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     truck.laneT += (truck.lane - truck.laneT) * Math.min(1, dt * LANE_CHANGE_EASE);
   }
 
-  // Phase 2: integrate position from the speed each truck just settled on.
+  // Phase 2: integrate position from the speed each truck just settled on,
+  // then burn fuel and roll for a breakdown.
   for (const truck of trucks) {
-    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge) continue;
+    if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge || truck.disabledHoursLeft > 0) continue;
     const miles = truck.speed * gameHours;
     truck.s += miles;
     truck.totalMilesDriven += miles;
+    truck.milesSinceStop += miles;
+    truck.fatigue += gameHours * FATIGUE_PER_HOUR;
+    truck.fuel = Math.max(0, truck.fuel - miles * burnPerMile(truck));
+
+    // An arrival this tick is handled entirely by Phase 4 (refuel/rest at
+    // the node, or a fresh breakdown-immunity there) - never disable a
+    // truck exactly at or past its edge's end, which would create a slow
+    // zone right at the node that nothing could ever clear.
+    if (truck.s >= truck.edge.miles) continue;
+
+    if (truck.fuel <= 0) {
+      truck.earnings -= FUEL_TOW_COST;
+      disableTruck(truck, "FUEL", FUEL_DISABLED_SERVICE_MIN_HOURS + rnd() * (FUEL_DISABLED_SERVICE_MAX_HOURS - FUEL_DISABLED_SERVICE_MIN_HOURS));
+      continue;
+    }
+
+    const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles;
+    if (rnd() < p) {
+      disableTruck(truck, "BREAKDOWN", BREAKDOWN_REPAIR_MIN_HOURS + rnd() * (BREAKDOWN_REPAIR_MAX_HOURS - BREAKDOWN_REPAIR_MIN_HOURS));
+    }
   }
 
   // Phase 3: hard anti-overlap clamp on the post-move positions (see
   // clampOverlaps above for why this can't just be folded into phase 1).
   clampOverlaps(graph, laneGroups);
 
-  // Phase 4: layovers, arrivals, junction decisions, and departures, using
-  // the final (clamped) positions.
+  // Phase 4: disabled trucks, layovers, rest/fuel stops, arrivals,
+  // junction decisions, and departures, using the final (clamped)
+  // positions.
   for (const truck of trucks) {
     if (truck.awaitingDecision || truck.awaitingContract) continue;
 
-    // Parked between loads. Burn down the layover, then take a contract -
-    // the player picks for the controlled truck, the driver's own
-    // preferences pick for everyone else.
+    // Disabled on the shoulder (breakdown or ran dry mid-edge) - not
+    // `parkedAt` (see the field comment on Truck), so it keeps its edge/.s
+    // the whole time and resumes from exactly where it stopped.
+    if (truck.disabledHoursLeft > 0) {
+      truck.disabledHoursLeft -= gameHours;
+      truck.downtimeHours += gameHours;
+      if (truck.disabledHoursLeft > 0) continue;
+      truck.disabledHoursLeft = 0;
+      if (truck.disabledReason === "FUEL") applyRefuel(truck);
+      truck.disabledReason = null;
+      truck.milesSinceStop = 0;
+      continue;
+    }
+
+    // Parked - between loads (LAYOVER), or mid-route sleeping/refueling
+    // (REST/FUEL). Burn down the dwell timer; layovers/rests also recover
+    // fatigue while parked, not just on wake, so a truck woken early by a
+    // future feature wouldn't read a stale high number.
     if (truck.parkedAt) {
       truck.dwellHoursLeft -= gameHours;
+      truck.fatigue = Math.max(0, truck.fatigue - gameHours * FATIGUE_PER_HOUR);
       if (truck.dwellHoursLeft > 0) continue;
-      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT);
+      truck.dwellHoursLeft = 0;
+
+      if (truck.stopReason !== "LAYOVER") {
+        // REST or FUEL: resume the SAME contract's route rather than
+        // taking a new load.
+        if (truck.stopReason === "FUEL") applyRefuel(truck);
+        else truck.fatigue = 0; // exact reset - don't rely on the sleep window alone (see nodeStopReason), or a truck waking still inside its window re-sleeps immediately
+        truck.stopReason = null;
+        truck.parkedAt = null;
+        truck.milesSinceStop = 0;
+        const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, true);
+        if (waiting) return waiting;
+        continue;
+      }
+
+      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT, rnd);
       if (!offers.length) {
         // Nothing routable from here (shouldn't happen on this graph, but
         // don't wedge the truck forever if it ever does) - wait and retry.
@@ -734,7 +1036,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         truck.awaitingContract = true;
         return truck;
       }
-      truck._takeContract(graph, chooseOffer(offers, truck.driver), laneGroups);
+      truck._takeContract(graph, chooseOffer(offers, truck.driver, rnd), laneGroups);
       continue;
     }
 
@@ -748,19 +1050,19 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const node = truck.edge.to;
     truck.currentNode = node;
     if (node === truck.contract.destination) {
-      truck._arriveAtDestination(graph);
+      truck._arriveAtDestination(graph, rnd);
       continue;
     }
 
-    if (truck === controlledTruck) {
-      const options = pickEdgesFrom(graph, node, truck.edge);
-      if (options.length > 1) {
-        truck.pendingOptions = rankAndCapOptions(graph, options, truck.remainingPath[0]);
-        truck.awaitingDecision = true;
-        return truck;
-      }
+    truck.prevEdge = truck.edge;
+    const stop = nodeStopReason(graph, truck, node, env);
+    if (stop) {
+      parkForStop(truck, node, stop, rnd);
+      continue;
     }
-    truck._advanceToNextEdge(graph, laneGroups);
+
+    const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, false);
+    if (waiting) return waiting;
   }
   return null;
 }

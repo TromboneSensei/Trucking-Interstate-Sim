@@ -26,6 +26,14 @@ export class DriverDNA {
         // everyone, but aggressive drivers push both harder.
         this.accelRate = 2.2 + this.aggression * 1.6;
         this.decelRate = 2.8 + this.aggression * 2.4;
+
+        // isNightOwl: prefers to sleep during the day rather than at night.
+        this.isNightOwl = rnd() < 0.15;
+        // isOutlaw: never stops for circadian rest. Deliberately the SAME
+        // test as the OUTLAW archetype below (not an independent roll) -
+        // one concept of "outlaw" in the sim, so the red badge the UI
+        // already shows is what predicts a truck running 24/7.
+        this.isOutlaw = this.aggression > 0.7 && this.compliance < 0.3;
     }
 
     getArchetype() {

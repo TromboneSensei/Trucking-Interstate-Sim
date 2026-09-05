@@ -729,7 +729,7 @@ html, body {
   display: flex; justify-content: space-between; align-items: baseline;
   font-size: 0.64rem; font-family: var(--font-mono); color: var(--dim);
 }
-.contract-btn .c-pay { color: var(--good); font-weight: 700; font-size: 0.78rem; }
+.contract-btn .c-pay { color: var(--go); font-weight: 700; font-size: 0.78rem; }
 .contract-btn .c-key { font-size: 0.6rem; color: var(--caution); font-family: var(--font-mono); }
 #contract-timer { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); margin-top: 12px; overflow: hidden; }
 #contract-timer-fill { height: 100%; width: 100%; background: var(--caution); transform-origin: left; }

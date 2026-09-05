@@ -5,6 +5,7 @@
 // (no inline-styled template strings).
 "use strict";
 import { travelDirectionLabel } from "./geo.js";
+import { estimatedRangeMiles } from "./fleet.js";
 
 const el = {
   sheet: document.getElementById("bottom-sheet"),
@@ -176,11 +177,13 @@ function metricCard(title, value, sub, tone, drillKey) {
 // waiting for a gap to depart a city) plus every edge still queued in
 // remainingPath.
 function etaMilesOf(t) {
-  // A truck on a layover has no run in progress. Returning 0 would rank it
-  // as the closest thing in the fleet to arriving, which is exactly wrong -
-  // it would dominate the "Closest to Arrival" board with trucks that are
-  // parked and not going anywhere yet.
-  if (t.parkedAt) return Infinity;
+  // A truck on a LAYOVER (between loads) has no run in progress. Returning
+  // 0 would rank it as the closest thing in the fleet to arriving, which
+  // is exactly wrong - it would dominate the "Closest to Arrival" board
+  // with trucks that are parked and not going anywhere yet. A truck
+  // parked for REST or FUEL is different - it has a live run it's about
+  // to resume, so its remaining miles are real and it should still rank.
+  if (t.parkedAt && t.stopReason === "LAYOVER") return Infinity;
   const currentLeg = t.edge ? t.edge.miles - t.s : (t.pendingEdge ? t.pendingEdge.miles : 0);
   return Math.max(0, currentLeg) + t.remainingPath.reduce((s, e) => s + e.miles, 0);
 }
@@ -344,7 +347,7 @@ function listRow(rank, mainText, subText, valueText, valueUnit, onClick, dataAtt
   return div;
 }
 
-export function renderDispatchTab(trucks, graph) {
+export function renderDispatchTab(trucks, graph, congestedSegments = 0) {
   lastTrucks = trucks;
   lastGraph = graph;
   if (!trucks.length || !graph) { el.overview.innerHTML = ""; return; }
@@ -376,6 +379,7 @@ export function renderDispatchTab(trucks, graph) {
     grid.appendChild(metricCard("Top Cargo", topType ? topType[0] : "—", topType ? `${topType[1]} trucks` : ""));
     grid.appendChild(metricCard("Busiest Corridor", corridor ? shieldLabel(corridor.edge.route) : "—", corridor ? `near ${corridor.edge.control} • ${corridor.count} trucks` : "", "info", "corridors"));
     grid.appendChild(metricCard("Busiest Interstate", topInterstate ? shieldLabel(topInterstate.route) : "—", topInterstate ? `${topInterstate.count} trucks total` : "", "info", "interstates"));
+    grid.appendChild(metricCard("Congested Segments", congestedSegments, "running below free-flow speed"));
     el.overview.appendChild(grid);
   });
 }
@@ -595,11 +599,13 @@ function cityDetailsHTML(city, graph, trucks) {
 function parkedTrucksHTML(city, trucks) {
   const parked = trucks.filter((t) => t.parkedAt === city.name);
   if (!parked.length) return "";
+  const STOP_LABEL = { REST: "Sleeping", FUEL: "Fueling" };
   const rows = parked.map((t, i) => {
     const eta = t.dwellHoursLeft < 1 ? "under an hour" : Math.ceil(t.dwellHoursLeft) + "h";
+    const stopLabel = STOP_LABEL[t.stopReason];
     return `<div class="list-row" data-truck="${t.id}">
       <div class="row-rank">${i + 1}</div>
-      <div><div class="row-main">${t.name}</div><div class="row-sub">${t.contract.truckType.label} • ${t.contract.cargo}</div></div>
+      <div><div class="row-main">${t.name}</div><div class="row-sub">${stopLabel ? stopLabel + " • " : ""}${t.contract.truckType.label} • ${t.contract.cargo}</div></div>
       <div class="row-value">${eta}<span class="row-value-unit"> left</span></div>
     </div>`;
   }).join("");
@@ -611,6 +617,36 @@ function statBar(label, value01, color) {
     <div class="stat-bar-label"><span>${label}</span><span>${Math.round(value01 * 100)}%</span></div>
     <div class="stat-bar"><div class="stat-bar-fill" style="width:${value01 * 100}%;background:${color}"></div></div>
   </div>`;
+}
+
+// Same track+fill primitive as statBar, but for a raw value against an
+// explicit max (fuel and fatigue aren't naturally 0-1) with a right-side
+// label instead of a bare percentage, and a color that itself signals
+// severity rather than a fixed per-stat color.
+function conditionBar(label, sub, value, max, color) {
+  const pct = Math.max(0, Math.min(100, (value / max) * 100));
+  return `<div class="stat-bar-row">
+    <div class="stat-bar-label"><span>${label}</span><span>${sub}</span></div>
+    <div class="stat-bar"><div class="stat-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+  </div>`;
+}
+
+// What the truck is doing RIGHT NOW, as one colored line - replaces the
+// old "(delivered)" header suffix and the layover-only "rolling out in"
+// line, which between them couldn't distinguish a delivery layover from
+// the newer REST/FUEL stops or a roadside breakdown.
+function truckStatusLine(truck) {
+  const left = (h) => (h < 1 ? "under an hour" : Math.ceil(h) + "h");
+  if (truck.disabledHoursLeft > 0) {
+    const what = truck.disabledReason === "FUEL" ? "OUT OF FUEL" : "BROKEN DOWN";
+    return { text: `${what} on the shoulder — ${left(truck.disabledHoursLeft)} left`, color: "var(--stop)" };
+  }
+  if (truck.parkedAt) {
+    if (truck.stopReason === "REST") return { text: `SLEEPING in ${truck.parkedAt} — ${left(truck.dwellHoursLeft)} left`, color: "var(--info)" };
+    if (truck.stopReason === "FUEL") return { text: `FUELING in ${truck.parkedAt} — ${left(truck.dwellHoursLeft)} left`, color: "var(--caution)" };
+    return { text: `PARKED in ${truck.parkedAt} — rolling out in ${left(truck.dwellHoursLeft)}`, color: "var(--dim)" };
+  }
+  return { text: "DRIVING", color: "var(--go)" };
 }
 
 // The full planned route (contract.path never shrinks as the truck
@@ -640,39 +676,53 @@ function renderTruckDetails(truck, isControlled) {
   const archetype = truck.driver.getArchetype();
   const etaMiles = etaMilesOf(truck);
   const roadDetail = currentRoadDetail(truck);
+  const status = truckStatusLine(truck);
 
   const controlBlock = isControlled
     ? `<button class="pill-btn" data-control-toggle style="background:var(--go);width:100%;margin-bottom:12px;">&#9881; Controlling — Release Control</button>`
     : `<button class="pill-btn" data-control-toggle style="background:var(--caution);color:var(--caution-ink);width:100%;margin-bottom:12px;">Take Control</button>`;
 
+  const fuelColor = truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)";
+  const fatigueColor = truck.fatigue > 50 ? "var(--stop)" : truck.fatigue > 30 ? "var(--caution)" : "var(--go)";
+  const range = Math.round(estimatedRangeMiles(truck));
+
+  const traitChips = [];
+  if (truck.driver.isNightOwl) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);">NIGHT OWL</span>`);
+  if (truck.driver.isOutlaw) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--stop);border-color:var(--stop);">OUTLAW — never sleeps</span>`);
+
   el.detailsData.innerHTML = `
     <div class="detail-header">
       <div>
         <div class="detail-title">${truck.name}</div>
-        <div class="detail-sub">${truck.contract.truckType.label} • ${truck.contract.cargo}${truck.parkedAt ? " (delivered)" : ""}</div>
+        <div class="detail-sub">${truck.contract.truckType.label} • ${truck.contract.cargo}</div>
       </div>
       <div style="text-align:right">
         <div class="archetype-badge" style="color:${archetype.color}">${archetype.label}</div>
         <div class="archetype-desc">${archetype.desc}</div>
       </div>
     </div>
-    ${truck.parkedAt
-      ? `<div class="detail-sub" style="margin-bottom:2px;">Parked at <strong>${truck.parkedAt}</strong> &bull; rolling out in ${truck.dwellHoursLeft < 1 ? "under an hour" : Math.ceil(truck.dwellHoursLeft) + "h"}</div>`
-      : `<div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)} &bull; ${Math.round(etaMiles)} mi remaining</div>`}
+    <div class="detail-sub" style="margin-bottom:2px;font-weight:700;color:${status.color};">${status.text}</div>
+    <div class="detail-sub" style="margin-bottom:2px;">${fullRouteHTML(truck)}${Number.isFinite(etaMiles) ? ` &bull; ${Math.round(etaMiles)} mi remaining` : ""}</div>
     ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);font-size:1.6rem;font-weight:700;">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
     ${controlBlock}
     ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls and load pickups are yours - the sim pauses and waits for you at the next fork, and at the load board when this run ends.</div>` : ""}
-    <div class="metric-grid" style="margin-bottom:12px;">
+    <div class="section-label">Condition</div>
+    ${conditionBar("Fuel", `${Math.round(truck.fuel)}% · ~${range.toLocaleString()} mi range`, truck.fuel, 100, fuelColor)}
+    ${conditionBar("Fatigue", `${Math.round(truck.fatigue)}%`, truck.fatigue, 100, fatigueColor)}
+    <div class="metric-grid" style="margin:12px 0;">
       <div class="metric-card"><div class="metric-title">Speed</div><div class="metric-value">${Math.round(truck.speed)} mph</div></div>
       <div class="metric-card"><div class="metric-title">Odometer</div><div class="metric-value">${Math.round(truck.totalMilesDriven).toLocaleString()}</div></div>
       <div class="metric-card"><div class="metric-title">Payout</div><div class="metric-value">$${truck.contract.payout.toLocaleString()}</div></div>
       <div class="metric-card"><div class="metric-title">Earnings</div><div class="metric-value">$${Math.round(truck.earnings).toLocaleString()}</div></div>
       <div class="metric-card"><div class="metric-title">Trips</div><div class="metric-value">${truck.contractsCompleted}</div></div>
       <div class="metric-card"><div class="metric-title">Cruise Mult.</div><div class="metric-value">${truck.driver.cruiseMult.toFixed(2)}&times;</div></div>
+      <div class="metric-card"><div class="metric-title">Fuel Spent</div><div class="metric-value">$${Math.round(truck.fuelSpend).toLocaleString()}</div></div>
+      <div class="metric-card"><div class="metric-title">Downtime</div><div class="metric-value">${truck.downtimeHours.toFixed(1)}h</div></div>
     </div>
     ${statBar("Aggression", truck.driver.aggression, "var(--stop)")}
     ${statBar("Skill", truck.driver.skill, "var(--info)")}
     ${statBar("Hustle", truck.driver.hustle, "var(--go)")}
+    ${traitChips.length ? `<div class="chip-row" style="margin-top:8px;">${traitChips.join("")}</div>` : ""}
   `;
 }
 

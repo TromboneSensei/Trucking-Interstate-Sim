@@ -127,7 +127,59 @@ const ROAD_CULL_PAD_WORLD_UNITS = BAND_HALF + 8;
 // refilled every frame instead of allocated fresh, so the per-truck draw
 // loop can batch every truck of the same color into a single
 // beginPath()/fill() pass instead of one pair per truck.
-const truckBuckets = new Map(Object.values(TRUCK_TYPES).map((tt) => [tt.id, { color: tt.color, xs: [], ys: [] }]));
+const truckBuckets = new Map(Object.values(TRUCK_TYPES).map((tt) => [tt.id, { color: tt.color, shape: tt.shape, sizeMult: tt.sizeMult, xs: [], ys: [] }]));
+// A broken-down/dry-tanked truck draws in one extra hazard-colored bucket
+// instead of its cargo color - same batched single-fill() path, just one
+// more bucket, so this costs nothing extra at scale.
+const DISABLED_TRUCK_COLOR = "#facc15";
+truckBuckets.set("DISABLED", { color: DISABLED_TRUCK_COLOR, shape: "circle", sizeMult: 1, xs: [], ys: [] });
+
+// Precomputed (cos, sin) unit-offsets for each polygon shape, so per-truck
+// drawing is just a multiply-by-radius-and-add - no per-truck trig or
+// rotation (every truck of a given type reads the same way regardless of
+// heading, which is what keeps this cheap at fleet scale). Triangle points
+// up, hexagon is flat-top; neither needs to match the truck's direction
+// of travel, only its cargo type.
+function polygonOffsets(n, startDeg) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const rad = ((startDeg + (360 / n) * i) * Math.PI) / 180;
+    pts.push([Math.cos(rad), Math.sin(rad)]);
+  }
+  return pts;
+}
+const SHAPE_OFFSETS = {
+  diamond: polygonOffsets(4, -90),
+  triangle: polygonOffsets(3, -90),
+  hexagon: polygonOffsets(6, 0),
+};
+
+// Appends one dot's subpath per (x,y) at radius `r` to the currently-open
+// path, batched across the whole bucket (see the truckBuckets draw loop)
+// - circle/square use the cheap native primitives, everything else is one
+// of the fixed polygons above.
+function addTruckShapes(ctx, shape, xs, ys, r) {
+  if (shape === "circle") {
+    for (let i = 0; i < xs.length; i++) {
+      const x = xs[i], y = ys[i];
+      ctx.moveTo(x + r, y); // starts this dot's subpath without a connecting line from the previous one
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+    }
+    return;
+  }
+  if (shape === "square") {
+    const side = r * 2;
+    for (let i = 0; i < xs.length; i++) ctx.rect(xs[i] - r, ys[i] - r, side, side);
+    return;
+  }
+  const offsets = SHAPE_OFFSETS[shape] || SHAPE_OFFSETS.diamond;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i], y = ys[i];
+    ctx.moveTo(x + offsets[0][0] * r, y + offsets[0][1] * r);
+    for (let k = 1; k < offsets.length; k++) ctx.lineTo(x + offsets[k][0] * r, y + offsets[k][1] * r);
+    ctx.closePath();
+  }
+}
 
 // Headlight cones, kept deliberately short and narrow so they read as a
 // truck's own lights on the pavement rather than searchlights. Flat
@@ -395,28 +447,52 @@ export function buildEdgeList(graph) {
   }
   let totalLen = 0;
   for (const e of edges) totalLen += e.len;
-  cached = { edges, indexByEdge, totalLen, counts: new Int32Array(edges.length) };
+  cached = { edges, indexByEdge, totalLen, counts: new Int32Array(edges.length), slowdownSum: new Float32Array(edges.length) };
   edgeListCache.set(graph, cached);
   return cached;
 }
 
-// Live truck count per physical road segment, reusing one Int32Array
-// rather than allocating per frame. Also returns the network-wide mean
-// density, which the heat bands are expressed as multiples of: what
-// counts as "congested" has to be relative to how many trucks are out
-// there at all, or a 500-truck fleet would never light up anything and a
-// 5000-truck fleet would light up everything.
+// Live truck count AND live slowdown per physical road segment, reusing
+// two typed arrays rather than allocating per frame. `counts` is still
+// used to floor out a lightly-traveled segment from ever reading as
+// congested regardless of speed (see CONGESTION_MIN_TRUCKS); actual
+// congestion classification is by `slowdownSum/counts` - each truck's
+// live speed against its own `freeFlowSpeed` snapshot (fleet.js Phase 1,
+// captured before rush hour/rubberneck/follow/arrival caps) - which is
+// fleet-size independent by construction: a 500-truck fleet and a
+// 10000-truck fleet both read "half of normal speed" the same way,
+// unlike the old density-relative-to-fleet-mean approach.
 function tallyCongestion(edgeList, trucks) {
   const counts = edgeList.counts;
+  const slowdownSum = edgeList.slowdownSum;
   counts.fill(0);
-  let onRoad = 0;
+  slowdownSum.fill(0);
   for (const truck of trucks) {
-    if (!truck.edge) continue;
+    // A disabled truck's own speed/freeFlowSpeed reflects the instant it
+    // broke down, not the live jam - excluding it means the segment's
+    // reading comes entirely from the REAL traffic rubbernecking around
+    // it, which is the actual congestion worth showing.
+    if (!truck.edge || truck.disabledHoursLeft > 0) continue;
     const idx = edgeList.indexByEdge.get(truck.edge);
-    if (idx !== undefined) { counts[idx]++; onRoad++; }
+    if (idx === undefined) continue;
+    counts[idx]++;
+    const slowdown = truck.freeFlowSpeed > 0 ? Math.max(0, 1 - truck.speed / truck.freeFlowSpeed) : 0;
+    slowdownSum[idx] += slowdown;
   }
-  const meanDensity = (onRoad / edgeList.totalLen) * 100;
-  return { counts, meanDensity };
+  // Network-wide congested-segment count for the HUD - computed over
+  // EVERY edge (not just the on-screen/culled subset drawRoads paints),
+  // so it reads as a fleet-wide health stat that doesn't fluctuate as the
+  // player pans or zooms, same spirit as the Busiest Corridor metric.
+  let congestedCount = 0;
+  for (let idx = 0; idx < counts.length; idx++) {
+    const n = counts[idx];
+    if (n === 0) continue;
+    const slowdown = slowdownSum[idx] / n;
+    for (const band of CONGESTION_BANDS) {
+      if (n >= band.minTrucks && slowdown >= band.slowdown) { congestedCount++; break; }
+    }
+  }
+  return { counts, slowdownSum, congestedCount };
 }
 
 function edgeVisible(e, cull) {
@@ -446,28 +522,22 @@ export function roadDetailFactor(camera) {
 // gradient would force one stroke() per segment, whereas bucketing keeps
 // the whole overlay to one stroke per band.
 //
-// Density is trucks per 100 world units of road, NOT a raw count -
-// counting per edge would call a handful of trucks spread over a 400-mile
-// desert run "as congested as" the same handful nose-to-tail through
-// Chicago, which is exactly backwards. `mult` is then a multiple of the
-// network-wide mean density, so the scale self-calibrates to fleet size.
-// Measured distribution (see the density calibration run): the mean sits
-// near the 60th percentile, so 1.7x/3x/5x lands roughly on the busiest
-// 20% / 8% / 2% of segments at any fleet size.
-// Thresholds as multiples of the network's own mean truck density, so they
-// self-calibrate to fleet size instead of needing a retune every time the
-// truck count changes.
-//
-// Calibrated against a warmed-up sim rather than by eye. The original
-// 1.7/3.0/5.0 lit up ~25% of all 543 segments at every fleet size, which
-// made congestion the map's default state rather than a signal. At
-// 4.0/7.0/11.0 a 500-truck fleet shows roughly 32 amber / 7 orange / 1 red
-// - a handful of genuinely busy corridors and a rare real jam, which is
-// what the colour is meant to mean.
+// Classified by ABSOLUTE slowdown - the average fraction each truck on
+// the segment is running below its own free-flow speed (fleet.js's
+// `truck.freeFlowSpeed`, snapshotted before rush hour/rubberneck/follow/
+// arrival caps) - rather than the old truck-count-relative-to-network-
+// mean approach. That approach was structurally unable to scale: raising
+// the truck count raises the network mean right along with any one
+// segment's count, so the bands' effective sensitivity dropped as the
+// fleet grew, and a lightly-loaded fleet could never light up anything at
+// all. Slowdown has no such dependency - "running at half speed" means
+// the same thing whether the fleet is 500 trucks or 10000.
+// Each band's `minTrucks` keeps a single truck braking for its own exit
+// from painting a whole segment red.
 const CONGESTION_BANDS = [
-  { mult: 4.0, color: "rgba(245, 182, 52, 0.75)" },
-  { mult: 7.0, color: "rgba(240, 112, 34, 0.86)" },
-  { mult: 11.0, color: "rgba(228, 46, 40, 0.94)" },
+  { slowdown: 0.15, minTrucks: 3, color: "rgba(245, 182, 52, 0.75)" },
+  { slowdown: 0.32, minTrucks: 4, color: "rgba(240, 112, 34, 0.86)" },
+  { slowdown: 0.52, minTrucks: 5, color: "rgba(228, 46, 40, 0.94)" },
 ];
 
 // Draws every road edge for the current frame: a zoom-driven cross-fade
@@ -581,8 +651,8 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
   // Congestion heat, laid over the finished road so a jam reads as the
   // pavement itself glowing hot. Widths track the same LOD cross-fade as
   // the roads underneath, so the heat never floats wider than its road.
-  if (congestion && congestion.meanDensity > 0) {
-    const counts = congestion.counts, mean = congestion.meanDensity;
+  if (congestion) {
+    const counts = congestion.counts, slowdownSum = congestion.slowdownSum;
     ctx.save();
     // Deliberately opaque source-over rather than additive: the road
     // should BECOME amber/red, not glow toward white. Additive blending
@@ -606,12 +676,15 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
       for (let bi = CONGESTION_BANDS.length - 1; bi >= 0; bi--) {
         const band = CONGESTION_BANDS[bi];
         const next = CONGESTION_BANDS[bi + 1];
-        const lo = band.mult * mean, hi = next ? next.mult * mean : Infinity;
+        const lo = band.slowdown, hi = next ? next.slowdown : Infinity;
         let started = false;
         for (let j = 0; j < list.length; j++) {
           const e = list[j];
-          const d = (counts[idxs[j]] / e.len) * 100; // trucks per 100 world units
-          if (d < lo || d >= hi) continue;
+          const idx = idxs[j];
+          const n = counts[idx];
+          if (n < band.minTrucks) continue; // too few trucks to call it congestion, not just a light road
+          const slowdown = slowdownSum[idx] / n;
+          if (slowdown < lo || slowdown >= hi) continue;
           if (!started) { ctx.beginPath(); started = true; }
           ctx.moveTo(e.ax + e.px * shoulderCentre, e.ay + e.py * shoulderCentre);
           ctx.lineTo(e.bx + e.px * shoulderCentre, e.by + e.py * shoulderCentre);
@@ -932,21 +1005,172 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
   // and memoised on the edge itself. This runs for every truck on every
   // frame - at 3000 trucks that was 6000 trig calls a frame purely to
   // recompute constants.
+  const [rightX, rightY] = edgeRightVector(edge);
+  const off = laneOffsetFor(edge, truck);
+  out.x += rightX * off;
+  out.y += rightY * off;
+  return out;
+}
+
+// An edge's bearing never changes, so the sin/cos pair is computed once
+// and memoised on the edge itself. This runs for every truck on every
+// frame - at 3000 trucks that was 6000 trig calls a frame purely to
+// recompute constants.
+function edgeRightVector(edge) {
   let rightX = edge._rightX;
   if (rightX === undefined) {
     const rad = (edge.bearing * Math.PI) / 180;
     rightX = edge._rightX = Math.cos(rad);
     edge._rightY = Math.sin(rad);
   }
-  // Interstates blend between two lanes as trucks pass; highways have a
-  // single lane each way, so they take a fixed offset with no laneT term.
-  // The reverse-direction edge negates the right-vector for free (see
-  // above), which is what puts opposing highway traffic on the far side.
-  const off = edge.kind === "interstate"
+  return [rightX, edge._rightY];
+}
+
+// Perpendicular offset to the right of travel. Interstates blend between
+// two lanes as trucks pass; highways have a single lane each way, so they
+// take a fixed offset with no laneT term. The reverse-direction edge
+// negates the right-vector for free (edgeRightVector above), which is
+// what puts opposing traffic on the far side of the median for free.
+//
+// A disabled truck (broken down or dry-tanked) sits on the SHOULDER, not
+// in the travel lane - on an interstate that's RIGHT_LANE_OFFSET +
+// SHOULDER_W (13.5), which puts the dot's outer edge exactly on
+// BAND_HALF (17.0), flush inside the pavement by construction. A highway
+// has no shoulder room to spare (HIGHWAY_LANE_OFFSET + TRUCK_DOT_RADIUS
+// already reaches HWY_BAND_HALF), so there the hazard color alone (see
+// DISABLED_TRUCK_COLOR) has to carry it.
+function laneOffsetFor(edge, truck) {
+  if (truck.disabledHoursLeft > 0) return edge.kind === "interstate" ? RIGHT_LANE_OFFSET + SHOULDER_W : HIGHWAY_LANE_OFFSET;
+  return edge.kind === "interstate"
     ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT
     : HIGHWAY_LANE_OFFSET;
-  out.x += rightX * off;
-  out.y += edge._rightY * off;
+}
+
+// --- junction corner-rounding ------------------------------------------
+//
+// Without this, both a truck's position AND its heading snap at every
+// node: truckWorldPos above is a pure lerp along one straight edge, and
+// every heading consumer (headlights, the nav arrow, the follow camera)
+// reads the raw discrete `edge.bearing`. truckPose blends both, through a
+// small quadratic Bezier centered on the junction, spanning the last
+// JUNCTION_BLEND_WORLD_UNITS of the incoming edge and the first
+// JUNCTION_BLEND_WORLD_UNITS of the outgoing edge - everywhere else
+// (which is most of any edge) it's pixel-identical to the straight line.
+//
+// Kept small and physics-free on purpose: truck.s and all of fleet.js's
+// gap/following math stay on the exact straight-line model - only the
+// RENDERED position/heading bend through the corner, bounded by `blend`,
+// so this can never desync from where a truck "really" is.
+const JUNCTION_BLEND_WORLD_UNITS = 20; // ~one road-band width - reads as a rounded corner without ever ballooning into a multi-mile arc on a short edge
+const JUNCTION_BLEND_MAX_FRACTION = 0.35; // caps blend on a short edge so the two ends' zones can never overlap (2*0.35 < 1)
+
+// Unit forward-direction vector for an edge, derived from the same
+// bearing convention as edgeRightVector's right-vector (right is 90°
+// clockwise from forward in this y-down world space): if right =
+// (cos(theta), sin(theta)), forward = (sin(theta), -cos(theta)) - checked
+// against north (theta=0 -> forward (0,-1), i.e. up/toward smaller y,
+// since higher latitude projects to smaller y) and east (theta=90 ->
+// forward (1,0)).
+function edgeForwardVector(edge) {
+  const rad = (edge.bearing * Math.PI) / 180;
+  return [Math.sin(rad), -Math.cos(rad)];
+}
+
+// One cubic Bezier spanning a single junction: A sits `blend` units before
+// the node on `incoming`'s centerline (at incoming's lane offset), B sits
+// `blend` units after the node on `outgoing` (at outgoing's lane offset)
+// - both exactly as a quadratic version of this would place its P0/P2.
+// The two INNER control points are each pulled from A/B along that edge's
+// OWN forward direction (not toward the node), which is what guarantees
+// C1 continuity - the tangent at u=0 is exactly `incoming`'s forward
+// direction and at u=1 exactly `outgoing`'s, by construction, regardless
+// of how sharp the real turn is or whether the two edges' lane offsets
+// happen to match. (A quadratic version with a single shared control
+// point at the node - offset by the mean of the two edges' offset
+// vectors - was tried first and measurably failed this: whenever the two
+// edges' RIGHT-vectors point in different directions, which is exactly
+// what happens at a real turn, the tangent at the boundary picks up an
+// extra lateral component and the heading overshoots then snaps back to
+// `outgoing.bearing` right at the blend-zone edge - caught by
+// junction_smoothing_verify.mjs's heading-continuity sweep.)
+// `u` (0..1) is progress along the WHOLE curve; heading is the curve's
+// tangent direction, converted back through the same forward/bearing
+// relationship edgeForwardVector uses.
+const JUNCTION_CONTROL_PULL = 0.5; // fraction of `blend` the inner control points are pulled along each edge's own direction
+function bezierCornerPose(node, incoming, outgoing, laneT, blend, u, out) {
+  const [inRX, inRY] = edgeRightVector(incoming);
+  const [outRX, outRY] = edgeRightVector(outgoing);
+  // Only ever called for a non-disabled truck (truckPose gates on that
+  // before calling in), so both edges use the plain lane offset.
+  const inOff = laneOffsetForKindLaneT(incoming, laneT);
+  const outOff = laneOffsetForKindLaneT(outgoing, laneT);
+  const [inFX, inFY] = edgeForwardVector(incoming);
+  const [outFX, outFY] = edgeForwardVector(outgoing);
+
+  const ax = node.x - inFX * blend + inRX * inOff, ay = node.y - inFY * blend + inRY * inOff;
+  const bx = node.x + outFX * blend + outRX * outOff, by = node.y + outFY * blend + outRY * outOff;
+  const pull = blend * JUNCTION_CONTROL_PULL;
+  const c1x = ax + inFX * pull, c1y = ay + inFY * pull;
+  const c2x = bx - outFX * pull, c2y = by - outFY * pull;
+
+  const mu = 1 - u;
+  const mu2 = mu * mu, u2 = u * u;
+  out.x = mu2 * mu * ax + 3 * mu2 * u * c1x + 3 * mu * u2 * c2x + u2 * u * bx;
+  out.y = mu2 * mu * ay + 3 * mu2 * u * c1y + 3 * mu * u2 * c2y + u2 * u * by;
+
+  const dx = 3 * mu2 * (c1x - ax) + 6 * mu * u * (c2x - c1x) + 3 * u2 * (bx - c2x);
+  const dy = 3 * mu2 * (c1y - ay) + 6 * mu * u * (c2y - c1y) + 3 * u2 * (by - c2y);
+  out.heading = (dx === 0 && dy === 0) ? incoming.bearing : ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
+  return out;
+}
+
+// Same non-disabled offset rule as laneOffsetFor, but callable without a
+// live Truck (bezierCornerPose needs it for both the incoming and
+// outgoing edge, and the truck isn't actually "on" the outgoing one yet).
+function laneOffsetForKindLaneT(edge, laneT) {
+  return edge.kind === "interstate"
+    ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * laneT
+    : HIGHWAY_LANE_OFFSET;
+}
+
+// Position AND heading for a truck, corner-rounded through whichever
+// junction (if any) it's currently within JUNCTION_BLEND_WORLD_UNITS of.
+// Every consumer that used to read raw `truck.edge.bearing` for direction
+// (headlights, the nav arrow, the follow camera) should use `.heading`
+// from this instead. Disabled trucks are excluded - a broken-down truck
+// is stationary, so its heading has nothing to ease toward.
+export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }) {
+  if (!truck.edge) {
+    truckCenterlinePos(graph, truck, out);
+    out.heading = 0;
+    return out;
+  }
+  const edge = truck.edge;
+  const a = graph.nodes[edge.from], b = graph.nodes[edge.to];
+  // An edge's world length never changes, so - same as edgeRightVector's
+  // memoized sin/cos - cache it on the edge instead of paying a sqrt for
+  // every truck on it every frame (this runs for the WHOLE fleet every
+  // frame, so at 10000 trucks that sqrt alone was a measurable chunk of
+  // frame time).
+  let worldLen = edge._worldLen;
+  if (worldLen === undefined) worldLen = edge._worldLen = Math.hypot(b.x - a.x, b.y - a.y);
+  const t = edge.miles > 0 ? Math.max(0, Math.min(1, truck.s / edge.miles)) : 0;
+  const blend = Math.min(JUNCTION_BLEND_WORLD_UNITS, worldLen * JUNCTION_BLEND_MAX_FRACTION);
+  const blendT = worldLen > 0 ? blend / worldLen : 0;
+  const disabled = truck.disabledHoursLeft > 0;
+
+  if (!disabled && blendT > 0) {
+    const nextEdge = truck.remainingPath[0];
+    if (nextEdge && t > 1 - blendT) {
+      return bezierCornerPose(b, edge, nextEdge, truck.laneT, blend, 0.5 * (t - (1 - blendT)) / blendT, out);
+    }
+    if (truck.prevEdge && t < blendT) {
+      return bezierCornerPose(a, truck.prevEdge, edge, truck.laneT, blend, 0.5 + 0.5 * (t / blendT), out);
+    }
+  }
+
+  truckWorldPos(graph, truck, out);
+  out.heading = edge.bearing;
   return out;
 }
 
@@ -1204,7 +1428,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     && darkAtMid > 0.22 && roadDetailFactor(camera) >= 1;
   headlightPts.length = 0;
 
-  const scratchPos = { x: 0, y: 0 }; // reused across the whole loop - no per-truck allocation
+  const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
     if (drawArrowForSelected && truck === selectedTruck) continue;
     // Parked trucks sit exactly on their city's node (see truckCenterlinePos
@@ -1213,7 +1437,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // of overlapping dots on top of it. The existing amber badge next to
     // the city's label already reports how many are parked; no dot needed.
     if (truck.parkedAt) continue;
-    truckWorldPos(graph, truck, scratchPos);
+    truckPose(graph, truck, scratchPos);
     const p = scratchPos;
 
     const visible = nav
@@ -1225,13 +1449,13 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // (already generous) bound.
     if (!visible && truck !== selectedTruck) continue;
 
-    const bucket = truckBuckets.get(truck.contract.truckType.id);
+    const bucket = truck.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
     bucket.xs.push(p.x);
     bucket.ys.push(p.y);
     // Only moving trucks throw light, and only ones actually on an edge
     // have a bearing to throw it along.
     if (headlightsOn && truck.edge && truck.speed > 1) {
-      headlightPts.push(p.x, p.y, truck.edge.bearing);
+      headlightPts.push(p.x, p.y, p.heading);
     }
   }
 
@@ -1270,31 +1494,29 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // cargo colour, "show me only the reefers" costs nothing extra - it's
   // just a different alpha per bucket, no filtering or extra passes.
   const spotlight = renderOpts.spotlightCargo || null;
-  // Below roughly a pixel and a half across, a circle and a square are the
-  // same handful of shaded pixels - but arc() has to flatten a curve into
-  // segments where rect() is four points. That difference is irrelevant for
-  // one dot and very much not irrelevant for three thousand, which is
-  // exactly the situation at country zoom: the dot is 3.5 world units, so
-  // under about zoom 0.43 every truck on screen is sub-pixel. Zoomed in,
-  // where the dots are big enough for the shape to read, they stay round.
+  // Below roughly a pixel and a half across, any of these shapes is the
+  // same handful of shaded pixels - but a polygon/arc path costs more to
+  // flatten than a plain rect(). That difference is irrelevant for one dot
+  // and very much not irrelevant for three thousand, which is exactly the
+  // situation at country zoom: the dot is 3.5 world units, so under about
+  // zoom 0.43 every truck on screen is sub-pixel. Zoomed in, where the
+  // dots are big enough for a shape to read, each cargo type draws its own
+  // silhouette (economy.js's TRUCK_TYPES shape/sizeMult) instead.
   const dotPx = TRUCK_DOT_RADIUS * camera.zoom;
   const squareDots = dotPx < 1.5;
-  const dotSide = TRUCK_DOT_RADIUS * 2;
   for (const [id, b] of truckBuckets) {
     if (b.xs.length === 0) continue;
     ctx.globalAlpha = fleetAlpha * (spotlight && id !== spotlight ? 0.12 : 1);
     ctx.fillStyle = b.color;
     ctx.beginPath();
+    const r = TRUCK_DOT_RADIUS * (b.sizeMult || 1);
     if (squareDots) {
+      const side = r * 2;
       for (let i = 0; i < b.xs.length; i++) {
-        ctx.rect(b.xs[i] - TRUCK_DOT_RADIUS, b.ys[i] - TRUCK_DOT_RADIUS, dotSide, dotSide);
+        ctx.rect(b.xs[i] - r, b.ys[i] - r, side, side);
       }
     } else {
-      for (let i = 0; i < b.xs.length; i++) {
-        const x = b.xs[i], y = b.ys[i];
-        ctx.moveTo(x + TRUCK_DOT_RADIUS, y); // starts this dot's subpath without a connecting line from the previous one
-        ctx.arc(x, y, TRUCK_DOT_RADIUS, 0, Math.PI * 2);
-      }
+      addTruckShapes(ctx, b.shape || "circle", b.xs, b.ys, r);
     }
     ctx.fill();
   }
@@ -1313,8 +1535,8 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // right-vector (rightX=cos(theta), rightY=sin(theta)): forward is the
   // companion vector (sin(theta), -cos(theta)).
   if (drawArrowForSelected) {
-    truckWorldPos(graph, selectedTruck, scratchPos);
-    const rad = (selectedTruck.edge.bearing * Math.PI) / 180;
+    truckPose(graph, selectedTruck, scratchPos);
+    const rad = (scratchPos.heading * Math.PI) / 180;
     const fx = Math.sin(rad), fy = -Math.cos(rad);
     const rx = Math.cos(rad), ry = Math.sin(rad);
     const tipLen = 9, backLen = 4, halfWidth = 5; // world units, same scale family as TRUCK_DOT_RADIUS (3.5)
@@ -1333,7 +1555,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
 
   // Selected-truck ring, drawn once on top of everything else, exactly as before.
   if (selectedTruck) {
-    truckWorldPos(graph, selectedTruck, scratchPos);
+    truckPose(graph, selectedTruck, scratchPos);
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2.5 / camera.zoom;
     ctx.beginPath();
@@ -1342,4 +1564,5 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   }
 
   ctx.restore();
+  return { congestedSegments: congestion ? congestion.congestedCount : 0 };
 }

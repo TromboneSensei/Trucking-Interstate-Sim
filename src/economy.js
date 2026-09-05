@@ -13,17 +13,25 @@
 // The one exception where tags ARE still read is MILITARY_CITIES below,
 // which powers the destination bias for military loads.
 import { masterCities } from "./data.js";
-import { haversineMiles, findPath } from "./geo.js";
+import { haversineMiles, findPath, HIGHWAY_ROUTE_PENALTY } from "./geo.js";
 import { PRODUCTS, CITY_EXPORTS } from "./products.js";
 
+// `shape` + `sizeMult` give each cargo type a distinct silhouette on the
+// map, on top of its color - render.js batches the draw by truck-type id
+// already (see truckBuckets), so this is a per-BUCKET shape choice, not
+// per-truck: draw-call count is unchanged even at 10000 trucks. Only
+// rotationally-symmetric primitives are used (no per-truck trigonometry
+// needed to orient one). Shapes repeat across a couple of types - color
+// alone already uniquely identifies all seven - sizeMult keeps those
+// pairs (REEFER/TECH, AUTO/MILITARY) apart at a glance too.
 export const TRUCK_TYPES = {
-    DRYVAN: { id: "DRYVAN", label: "Dry Van", color: "#e8ecef", multiplier: 1.0 },
-    REEFER: { id: "REEFER", label: "Reefer", color: "#35c96b", multiplier: 1.18 },
-    TANKER: { id: "TANKER", label: "Tanker", color: "#e0473c", multiplier: 1.3 },
-    FLATBED: { id: "FLATBED", label: "Flatbed", color: "#d97706", multiplier: 1.22 },
-    AUTO: { id: "AUTO", label: "Auto Hauler", color: "#3b82f6", multiplier: 1.2 },
-    TECH: { id: "TECH", label: "High-Value Van", color: "#d946ef", multiplier: 1.3 },
-    MILITARY: { id: "MILITARY", label: "Military", color: "#9ca3af", multiplier: 1.6 },
+    DRYVAN: { id: "DRYVAN", label: "Dry Van", color: "#e8ecef", multiplier: 1.0, shape: "circle", sizeMult: 1.0 },
+    REEFER: { id: "REEFER", label: "Reefer", color: "#35c96b", multiplier: 1.18, shape: "square", sizeMult: 1.0 },
+    TANKER: { id: "TANKER", label: "Tanker", color: "#e0473c", multiplier: 1.3, shape: "diamond", sizeMult: 1.05 },
+    FLATBED: { id: "FLATBED", label: "Flatbed", color: "#d97706", multiplier: 1.22, shape: "triangle", sizeMult: 1.0 },
+    AUTO: { id: "AUTO", label: "Auto Hauler", color: "#3b82f6", multiplier: 1.2, shape: "hexagon", sizeMult: 1.05 },
+    TECH: { id: "TECH", label: "High-Value Van", color: "#d946ef", multiplier: 1.3, shape: "square", sizeMult: 0.85 },
+    MILITARY: { id: "MILITARY", label: "Military", color: "#9ca3af", multiplier: 1.6, shape: "hexagon", sizeMult: 1.3 },
 };
 
 const GENERAL_CARGO_POOL = [
@@ -141,9 +149,15 @@ export function generateContract(graph, originName, rnd = Math.random) {
     const destination = pickDestination(graph, originName, rnd, prefer);
     const path = findPath(graph, originName, destination);
     const optimalMiles = path ? path.reduce((s, e) => s + e.miles, 0) : haversineMiles(graph.nodes[originName], graph.nodes[destination]);
+    // Same cost the A* router itself minimizes (geo.js's findPath) - a
+    // highway-heavy route's real drive time runs a bit longer than raw
+    // miles/limit would suggest (fuel stops, weigh stations, town
+    // signals), so this is a truer ETA than dividing distance by a flat
+    // average speed.
+    const optimalHours = path ? path.reduce((s, e) => s + (e.miles / e.speedLimit) * (e.kind === "highway" ? HIGHWAY_ROUTE_PENALTY : 1), 0) : optimalMiles / 60;
     const tierMult = TIER_PAY_MULT[graph.nodes[destination].t] ?? 1;
     const payout = Math.round(optimalMiles * PAY_RATE_PER_MILE * truckType.multiplier * tierMult);
-    return { origin: originName, destination, cargo, category, truckType, optimalMiles, payout, path };
+    return { origin: originName, destination, cargo, category, truckType, optimalMiles, optimalHours, payout, path };
 }
 
 // A small board of distinct offers for a truck sitting at `originName`.
