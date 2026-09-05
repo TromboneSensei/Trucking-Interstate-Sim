@@ -1207,6 +1207,12 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   const scratchPos = { x: 0, y: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
     if (drawArrowForSelected && truck === selectedTruck) continue;
+    // Parked trucks sit exactly on their city's node (see truckCenterlinePos
+    // for an edge-less truck) - drawing a dot there would just paint over
+    // the city itself, and with several trucks parked at once, stack a pile
+    // of overlapping dots on top of it. The existing amber badge next to
+    // the city's label already reports how many are parked; no dot needed.
+    if (truck.parkedAt) continue;
     truckWorldPos(graph, truck, scratchPos);
     const p = scratchPos;
 

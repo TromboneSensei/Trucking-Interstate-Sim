@@ -298,6 +298,7 @@ function handleTap(wx, wy) {
   const tol = TAP_TOLERANCE_PX / camera.zoom;
   let best = null, bestDist = tol;
   for (const t of trucks) {
+    if (t.parkedAt) continue; // parked trucks draw no dot (render.js) - let the tap fall through to the city underneath
     const p = truckWorldPos(graph, t);
     const d = Math.hypot(p.x - wx, p.y - wy);
     if (d < bestDist) { bestDist = d; best = t; }

@@ -74,6 +74,12 @@ export function initUI(callbacks) {
   });
 
   el.rankings.addEventListener("click", (e) => {
+    const truckRow = e.target.closest("[data-truck]");
+    if (truckRow) {
+      const t = lastTrucks.find((tt) => tt.id === Number(truckRow.dataset.truck));
+      if (t && onSelectTruck) onSelectTruck(t);
+      return;
+    }
     const drillCard = e.target.closest("[data-drill]");
     const chip = e.target.closest("[data-chip]");
     const cityRow = e.target.closest("[data-city]");
@@ -96,6 +102,11 @@ export function initUI(callbacks) {
 
   el.detailsData.addEventListener("click", (e) => {
     if (e.target.closest("[data-control-toggle]")) onToggleControl && onToggleControl();
+    const truckRow = e.target.closest("[data-truck]");
+    if (truckRow) {
+      const t = lastTrucks.find((tt) => tt.id === Number(truckRow.dataset.truck));
+      if (t && onSelectTruck) onSelectTruck(t);
+    }
   });
 }
 
@@ -532,6 +543,8 @@ function renderCityDrilldown(trucks, graph, key) {
 // The rich per-city page, embedded directly in the Rankings tab in place
 // of whichever city ranking the player drilled through to get here.
 function renderCityPage(city, graph, trucks) {
+  lastTrucks = trucks;
+  lastGraph = graph;
   const header = document.createElement("div");
   header.className = "detail-header";
   header.style.marginTop = "2px";
@@ -570,7 +583,27 @@ function cityDetailsHTML(city, graph, trucks) {
     </div>
     ${topInbound ? `<div class="detail-sub" style="margin-bottom:10px;">Top inbound cargo: <strong style="color:var(--ink)">${topInbound[0]}</strong> (${topInbound[1]} truck${topInbound[1] === 1 ? "" : "s"})</div>` : ""}
     <div class="detail-sub">${(city.ind || []).join(", ") || "No industry data"}</div>
+    ${parkedTrucksHTML(city, trucks)}
   `;
+}
+
+// Trucks currently parked at this city, between contracts - they draw no
+// dot on the map (render.js skips parked trucks so the city dot itself
+// stays visible and tappable), so this list is the only way to see who's
+// here and drill into one's own detail page. `data-truck` is picked up by
+// the click delegation on whichever panel this HTML lands in.
+function parkedTrucksHTML(city, trucks) {
+  const parked = trucks.filter((t) => t.parkedAt === city.name);
+  if (!parked.length) return "";
+  const rows = parked.map((t, i) => {
+    const eta = t.dwellHoursLeft < 1 ? "under an hour" : Math.ceil(t.dwellHoursLeft) + "h";
+    return `<div class="list-row" data-truck="${t.id}">
+      <div class="row-rank">${i + 1}</div>
+      <div><div class="row-main">${t.name}</div><div class="row-sub">${t.contract.truckType.label} • ${t.contract.cargo}</div></div>
+      <div class="row-value">${eta}<span class="row-value-unit"> left</span></div>
+    </div>`;
+  }).join("");
+  return `<div class="section-label">Parked Here (${parked.length})</div>${rows}`;
 }
 
 function statBar(label, value01, color) {
@@ -644,6 +677,8 @@ function renderTruckDetails(truck, isControlled) {
 }
 
 function renderCityDetails(city, graph, trucks) {
+  lastTrucks = trucks;
+  lastGraph = graph;
   el.detailsEmpty.classList.add("hidden");
   el.detailsData.classList.remove("hidden");
   el.detailsData.innerHTML = cityDetailsHTML(city, graph, trucks);
