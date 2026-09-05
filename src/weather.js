@@ -10,11 +10,13 @@
 // clear weather, and you should be able to SEE why on the map.
 "use strict";
 
-import { WORLD_WIDTH, WORLD_HEIGHT } from "./geo.js";
+import { WORLD_WIDTH, latToWorldY } from "./geo.js";
 
 // Snow above this world Y, rain below it. y = (maxLat - lat) * scale, so
-// SMALL y is NORTH - the northern third of the map gets winter systems.
-const SNOW_LINE_Y = WORLD_HEIGHT * 0.42;
+// SMALL y is NORTH. Expressed as a latitude (not a WORLD_HEIGHT fraction)
+// so the Canada map-expansion (geo.js) can't silently drag the snow line
+// north with it - 39.0N is unchanged from when this was WORLD_HEIGHT*0.42.
+const SNOW_LINE_Y = latToWorldY(39.0);
 
 // Speed multipliers at the dead centre of a cell at full intensity;
 // scaled down toward 1.0 at the cell's edge, so trucks ease into and out
@@ -33,8 +35,16 @@ export function createWeather(count = 7, rnd = Math.random) {
   return cells;
 }
 
+// US-only band, 46.5N (upper Great Lakes/New England) down to 27.5N (deep
+// south Texas/Florida) - expressed as latitudes for the same reason as
+// SNOW_LINE_Y above. Weather does not extend over Canada in this pass.
+const SPAWN_LAT_NORTH = 46.5, SPAWN_LAT_SOUTH = 27.5;
+const SPAWN_Y_NORTH = latToWorldY(SPAWN_LAT_NORTH), SPAWN_Y_SOUTH = latToWorldY(SPAWN_LAT_SOUTH);
+// Vertical wander walls, slightly outside the spawn band (47.5N / 26.5N).
+const BOUNCE_Y_NORTH = latToWorldY(47.5), BOUNCE_Y_SOUTH = latToWorldY(26.5);
+
 function spawnCell(rnd, x) {
-  const y = WORLD_HEIGHT * (0.12 + rnd() * 0.76);
+  const y = SPAWN_Y_NORTH + rnd() * (SPAWN_Y_SOUTH - SPAWN_Y_NORTH);
   return {
     x,
     y,
@@ -55,7 +65,7 @@ export function updateWeather(cells, gameHours, rnd = Math.random) {
     const c = cells[i];
     c.x += DRIFT_X_PER_HOUR * gameHours;
     c.y += c.vy * gameHours;
-    if (c.y < WORLD_HEIGHT * 0.08 || c.y > WORLD_HEIGHT * 0.92) c.vy = -c.vy;
+    if (c.y < BOUNCE_Y_NORTH || c.y > BOUNCE_Y_SOUTH) c.vy = -c.vy;
     if (c.x - c.r > WORLD_WIDTH) cells[i] = spawnCell(rnd, -c.r);
   }
 }

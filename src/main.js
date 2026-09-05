@@ -1,7 +1,7 @@
 // main.js - boot + the single game loop. Ties the graph, fleet
 // simulation, camera, renderer, and dashboard together.
-import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
-import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
+import { buildGraph, WORLD_WIDTH, latToWorldY, travelDirectionLabel } from "./geo.js";
+import { spawnFleet, updateFleet, BASE_TIME_SCALE, resetBorderCrossings, getBorderCrossings } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
@@ -100,6 +100,7 @@ let truckById = new Map();
 // for the map's label badges. Reused rather than reallocated: at 3000
 // trucks this runs 60x a second.
 const parkedCounts = new Map();
+const customsCounts = new Map();
 
 // Economy history: one sample every ECON_SAMPLE_MIN game-minutes, capped
 // at 48 game-hours. Instantaneous readouts (the Dispatch tiles) can't show
@@ -242,15 +243,26 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
+// The "home" view frames the continental US the way the map looked before
+// the Canada expansion grew WORLD_HEIGHT - so the opening view (and the
+// Apply&Restart reset) stays pixel-identical to before, and Canada is
+// reached only by panning up. Deliberately NOT WORLD_HEIGHT/2 - that's
+// the vertical centre of the whole world INCLUDING Canada, which would
+// leave the initial view centred ~3.25 degrees too far north.
+const HOME_TOP_Y = latToWorldY(49.5);       // was y=0 pre-expansion
+const HOME_BOTTOM_Y = latToWorldY(24.5);    // was y=WORLD_HEIGHT pre-expansion
+const HOME_HEIGHT = HOME_BOTTOM_Y - HOME_TOP_Y;       // == 2400, exactly as before
+const HOME_CENTER_Y = (HOME_TOP_Y + HOME_BOTTOM_Y) / 2;
+
 function fitZoom() {
   const availH = canvas.clientHeight * 0.55; // leave room for the bottom sheet
-  return Math.min(canvas.clientWidth / WORLD_WIDTH, availH / WORLD_HEIGHT) * 0.92;
+  return Math.min(canvas.clientWidth / WORLD_WIDTH, availH / HOME_HEIGHT) * 0.92;
 }
 
 resizeCanvas();
 const initialZoom = fitZoom();
 const camera = new Camera(canvas, {
-  x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2,
+  x: WORLD_WIDTH / 2, y: HOME_CENTER_Y,
   zoom: initialZoom, minZoom: initialZoom * 0.6, maxZoom: 6,
   onTap: handleTap,
 });
@@ -510,6 +522,10 @@ function bootSim(newSettings) {
   lastEconSampleMin = -Infinity;
   dayIndex = Math.floor(settings.startSeconds / 86400);
   hideDigest();
+  // Border-crossing queues hold references to specific Truck instances -
+  // must be cleared before the old fleet is discarded, or a respawn (Apply
+  // & Restart) leaves stale trucks queued forever, invisible and unreleasable.
+  resetBorderCrossings();
   trucks = spawnFleet(graph, settings.fleetSize);
   truckById = new Map(trucks.map((t) => [t.id, t]));
   // Must come AFTER the fleet exists: it snapshots per-truck earnings to
@@ -544,7 +560,7 @@ function bootSim(newSettings) {
   camera.unfollow();
   const zoom = fitZoom();
   camera.x = WORLD_WIDTH / 2;
-  camera.y = WORLD_HEIGHT / 2;
+  camera.y = HOME_CENTER_Y;
   camera.zoom = zoom;
   camera.baseZoom = zoom;
   camera.minZoom = zoom * 0.6;
@@ -660,6 +676,18 @@ function frame(now) {
       parkedCounts.set(t.parkedAt, (parkedCounts.get(t.parkedAt) || 0) + 1);
     }
 
+    // Attributed to the APPROACH city (the crossing's queues are keyed by
+    // edge.from - see fleet.js's _enterCustoms) for both rural and urban
+    // crossings alike: "N trucks waiting to cross" reads naturally on the
+    // city they're waiting to leave, whichever side of the border it's on.
+    customsCounts.clear();
+    for (const crossing of getBorderCrossings().values()) {
+      for (const [fromCity, queue] of crossing.queues) {
+        if (!queue.length) continue;
+        customsCounts.set(fromCity, (customsCounts.get(fromCity) || 0) + queue.length);
+      }
+    }
+
     drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
       showAllLabels: settings.showAllLabels,
       showMedians: settings.showMedians,
@@ -671,6 +699,7 @@ function frame(now) {
       weather,
       spotlightCargo: state.spotlightCargo,
       parkedCounts,
+      customsCounts,
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
     });

@@ -8,9 +8,19 @@ const DEFAULT_HIGHWAY_MPH = 55;
 // "world space" once per node so rendering never has to reproject a
 // lat/lon on every frame. World units are arbitrary but consistent; the
 // camera (see camera.js) maps this space to screen pixels.
-const WORLD_BOUNDS = { minLat: 24.5, maxLat: 49.5, minLon: -125.0, maxLon: -66.0 };
+// Bounds now extend north to include southern Canada (up to ~Edmonton /
+// Saskatoon / Quebec City) while leaving a visual gap to the map's top
+// edge. maxLat and WORLD_HEIGHT were grown together so yScale stays
+// EXACTLY 96 units/degree (2400/25 == 3120/32.5) -- every pre-existing US
+// point simply translates down by (57.0-49.5)*96 = 720 world units, with
+// zero distortion. xScale (67.7966 units/deg lon) is untouched. See
+// scripts/build-states-data.mjs, which duplicates these bounds and MUST
+// be kept in sync, and src/weather.js, which expresses its bands as
+// latitudes (via latToWorldY) rather than WORLD_HEIGHT fractions for
+// exactly this reason.
+const WORLD_BOUNDS = { minLat: 24.5, maxLat: 57.0, minLon: -125.0, maxLon: -66.0 };
 export const WORLD_WIDTH = 4000;
-export const WORLD_HEIGHT = 2400;
+export const WORLD_HEIGHT = 3120; // (57.0 - 24.5) * 96
 
 function projectToWorld(lat, lon) {
     const { minLat, maxLat, minLon, maxLon } = WORLD_BOUNDS;
@@ -18,6 +28,12 @@ function projectToWorld(lat, lon) {
         x: (lon - minLon) * (WORLD_WIDTH / (maxLon - minLon)),
         y: (maxLat - lat) * (WORLD_HEIGHT / (maxLat - minLat)),
     };
+}
+
+// Exported so other modules (weather.js, main.js) can express positions
+// as latitudes instead of duplicating/hardcoding WORLD_HEIGHT fractions.
+export function latToWorldY(lat) {
+    return projectToWorld(lat, WORLD_BOUNDS.minLon).y;
 }
 
 function toRad(deg) { return deg * Math.PI / 180; }
@@ -159,15 +175,29 @@ export function buildGraph() {
                 const brgAB = bearing(nodes[a], nodes[b]);
                 const brgBA = (brgAB + 180) % 360;
 
+                // A crossing is derived, never hand-marked: whenever the two
+                // endpoint nodes' country fields differ (missing = "US" - see
+                // buildGraph, which spreads masterCities' raw fields, including
+                // "country", onto every node). borderType comes from whichever
+                // side declares one explicitly (see data.js/POE tagging below);
+                // this stays undefined until Phase C data adds it, so every
+                // crossing defaults to "rural" until tagged otherwise.
+                const countryA = nodes[a].country || "US", countryB = nodes[b].country || "US";
+                const isBorder = countryA !== countryB;
+                const borderType = isBorder ? (nodes[a].poe || nodes[b].poe || "rural") : undefined;
+                const borderName = isBorder ? `${a}/${b}` : undefined;
+
                 adjacency[a].push({
                     from: a, to: b, route: routeName, kind, speedLimit: mph, miles,
                     bearing: brgAB, dirLabel: compassLabel(brgAB),
                     control: findControlCity(cities, i, +1),
+                    isBorder, borderType, borderName,
                 });
                 adjacency[b].push({
                     from: b, to: a, route: routeName, kind, speedLimit: mph, miles,
                     bearing: brgBA, dirLabel: compassLabel(brgBA),
                     control: findControlCity(cities, i + 1, -1),
+                    isBorder, borderType, borderName,
                 });
             }
         }
@@ -247,11 +277,56 @@ function cachePath(key, value) {
     pathCache.set(key, value);
 }
 
+// Static per-mile penalties added to a border edge's cost so routing
+// funnels traffic onto the high-throughput urban crossings the way real
+// freight does, rather than treating a rural one-truck-per-hour crossing
+// as equally attractive. MUST stay static (a function of the edge alone,
+// never of live queue length) - findPath's result is cached by
+// startName->goalName->routeClass, and a queue-dependent cost would
+// silently poison that cache with a route that was only cheap the moment
+// it was computed.
+const BORDER_PENALTY_URBAN = 60;
+const BORDER_PENALTY_RURAL = 400;
+
+// Route "classes" fix the A* cache's biggest remaining shortcut: every
+// driver used to get the literal same cheapest-miles path between any two
+// cities, so no driver trait ever showed up in navigation. Each class is a
+// distinct, but still fully static, cost function - class stays fixed per
+// driver for the life of the cache entry, so the LRU still partitions
+// cleanly (worst case: entries per city-pair triple instead of one).
+// class 0: pure miles (the original behaviour - default for any caller
+//   that doesn't pass a driver, e.g. tests).
+// class 1: mildly prefers interstates - assigned to higher-compliance
+//   drivers, who stick to the "proper" route rather than cutting through
+//   backroads.
+// class 2: mildly prefers highways over interstates - assigned to
+//   aggressive/high-hustle drivers, who cut corners and avoid interstate
+//   congestion even at a small distance cost.
+export function routeClassOf(driver) {
+    if (!driver) return 0;
+    if (driver.aggression > 0.6 || driver.hustle > 0.7) return 2;
+    if (driver.compliance > 0.6) return 1;
+    return 0;
+}
+
+function edgeCost(e, routeClass) {
+    let mult = 1;
+    if (routeClass === 1 && e.kind === "interstate") mult = 0.92;
+    else if (routeClass === 1 && e.kind !== "interstate") mult = 1.08;
+    else if (routeClass === 2 && e.kind === "highway") mult = 0.92;
+    else if (routeClass === 2 && e.kind === "interstate") mult = 1.05;
+    let cost = e.miles * mult;
+    if (e.isBorder) cost += e.borderType === "urban" ? BORDER_PENALTY_URBAN : BORDER_PENALTY_RURAL;
+    return cost;
+}
+
 // Returns an array of directed edges from startName to goalName (the
-// route to walk edge-by-edge), or null if unreachable.
-export function findPath(graph, startName, goalName) {
+// route to walk edge-by-edge), or null if unreachable. `routeClass`
+// (see routeClassOf above) is 0 unless the caller passes a driver's class
+// through explicitly.
+export function findPath(graph, startName, goalName, routeClass = 0) {
     if (startName === goalName) return null;
-    const cacheKey = `${startName}->${goalName}`;
+    const cacheKey = `${startName}->${goalName}|${routeClass}`;
     if (pathCache.has(cacheKey)) return pathCache.get(cacheKey);
 
     const goalNode = graph.nodes[goalName];
@@ -283,7 +358,7 @@ export function findPath(graph, startName, goalName) {
 
         for (const e of graph.adjacency[current] || []) {
             if (closed.has(e.to)) continue;
-            const tentativeG = (gScore.get(current) ?? Infinity) + e.miles;
+            const tentativeG = (gScore.get(current) ?? Infinity) + edgeCost(e, routeClass);
             if (tentativeG < (gScore.get(e.to) ?? Infinity)) {
                 cameFromEdge.set(e.to, e);
                 gScore.set(e.to, tentativeG);

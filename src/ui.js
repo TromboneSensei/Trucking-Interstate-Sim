@@ -5,6 +5,7 @@
 // (no inline-styled template strings).
 "use strict";
 import { travelDirectionLabel } from "./geo.js";
+import { getBorderCrossings } from "./fleet.js";
 
 const el = {
   sheet: document.getElementById("bottom-sheet"),
@@ -570,7 +571,43 @@ function cityDetailsHTML(city, graph, trucks) {
     </div>
     ${topInbound ? `<div class="detail-sub" style="margin-bottom:10px;">Top inbound cargo: <strong style="color:var(--ink)">${topInbound[0]}</strong> (${topInbound[1]} truck${topInbound[1] === 1 ? "" : "s"})</div>` : ""}
     <div class="detail-sub">${(city.ind || []).join(", ") || "No industry data"}</div>
+    ${customsBlockHTML(city, graph)}
   `;
+}
+
+// Border-crossing detail, shown only for a city with at least one border
+// edge (graph.adjacency already flags isBorder/borderType per edge - see
+// geo.js's ingestRouteTable). One sub-block per distinct crossing (a city
+// could theoretically sit on more than one, though none do today) with
+// both directions' live queue, since a border town's OWN queue is keyed
+// by ITS name in the crossing's queues map (see fleet.js's _enterCustoms)
+// while the far side's is keyed by the other city's name.
+function customsBlockHTML(city, graph) {
+  const borderEdges = (graph.adjacency[city.name] || []).filter((e) => e.isBorder);
+  if (!borderEdges.length) return "";
+  const crossings = getBorderCrossings();
+  const seen = new Set();
+  const blocks = [];
+  for (const edge of borderEdges) {
+    if (seen.has(edge.borderName)) continue;
+    seen.add(edge.borderName);
+    const crossing = crossings.get(edge.borderName);
+    const otherCity = edge.to;
+    const outQueue = crossing?.queues.get(city.name) || [];
+    const inQueue = crossing?.queues.get(otherCity) || [];
+    const isUrban = edge.borderType === "urban";
+    const nextNames = outQueue.slice(0, 3).map((t) => t.name).join(", ");
+    blocks.push(`
+      <div class="customs-block">
+        <div class="customs-title">Customs — ${edge.borderName}</div>
+        <div class="detail-sub">${isUrban ? "Urban crossing" : "Rural crossing"} &bull; avg. ${isUrban ? "~15 min" : "~1.5h"} per truck</div>
+        <div class="detail-sub">${city.name} → ${otherCity}: <strong class="ink">${outQueue.length}</strong> waiting</div>
+        <div class="detail-sub">${otherCity} → ${city.name}: <strong class="ink">${inQueue.length}</strong> waiting</div>
+        ${nextNames ? `<div class="detail-sub">Next in line: ${nextNames}</div>` : ""}
+      </div>
+    `);
+  }
+  return blocks.join("");
 }
 
 function statBar(label, value01, color) {

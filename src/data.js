@@ -150,6 +150,7 @@ export const masterCities = {
     "Laredo": { t: 2, w: 8.5, pop: 256000, lat: 27.5306, lon: -99.4803, ind: ["Border", "NAFTA", "Customs", "Freight"] },
     "Galveston": { t: 4, w: 2.5, pop: 53000, lat: 29.3013, lon: -94.7977, ind: ["Port", "Medical"] },
     "McAllen": { t: 3, w: 3.5, pop: 143000, lat: 26.2034, lon: -98.2300, ind: ["Border", "Citrus"] },
+    "Harlingen": { t: 4, w: 2.0, pop: 71000, lat: 26.1906, lon: -97.6961, ind: ["Border", "Logistics"] }, // pre-existing I-2 reference had no matching city - added while validating Canada route tables
     "Lubbock": { t: 3, w: 4.0, pop: 260000, lat: 33.5779, lon: -101.8552, ind: ["Ag", "Cotton"] },
     "Amarillo": { t: 3, w: 4.0, pop: 200000, lat: 35.2220, lon: -101.8313, ind: ["Meat Packing"] },
     "Abilene": { t: 3, w: 3.0, pop: 125000, lat: 32.4487, lon: -99.7331, ind: ["AFB", "Wind"] },
@@ -196,7 +197,7 @@ export const masterCities = {
 
     // --- MIDWEST / LAKES ---
     "Chicago": { t: 1, w: 9.5, pop: 2665000, lat: 41.8781, lon: -87.6298, ind: ["Finance", "Transport", "Mfg"] },
-    "Detroit": { t: 1, w: 7.5, pop: 633000, lat: 42.3314, lon: -83.0458, ind: ["Automotive", "Auto"] },
+    "Detroit": { t: 1, w: 7.5, pop: 633000, lat: 42.3314, lon: -83.0458, ind: ["Automotive", "Auto"], poe: "urban" }, // Ambassador Bridge to Windsor
     "St. Louis": { t: 1, w: 7.5, pop: 301000, lat: 38.6270, lon: -90.1994, ind: ["Bio-science", "Beer"] },
     "Indianapolis": { t: 2, w: 7.0, pop: 887000, lat: 39.7684, lon: -86.1581, ind: ["Pharma", "Racing", "Mfg"] },
     "Cleveland": { t: 2, w: 5.5, pop: 372000, lat: 41.4993, lon: -81.6944, ind: ["Medical", "Steel"] },
@@ -228,7 +229,7 @@ export const masterCities = {
     "Mt Vernon": { t: 4, w: 1.0, pop: 14000, lat: 38.3172, lon: -88.9031, ind: ["Junction"] },
     "Effingham": { t: 4, w: 1.0, pop: 12000, lat: 39.1198, lon: -88.5476, ind: ["Junction"] },
     "Sault Ste. Marie": { t: 4, w: 1.5, pop: 13000, lat: 46.4953, lon: -84.3453, ind: ["Shipping Locks"] },
-    "Port Huron": { t: 4, w: 2.0, pop: 28000, lat: 42.9775, lon: -82.4238, ind: ["Border", "Logistics"] },
+    "Port Huron": { t: 4, w: 2.0, pop: 28000, lat: 42.9775, lon: -82.4238, ind: ["Border", "Logistics"], poe: "urban" }, // Blue Water Bridge to Sarnia
     "Saginaw": { t: 4, w: 2.0, pop: 44000, lat: 43.4195, lon: -83.9508, ind: ["Auto Parts", "Sugar"] },
     "Kalamazoo": { t: 4, w: 2.5, pop: 74000, lat: 42.2917, lon: -85.5872, ind: ["Pharma", "Edu"] },
     "Albert Lea": { t: 4, w: 1.5, pop: 17500, lat: 43.6480, lon: -93.3683, ind: ["Junction", "Ag"] },
@@ -330,7 +331,7 @@ export const masterCities = {
     "Newark": { t: 1, w: 8.0, pop: 305000, lat: 40.7357, lon: -74.1724, ind: ["Port", "Air Cargo", "Container", "Logistics"] },
     "Hartford": { t: 3, w: 4.0, pop: 121000, lat: 41.7658, lon: -72.6734, ind: ["Insurance", "Aero"] },
     "Albany": { t: 3, w: 3.5, pop: 99000, lat: 42.6526, lon: -73.7562, ind: ["Nanotech", "Govt"] },
-    "Buffalo": { t: 2, w: 5.0, pop: 278000, lat: 42.8864, lon: -78.8784, ind: ["Banking", "Auto"] }, // Standardized name
+    "Buffalo": { t: 2, w: 5.0, pop: 278000, lat: 42.8864, lon: -78.8784, ind: ["Banking", "Auto"], poe: "urban" }, // Standardized name; Peace Bridge to Fort Erie
     "Rochester": { t: 3, w: 3.5, pop: 211000, lat: 43.1566, lon: -77.6088, ind: ["Optics", "Imaging"] },
     "Worcester": { t: 3, w: 3.5, pop: 206000, lat: 42.2626, lon: -71.8023, ind: ["Biotech", "Edu"] },
     "Annapolis": { t: 4, w: 2.0, pop: 40000, lat: 38.9784, lon: -76.4922, ind: ["Naval", "Govt"] },
@@ -406,7 +407,62 @@ export const masterCities = {
     "Ann Arbor": { t: 3, w: 3.5, pop: 123000, lat: 42.2808, lon: -83.7430, ind: ["Edu", "Tech"] },            // Bridges Detroit to Kalamazoo on I-94
     "Raton": { t: 0, w: 0.8, lat: 36.9033, lon: -104.4391, ind: ["Junction", "Mountain Pass"] }, // Vital I-25 choke between Pueblo and Santa Fe
 
-    
+    // --- CANADA: BRITISH COLUMBIA ---
+    "Vancouver": { t: 2, w: 7.5, pop: 662000, lat: 49.2827, lon: -123.1207, ind: ["Port", "Lumber", "Tech"], country: "CA" },
+    "Surrey": { t: 3, w: 4.0, pop: 568000, lat: 49.1913, lon: -122.8490, ind: ["Logistics", "Distribution"], country: "CA" },
+    "Abbotsford": { t: 4, w: 1.5, pop: 153000, lat: 49.0504, lon: -122.3045, ind: ["Ag", "Produce"], country: "CA" },
+    "Victoria BC": { t: 3, w: 3.0, pop: 92000, lat: 48.4284, lon: -123.3656, ind: ["Government", "Tourism"], country: "CA" },
+    "Nanaimo": { t: 4, w: 1.5, pop: 100000, lat: 49.1659, lon: -123.9401, ind: ["Lumber", "Port"], country: "CA" },
+    "Kelowna": { t: 3, w: 2.5, pop: 144000, lat: 49.8880, lon: -119.4960, ind: ["Produce", "Wine"], country: "CA" },
+    "Kamloops": { t: 3, w: 3.0, pop: 100000, lat: 50.6745, lon: -120.3273, ind: ["Rail", "Lumber"], country: "CA" },
+    "Prince George": { t: 4, w: 2.0, pop: 76000, lat: 53.9171, lon: -122.7497, ind: ["Lumber", "Paper"], country: "CA" },
+
+    // --- CANADA: ALBERTA ---
+    "Calgary": { t: 2, w: 6.5, pop: 1306000, lat: 51.0447, lon: -114.0719, ind: ["Energy", "Oil", "Logistics"], country: "CA" },
+    "Edmonton": { t: 2, w: 6.5, pop: 1010000, lat: 53.5461, lon: -113.4938, ind: ["Oil", "Refinery", "Logistics"], country: "CA" },
+    "Red Deer": { t: 4, w: 2.0, pop: 100000, lat: 52.2681, lon: -113.8112, ind: ["Oil", "Ag"], country: "CA" },
+    "Lethbridge": { t: 4, w: 2.0, pop: 98000, lat: 49.6942, lon: -112.8328, ind: ["Ag", "Oil"], country: "CA" },
+    "Medicine Hat": { t: 4, w: 1.5, pop: 63000, lat: 50.0405, lon: -110.6764, ind: ["Oil", "Gas", "Ag"], country: "CA" },
+
+    // --- CANADA: SASKATCHEWAN ---
+    "Regina": { t: 3, w: 3.5, pop: 230000, lat: 50.4452, lon: -104.6189, ind: ["Potash", "Ag", "Government"], country: "CA" },
+    "Saskatoon": { t: 3, w: 4.0, pop: 273000, lat: 52.1332, lon: -106.6700, ind: ["Potash", "Ag", "Mining"], country: "CA" },
+    "Moose Jaw": { t: 4, w: 1.0, pop: 34000, lat: 50.3934, lon: -105.5519, ind: ["Ag", "Rail"], country: "CA" },
+    "Swift Current": { t: 4, w: 1.0, pop: 17000, lat: 50.2851, lon: -107.7986, ind: ["Ag"], country: "CA" },
+
+    // --- CANADA: MANITOBA ---
+    "Winnipeg": { t: 2, w: 6.0, pop: 750000, lat: 49.8951, lon: -97.1384, ind: ["Rail", "Logistics", "Ag"], country: "CA" },
+    "Brandon": { t: 4, w: 1.5, pop: 51000, lat: 49.8483, lon: -99.9501, ind: ["Ag", "Mfg"], country: "CA" },
+
+    // --- CANADA: ONTARIO ---
+    "Toronto": { t: 1, w: 10.0, pop: 2794000, lat: 43.6532, lon: -79.3832, ind: ["Finance", "Distribution", "Mfg"], country: "CA" },
+    "Mississauga": { t: 3, w: 5.0, pop: 721000, lat: 43.5890, lon: -79.6441, ind: ["Distribution", "Logistics"], country: "CA" },
+    "Hamilton": { t: 3, w: 4.5, pop: 579000, lat: 43.2557, lon: -79.8711, ind: ["Steel", "Port"], country: "CA" },
+    "London ON": { t: 3, w: 4.0, pop: 422000, lat: 42.9849, lon: -81.2453, ind: ["Mfg", "Medical"], country: "CA" },
+    "Windsor": { t: 3, w: 5.5, pop: 229000, lat: 42.3149, lon: -83.0364, ind: ["Auto", "Border"], country: "CA", poe: "urban" },
+    "Sarnia": { t: 4, w: 2.5, pop: 71000, lat: 42.9749, lon: -82.4066, ind: ["Petrochem", "Border"], country: "CA", poe: "urban" },
+    "Kitchener": { t: 3, w: 3.5, pop: 256000, lat: 43.4516, lon: -80.4925, ind: ["Tech", "Mfg"], country: "CA" },
+    "Barrie": { t: 3, w: 2.5, pop: 147000, lat: 44.3894, lon: -79.6903, ind: ["Distribution"], country: "CA" },
+    "Oshawa": { t: 3, w: 3.5, pop: 175000, lat: 43.8971, lon: -78.8658, ind: ["Auto", "Mfg"], country: "CA" },
+    "Kingston": { t: 3, w: 2.5, pop: 132000, lat: 44.2312, lon: -76.4860, ind: ["Government", "Edu"], country: "CA" },
+    "Ottawa": { t: 2, w: 5.0, pop: 1017000, lat: 45.4215, lon: -75.6972, ind: ["Government", "Tech"], country: "CA" },
+    "Sudbury": { t: 3, w: 3.0, pop: 166000, lat: 46.4917, lon: -80.9930, ind: ["Mining"], country: "CA" },
+    "North Bay": { t: 4, w: 1.5, pop: 52000, lat: 46.3091, lon: -79.4608, ind: ["Logistics"], country: "CA" },
+    "Sault Ste. Marie ON": { t: 4, w: 2.0, pop: 72000, lat: 46.5136, lon: -84.3358, ind: ["Steel", "Border"], country: "CA" },
+    "Thunder Bay": { t: 3, w: 3.0, pop: 108000, lat: 48.3809, lon: -89.2477, ind: ["Port", "Grain"], country: "CA" },
+    "Fort Erie": { t: 4, w: 1.5, pop: 30000, lat: 42.9146, lon: -78.9243, ind: ["Border", "Tourism"], country: "CA", poe: "urban" },
+
+    // --- CANADA: QUEBEC ---
+    "Montreal": { t: 1, w: 8.5, pop: 1780000, lat: 45.5019, lon: -73.5674, ind: ["Aerospace", "Port", "Finance"], country: "CA" },
+    "Quebec City": { t: 2, w: 4.5, pop: 549000, lat: 46.8139, lon: -71.2080, ind: ["Government", "Tourism"], country: "CA" },
+    "Gatineau": { t: 3, w: 2.5, pop: 291000, lat: 45.4765, lon: -75.7013, ind: ["Government"], country: "CA" },
+    "Trois-Rivieres": { t: 4, w: 2.0, pop: 137000, lat: 46.3432, lon: -72.5432, ind: ["Paper", "Aluminum"], country: "CA" },
+    "Sherbrooke": { t: 3, w: 2.5, pop: 172000, lat: 45.4042, lon: -71.8929, ind: ["Mfg"], country: "CA" },
+    "Drummondville": { t: 4, w: 1.5, pop: 79000, lat: 45.8837, lon: -72.4802, ind: ["Mfg"], country: "CA" },
+
+    // --- CANADA: NEW BRUNSWICK (border-town counterpart to Houlton, ME) ---
+    "Woodstock NB": { t: 4, w: 1.0, pop: 5000, lat: 46.1521, lon: -67.5905, ind: ["Ag", "Border"], country: "CA" },
+
 };
 // --- INTERSTATE ROUTES (V16.5 - Updated Topology & Invisible Chokes) ---
 export const interstateRoutes = {
@@ -509,6 +565,38 @@ export const interstateRoutes = {
     "I-135": ["Salina", "Wichita"],
     "I-380": ["Iowa City", "Cedar Rapids"], 
     "I-215": ["San Bernardino", "Riverside"], 
+
+    // --- CANADA: Trans-Canada Highway + Ontario/Quebec 400-series autoroutes ---
+    // (all divided freeways in reality, so grouped with the US interstates
+    // rather than the provincial highways below). Each of these also
+    // carries one of the 9 US<->Canada border crossings - see the first
+    // city in the array, which is deliberately the existing US border
+    // town from masterCities (Blaine, Sweetgrass, Pembina, Port Huron,
+    // Plattsburgh, Detroit, Buffalo) or a dedicated border spur, so
+    // buildGraph's country-mismatch check (US vs "country": "CA") finds
+    // the crossing edge automatically - see geo.js Phase C1.
+    "TCH-1": ["Pembina", "Winnipeg", "Brandon", "Regina", "Swift Current", "Medicine Hat", "Calgary", "Kamloops", "Vancouver"], // Trans-Canada Hwy, Prairie + BC leg; border at Pembina/Winnipeg
+    "TCH-17": ["Winnipeg", "Thunder Bay", "Sault Ste. Marie ON", "Sudbury", "North Bay", "Ottawa"], // Trans-Canada Hwy, northern Ontario leg
+    "I-75-CA": ["Sault Ste. Marie", "Sault Ste. Marie ON"], // International Bridge - rural border crossing
+    "AB-2": ["Sweetgrass", "Lethbridge", "Calgary", "Red Deer", "Edmonton"], // border at Sweetgrass/Lethbridge
+    "ON-401": ["Detroit", "Windsor", "London ON", "Kitchener", "Mississauga", "Toronto", "Oshawa", "Kingston", "Montreal"], // urban border at Detroit/Windsor (Ambassador Bridge)
+    "ON-400": ["Toronto", "Barrie", "Sudbury"],
+    "ON-402": ["Port Huron", "Sarnia", "London ON"], // urban border at Port Huron/Sarnia (Blue Water Bridge)
+    "ON-403": ["Hamilton", "Mississauga"],
+    "ON-417": ["Ottawa", "Montreal"],
+    "ON-QEW": ["Buffalo", "Fort Erie", "Hamilton"], // urban border at Buffalo/Fort Erie (Peace Bridge)
+    "QC-20": ["Montreal", "Drummondville", "Quebec City"],
+    "QC-40": ["Montreal", "Trois-Rivieres", "Quebec City"],
+    "QC-15": ["Plattsburgh", "Montreal"], // rural border crossing (Champlain/Lacolle)
+    "BC-99": ["Blaine", "Surrey", "Vancouver"], // rural border crossing
+    // Kept in interstateRoutes (not highwayRoutes) even though it's a small
+    // rural spur: EVERY border-crossing edge is deliberately interstate-kind,
+    // so render.js's kind==="interstate" band-width bucketing (BAND_HALF,
+    // the wider asphalt) applies to all 9 crossings uniformly with no
+    // separate "borderApproach" render-time override needed - and it is
+    // realistic: I-95 really does continue as a full divided highway (NB
+    // Route 95/the future Route 2) at Houlton.
+    "NB-95": ["Houlton", "Woodstock NB"], // rural border crossing
 };
 
 // --- HIGHWAY ROUTES (V16.5 - The Realism & Triangle Layer) ---
@@ -552,7 +640,11 @@ export const highwayRoutes = {
     // Misc
     "US-93": ["Las Vegas", "Ely", "Wells", "Twin Falls"],
     "US-131": ["Grand Rapids", "Traverse City"],
-    "AC-Expressway": ["Philadelphia", "Atlantic City"]
+    "AC-Expressway": ["Philadelphia", "Atlantic City"],
+
+    // --- CANADA: provincial highways ---
+    "HWY-16": ["Prince George", "Edmonton", "Saskatoon"], // Yellowhead Hwy
+    "SK-11": ["Saskatoon", "Regina"] // connects Saskatoon into the TCH-1 network
 };
 
 // --- V16.6 SUPREME TERRAIN MODIFIERS (Realism Meets Tycoon) ---

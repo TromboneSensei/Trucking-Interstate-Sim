@@ -26,6 +26,12 @@ export class DriverDNA {
         // everyone, but aggressive drivers push both harder.
         this.accelRate = 2.2 + this.aggression * 1.6;
         this.decelRate = 2.8 + this.aggression * 2.4;
+
+        // fastCard: holds a NEXUS/FAST trusted-traveler card, cutting
+        // border-crossing customs time (see fleet.js's customs FSM).
+        // Skewed toward skilled drivers (frequent, careful cross-border
+        // hauls are what earns one), not a flat coin flip.
+        this.fastCard = rnd() < 0.15 + this.skill * 0.2;
     }
 
     getArchetype() {
