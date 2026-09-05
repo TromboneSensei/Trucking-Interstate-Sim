@@ -17,16 +17,7 @@ import { STATE_BORDER_RINGS } from "./states-data.js";
 import { TILT_FACTOR } from "./camera.js";
 import { TRUCK_TYPES } from "./economy.js";
 
-// Supersample the static layer a bit so zooming in isn't too soft. Lowered
-// from 1.5 to 1.1 when the Canada expansion grew WORLD_HEIGHT: the bake
-// now carries only the void fill, land fill and state/province border
-// strokes (roads/medians/city dots moved to a per-frame pass earlier), so
-// the loss of supersampling is minor, and this keeps the canvas under
-// mobile Safari's ~16.8 Mpx historical canvas-area ceiling (6000x3432 =
-// 20.6M px was too close at 1.5 with the taller world; 1.1 -> 4400x3432 =
-// 15.1M px). WORLD_HEIGHT must stay a multiple of 10 for both this and
-// GLOW_SCALE below to land on whole device pixels (see geo.js).
-const BG_SCALE = 1.1;
+const BG_SCALE = 1.5; // supersample the static layer a bit so zooming in isn't too soft
 // The basemap is baked at its NOON appearance: land is a legible slate
 // blue and the surrounding void is near-black. Everything darker or
 // warmer than this is produced by the per-frame sky grade tinting away
@@ -86,20 +77,6 @@ const BAND_HALF = FOG_OFFSET + SHOULDER_W; // 17.0 - half-width of the full asph
 // (single-file, centerline), so their band is derived narrower/simpler.
 const HWY_FOG = TRUCK_DOT_RADIUS + 1.5; // 5.0
 const HWY_BAND_HALF = HWY_FOG + 3.0; // 8.0
-
-// Rural border-crossing queue: parked trucks stack on the SHOULDER, past
-// the fog line, while through traffic continues in the normal travel
-// lane. laneOffset()/truckWorldPos's RIGHT_LANE_OFFSET can't express an
-// outward offset (it only interpolates between LEFT_LANE_OFFSET and
-// RIGHT_LANE_OFFSET), so this is its own constant, derived the same way
-// the rest of the ladder is: RIGHT_LANE_OFFSET + SHOULDER_W puts a dot's
-// OUTER edge (+TRUCK_DOT_RADIUS) at exactly BAND_HALF - flush inside the
-// pavement by construction, never hanging off the asphalt.
-export const SHOULDER_LANE_OFFSET = RIGHT_LANE_OFFSET + SHOULDER_W; // 13.5
-// Spacing between consecutive queued trucks, in world units - matches the
-// same "just past touching" feel as fleet.js's MIN_DOT_GAP_WORLD_UNITS
-// (2*TRUCK_DOT_RADIUS+1) rather than duplicating that private constant.
-const SHOULDER_QUEUE_GAP_WORLD_UNITS = 2 * TRUCK_DOT_RADIUS + 1;
 
 const ROAD_DAY = {
   interstate: { band: "rgba(85, 110, 140, 0.95)", shoulder: "#60a5fa", fog: "#94a3b8", median: "#ffd700" },
@@ -276,7 +253,8 @@ function lerpColor(hexA, hexB, t) {
 
 // City-glow pre-render: much lower resolution than the road/border bitmap
 // (the glow is intrinsically soft, so upscaling it is invisible) to keep
-// memory sane - GLOW_SCALE 0.4 -> a fraction of the bg canvas's footprint.
+// memory sane - GLOW_SCALE 0.4 -> 1600x960 (~6MB) vs. 86MB for a second
+// full-size canvas.
 const GLOW_SCALE = 0.4;
 // Tier-based glow used to be the reference sim's approach (procedural,
 // name-seeded, hardcoded per-tier constants); we have genuine population
@@ -406,7 +384,6 @@ export function buildEdgeList(graph) {
         len, // world-space length, so congestion can be a DENSITY not a raw count
         minX: Math.min(node.x, other.x), maxX: Math.max(node.x, other.x),
         minY: Math.min(node.y, other.y), maxY: Math.max(node.y, other.y),
-        isBorder: e.isBorder, borderType: e.borderType,
       });
       indexByEdge.set(e, idx);
       // The reverse direction is a different object on the other node's
@@ -815,10 +792,6 @@ export function drawCityDots(ctx, graph, cull) {
 const PARKED_BADGE_COLOR = "#f0b429";
 const PARKED_BADGE_OUTLINE = "rgba(6, 10, 18, 0.92)";
 const PARKED_BADGE_SCALE = 0.82; // relative to the city label's own font size
-// Customs badge (trucks queued/docked at a border crossing rooted at this
-// city) - a distinct blue rather than the parked badge's amber, so the
-// two counts read apart at a glance when a border town shows both.
-const CUSTOMS_BADGE_COLOR = "#4dabf7";
 
 const fontStrCache = new Map();
 function labelFont(px) {
@@ -830,7 +803,7 @@ function labelFont(px) {
   return s;
 }
 
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts, customsCounts) {
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts) {
   ctx.textAlign = "center";
   let lastFont = null;
   for (const name in graph.nodes) {
@@ -859,7 +832,6 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
     if (font !== lastFont) { ctx.font = font; lastFont = font; }
     ctx.fillStyle = LABEL_COLOR[node.t];
     const parked = parkedCounts ? parkedCounts.get(name) : 0;
-    const customs = customsCounts ? customsCounts.get(name) : 0;
     if (counterRotation) {
       // Nav view: labels should look like they're standing up off the
       // tilted ground rather than lying flat on it - a stem rising from
@@ -888,17 +860,13 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       // frame as the label it belongs to. Drawn outside it (as it first
       // was) it stayed flat on the tilted ground while the label stood up,
       // so in nav view the number visibly detached from its own label.
-      const halfW = ctx.measureText(node.name).width / 2;
-      if (parked) drawParkedBadge(ctx, parked, halfW, -stemH - 5, fontPx);
-      if (customs) drawCustomsBadge(ctx, customs, -halfW, -stemH - 5, fontPx);
+      if (parked) drawParkedBadge(ctx, parked, ctx.measureText(node.name).width / 2, -stemH - 5, fontPx);
       ctx.restore();
       lastFont = null; // the badge changed ctx.font inside a restored frame
     } else {
       ctx.fillText(node.name, node.x, node.y - radius - 5);
-      if (parked || customs) {
-        const halfW = ctx.measureText(node.name).width / 2;
-        if (parked) drawParkedBadge(ctx, parked, node.x + halfW, node.y - radius - 5, fontPx);
-        if (customs) drawCustomsBadge(ctx, customs, node.x - halfW, node.y - radius - 5, fontPx);
+      if (parked) {
+        drawParkedBadge(ctx, parked, node.x + ctx.measureText(node.name).width / 2, node.y - radius - 5, fontPx);
         lastFont = null;
       }
     }
@@ -909,30 +877,17 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
 // label text and `baseY` its baseline, both in whatever frame the caller
 // is currently in - which is what lets the nav-view path draw it inside
 // its counter-rotated frame without any special-casing here.
-// `side`: +1 draws to the right of anchorX (parked count), -1 to the left
-// (customs count) - so a border town can show both without overlapping.
-function drawBadge(ctx, count, anchorX, baseY, fontPx, color, side = 1) {
+function drawParkedBadge(ctx, count, anchorX, baseY, fontPx) {
   const badgePx = fontPx * PARKED_BADGE_SCALE;
   ctx.font = labelFont(badgePx);
-  const bx = anchorX + side * badgePx * 0.55;
+  const bx = anchorX + badgePx * 0.55;
   const by = baseY - fontPx * 0.42;
   ctx.lineWidth = badgePx * 0.42;
   ctx.strokeStyle = PARKED_BADGE_OUTLINE;
   ctx.lineJoin = "round";
   ctx.strokeText(count, bx, by);
-  ctx.fillStyle = color;
+  ctx.fillStyle = PARKED_BADGE_COLOR;
   ctx.fillText(count, bx, by);
-}
-
-function drawParkedBadge(ctx, count, anchorX, baseY, fontPx) {
-  drawBadge(ctx, count, anchorX, baseY, fontPx, PARKED_BADGE_COLOR, 1);
-}
-
-// Customs badge anchors on the LEFT edge of the label (negative anchorX
-// relative to center, mirrored from the parked badge's right-side spot)
-// so it never collides with a parked count on the same city.
-function drawCustomsBadge(ctx, count, anchorXLeft, baseY, fontPx) {
-  drawBadge(ctx, count, anchorXLeft, baseY, fontPx, CUSTOMS_BADGE_COLOR, -1);
 }
 
 // The point on the road's centerline (median, for a divided interstate)
@@ -961,20 +916,6 @@ export function truckCenterlinePos(graph, truck, out = { x: 0, y: 0 }) {
 // (main.js, the route-preview line below) omits it and gets today's exact
 // fresh-object behavior for free.
 export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
-  // Border-customs state pre-empts the normal edge/centerline logic below:
-  // a rural queue stacks on the shoulder of the held border edge (see
-  // borderQueueWorldPos); an urban crossing has "vanished into the node"
-  // with nothing to visibly stand on, so this resolves to the border
-  // node itself - a sane camera-follow/selection-ring target even though
-  // the batched draw loop above never actually paints a dot there.
-  if (truck.awaitingCustoms && truck._customsEdge) {
-    if (truck._customsEdge.borderType === "urban") {
-      const n = graph.nodes[truck._customsEdge.from];
-      out.x = n.x; out.y = n.y;
-      return out;
-    }
-    return borderQueueWorldPos(graph, truck, out);
-  }
   if (!truck.edge) return truckCenterlinePos(graph, truck, out);
 
   const edge = truck.edge;
@@ -1006,41 +947,6 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
     : HIGHWAY_LANE_OFFSET;
   out.x += rightX * off;
   out.y += edge._rightY * off;
-  return out;
-}
-
-// Position for a truck queued/docked at a border crossing (edge === null,
-// awaitingCustoms === true). Stacks trucks back from the border node
-// (edge.to - the far/foreign side) along the approach edge, offset onto
-// the shoulder using the SAME right-of-travel vector truckWorldPos uses
-// for a moving truck on that edge (so a released truck's shoulder
-// position and its first moving frame line up with no visible pop).
-// Urban crossings never call this - _enterCustoms/releaseFromCustoms
-// treat urban queuing as an instant vanish, so those trucks are simply
-// skipped by the draw loop below (an aggregate docked badge stands in for
-// them - see drawParkedBadge/Phase C4).
-function borderQueueWorldPos(graph, truck, out = { x: 0, y: 0 }) {
-  const edge = truck._customsEdge;
-  const a = graph.nodes[edge.from], b = graph.nodes[edge.to];
-  const worldLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
-  const unitsPerMile = worldLen / edge.miles;
-  const spacingMiles = SHOULDER_QUEUE_GAP_WORLD_UNITS / unitsPerMile;
-  // Index 0 (next to be released) sits closest to the border (edge.to);
-  // higher indices stack back toward edge.from. Clamped well inside both
-  // endpoints so the queue never visually overlaps either city's dot.
-  const distFromBorder = Math.min(edge.miles * 0.9, (truck._customsQueueIndex + 1) * spacingMiles);
-  const t = 1 - distFromBorder / edge.miles;
-  out.x = a.x + (b.x - a.x) * t;
-  out.y = a.y + (b.y - a.y) * t;
-
-  let rightX = edge._rightX;
-  if (rightX === undefined) {
-    const rad = (edge.bearing * Math.PI) / 180;
-    rightX = edge._rightX = Math.cos(rad);
-    edge._rightY = Math.sin(rad);
-  }
-  out.x += rightX * SHOULDER_LANE_OFFSET;
-  out.y += edge._rightY * SHOULDER_LANE_OFFSET;
   return out;
 }
 
@@ -1213,7 +1119,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     onRouteCities = new Set(nodeSeq);
   }
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts, renderOpts.customsCounts);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts);
 
   if (nodeSeq) {
     // Built once and stroked twice: a dark casing underneath, then the
@@ -1301,14 +1207,6 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   const scratchPos = { x: 0, y: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
     if (drawArrowForSelected && truck === selectedTruck) continue;
-    // A truck docked at an URBAN crossing has "vanished into the node" -
-    // no dot to draw at all (an aggregate badge stands in for it, see
-    // drawParkedBadge/Phase C4). truckWorldPos itself still resolves a
-    // sane position for it (the border node) for anything that isn't this
-    // batched dot pass - the camera-follow target and the selection ring
-    // in particular, so a followed truck's view doesn't jump when it
-    // reaches an urban crossing.
-    if (truck.awaitingCustoms && truck._customsEdge.borderType === "urban") continue;
     truckWorldPos(graph, truck, scratchPos);
     const p = scratchPos;
 

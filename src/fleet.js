@@ -10,7 +10,7 @@
 // they're in, whether they're mid-pass, and whether they're stopped at
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
-import { pickEdgesFrom, findPath, edgeId, localMinutesAtX, routeClassOf } from "./geo.js";
+import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
 import { generateContract, generateContractOffers, chooseOffer } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
@@ -83,112 +83,6 @@ export function rollDwellHours(driver, rnd = Math.random) {
 // How many loads a parked truck gets to choose between.
 const OFFER_COUNT = 3;
 
-// --- border customs FSM --------------------------------------------------
-// One truck at a time through a rural crossing (Blaine, Houlton, Pembina,
-// Sweetgrass, Sault Ste. Marie, Plattsburgh), every 1-2 game hours; a fast
-// bidirectional flow through an urban one (Detroit/Windsor, Port
-// Huron/Sarnia, Buffalo/Fort Erie) that behaves like clearing a bridge,
-// not a single booth. Both share one FSM and one per-crossing timer/queue
-// structure - only the service-time constants and, later, the rendering
-// (see render.js/ui.js) differ by borderType.
-const RURAL_SERVICE_MIN_HOURS = 1.0, RURAL_SERVICE_SPAN_HOURS = 1.0; // 1-2h/truck
-const URBAN_SERVICE_MIN_HOURS = 0.15, URBAN_SERVICE_SPAN_HOURS = 0.25; // ~9-24min/truck
-const FASTCARD_SERVICE_MULT = 0.45;
-// Once a crossing's combined queue exceeds this, a second booth opens
-// (halved service time) - a self-limiting release valve so a rural
-// crossing's queue can't grow unboundedly if arrivals ever outpace the
-// single-booth throughput (~16-24 trucks/game-day at 1-2h each).
-const SECOND_BOOTH_QUEUE_THRESHOLD = 12;
-const SECOND_BOOTH_SERVICE_MULT = 0.5;
-
-// borderName -> { borderType, queues: Map<fromCityName, Truck[]>, timerHours, lastDir }.
-// Module-level (not per-graph) because there is exactly one instance of
-// this sim's graph/crossings per page load; a rebuilt fleet (Apply &
-// Restart) should also reset customs state, so main.js clears this map
-// alongside respawning the fleet - see resetBorderCrossings below.
-const borderCrossings = new Map();
-
-export function resetBorderCrossings() {
-  borderCrossings.clear();
-}
-
-// Read-only access for render.js (shoulder queue positions, docked
-// badges) and ui.js (the Customs detail block) - never mutated by either.
-export function getBorderCrossings() {
-  return borderCrossings;
-}
-
-function getOrCreateCrossing(edge) {
-  let c = borderCrossings.get(edge.borderName);
-  if (!c) {
-    c = { borderType: edge.borderType, queues: new Map(), timerHours: 0, lastDir: null };
-    borderCrossings.set(edge.borderName, c);
-  }
-  return c;
-}
-
-function customsServiceHours(crossing, driver, rnd) {
-  const isUrban = crossing.borderType === "urban";
-  let hours = isUrban
-    ? URBAN_SERVICE_MIN_HOURS + rnd() * URBAN_SERVICE_SPAN_HOURS
-    : RURAL_SERVICE_MIN_HOURS + rnd() * RURAL_SERVICE_SPAN_HOURS;
-  if (driver && driver.fastCard) hours *= FASTCARD_SERVICE_MULT;
-  let queueLen = 0;
-  for (const q of crossing.queues.values()) queueLen += q.length;
-  if (queueLen > SECOND_BOOTH_QUEUE_THRESHOLD) hours *= SECOND_BOOTH_SERVICE_MULT;
-  return hours;
-}
-
-// Advances every crossing's timer and releases trucks as it lapses.
-// Alternates direction fairly (round-robin over whichever directions
-// actually have someone waiting) rather than draining one side first -
-// real border stations process both directions concurrently.
-function tickCustomsCrossings(graph, laneGroups, gameHours, rnd) {
-  for (const crossing of borderCrossings.values()) {
-    crossing.timerHours -= gameHours;
-    let guard = 0; // hard cap so a pathological dt spike can't loop forever
-    while (crossing.timerHours <= 0 && guard++ < 64) {
-      const dirs = [];
-      for (const [dir, q] of crossing.queues) if (q.length) dirs.push(dir);
-      if (!dirs.length) { crossing.timerHours = 0; break; }
-      let dir = dirs[0];
-      if (dirs.length > 1) {
-        const preferred = crossing.lastDir === dirs[0] ? dirs[1] : dirs[0];
-        dir = dirs.includes(preferred) ? preferred : dirs[0];
-      }
-      crossing.lastDir = dir;
-      const releasedQueue = crossing.queues.get(dir);
-      const truck = releasedQueue.shift();
-      // Everyone behind the released truck moves up one place - keep
-      // their render-facing index in sync (queues are small, so this is
-      // cheap, and it only runs on an actual release, not every frame).
-      for (let i = 0; i < releasedQueue.length; i++) releasedQueue[i]._customsQueueIndex = i;
-      crossing.timerHours += customsServiceHours(crossing, truck.driver, rnd);
-      releaseFromCustoms(truck, graph, laneGroups);
-    }
-  }
-}
-
-// Places a released truck back into the sim. Rural crossings physically
-// drive the truck across the border edge (it's on the shoulder queue
-// beforehand - see render.js - so this is a visible, if short, crossing).
-// Urban crossings instead "vanish into the node" per the design: the
-// truck already vanished off the road the moment it queued (see
-// _enterCustoms), so release just teleports it to the far side and
-// immediately continues its route - there's nothing to visibly drive.
-function releaseFromCustoms(truck, graph, laneGroups) {
-  const edge = truck._customsEdge;
-  truck.awaitingCustoms = false;
-  truck._customsEdge = null;
-  if (edge.borderType === "urban") {
-    truck.currentNode = edge.to;
-    if (truck.remainingPath.length) truck._advanceToNextEdge(graph, laneGroups, false);
-    else { truck.edge = null; truck.pendingEdge = null; }
-  } else {
-    placeOnEdge(graph, truck, edge, laneGroups);
-  }
-}
-
 // World-space length of an edge divided by its real mileage - varies
 // slightly edge to edge (geographic projection), so gap thresholds
 // derived from it are computed per-edge rather than with one global
@@ -257,20 +151,6 @@ export class Truck {
     this.pendingOffers = null;
     this.awaitingContract = false;
 
-    // Border-customs state (see the "border customs FSM" section below).
-    // `awaitingCustoms` keeps this truck out of Phase 1/2/3 physics the
-    // same way `edge === null` already does for a parked truck; `_customsEdge`
-    // is the border edge held for release (placed onto it, or teleported
-    // across it, once the crossing's timer lets this truck through).
-    this.awaitingCustoms = false;
-    this._customsEdge = null;
-    // Position within its crossing's queue array (0 = next to be
-    // released, closest to the border) - kept in sync by fleet.js
-    // whenever the queue shifts, so render.js can stack the shoulder
-    // queue (see render.js's borderQueueWorldPos) by reading a plain
-    // number off the truck with no import of fleet.js's crossing map.
-    this._customsQueueIndex = 0;
-
     this._assignContract(graph, rnd);
   }
 
@@ -280,7 +160,7 @@ export class Truck {
     // still produces one, rather than crash the whole fleet.
     let contract, attempts = 0;
     do {
-      contract = generateContract(graph, this.currentNode, rnd, this.driver);
+      contract = generateContract(graph, this.currentNode, rnd);
       attempts++;
     } while (!contract.path && attempts < 8);
 
@@ -307,15 +187,6 @@ export class Truck {
   // real city and never reaches this branch).
   _advanceToNextEdge(graph, laneGroups, isNewContractStart = false) {
     const next = this.remainingPath.shift();
-    // Border edges intercept BEFORE the normal new-contract-start /
-    // mid-route branches below - a crossing holds a truck regardless of
-    // whether this happens to be the very first edge of a fresh contract
-    // (rare: a contract that originates in a border town itself) or any
-    // other edge mid-haul.
-    if (next.isBorder) {
-      this._enterCustoms(next);
-      return;
-    }
     if (isNewContractStart && graph.nodes[next.from].t > 0) {
       this.edge = null;
       this.pendingEdge = next;
@@ -327,27 +198,6 @@ export class Truck {
     } else {
       placeOnEdge(graph, this, next, laneGroups);
     }
-  }
-
-  // Joins this border edge's customs queue instead of driving onto it.
-  // Rural crossings render the queue on the shoulder (see render.js); an
-  // urban crossing has already effectively "vanished" the truck off the
-  // road the moment this runs - render.js draws only a docked-count badge
-  // for it, never a queued dot on the approach edge.
-  _enterCustoms(edge) {
-    this.edge = null;
-    this.pendingEdge = null;
-    this.speed = 0;
-    this.lane = 0;
-    this.laneT = 0;
-    this.passingLeaderId = null;
-    this.awaitingCustoms = true;
-    this._customsEdge = edge;
-    const crossing = getOrCreateCrossing(edge);
-    if (!crossing.queues.has(edge.from)) crossing.queues.set(edge.from, []);
-    const queue = crossing.queues.get(edge.from);
-    queue.push(this);
-    this._customsQueueIndex = queue.length - 1;
   }
 
   // Delivery complete: bank the payout and park. The truck deliberately
@@ -399,7 +249,7 @@ export class Truck {
     this.pendingOptions = null;
     this.remainingPath = chosenEdge.to === this.contract.destination
       ? []
-      : (findPath(graph, chosenEdge.to, this.contract.destination, routeClassOf(this.driver)) || []);
+      : (findPath(graph, chosenEdge.to, this.contract.destination) || []);
   }
 }
 
@@ -861,16 +711,6 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // clampOverlaps above for why this can't just be folded into phase 1).
   clampOverlaps(graph, laneGroups);
 
-  // Phase 3b: border-crossing customs timers/releases. Deliberately its
-  // own pass over crossings (not folded into Phase 4's per-truck loop) -
-  // a crossing's timer belongs to the CROSSING, not to any one truck, and
-  // releasing a truck here (onto an edge via placeOnEdge, or teleported
-  // across for an urban crossing) is exactly equivalent to a truck
-  // starting a fresh edge elsewhere in Phase 4, just running one pass
-  // earlier so this frame's Phase 1/2 already skipped it via `!truck.edge`
-  // same as any other stationary truck.
-  tickCustomsCrossings(graph, laneGroups, gameHours, Math.random);
-
   // Phase 4: layovers, arrivals, junction decisions, and departures, using
   // the final (clamped) positions.
   for (const truck of trucks) {
@@ -882,7 +722,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     if (truck.parkedAt) {
       truck.dwellHoursLeft -= gameHours;
       if (truck.dwellHoursLeft > 0) continue;
-      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT, Math.random, truck.driver);
+      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT);
       if (!offers.length) {
         // Nothing routable from here (shouldn't happen on this graph, but
         // don't wedge the truck forever if it ever does) - wait and retry.

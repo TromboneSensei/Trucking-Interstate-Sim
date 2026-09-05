@@ -13,7 +13,7 @@
 // The one exception where tags ARE still read is MILITARY_CITIES below,
 // which powers the destination bias for military loads.
 import { masterCities } from "./data.js";
-import { haversineMiles, findPath, routeClassOf } from "./geo.js";
+import { haversineMiles, findPath } from "./geo.js";
 import { PRODUCTS, CITY_EXPORTS } from "./products.js";
 
 export const TRUCK_TYPES = {
@@ -85,21 +85,6 @@ function pickCargo(cityName, rnd) {
 // make every military load run the same handful of city pairs.
 const PREFER_MULT = 14;
 
-// Cross-border freight is real but a minority: most Canadian freight
-// should stay domestic, and most US freight should stay in the US. This
-// multiplies the score of any candidate whose country differs from the
-// origin's - calibrated (see scratchpad/canada/cross_border_calib.mjs)
-// against a ~30% cross-border share target for cities within reach of a
-// border crossing, not a literal 30% of ALL contracts (most cities, on
-// both sides, are nowhere near the border and would essentially never
-// cross regardless of this constant).
-// Calibrated (scratchpad/canada/calib_sweep.mjs, 8000-contract sweep) so
-// contracts originating in Canada cross the border ~29% of the time -
-// this needed a much stronger penalty than the naive "roughly 1/4" guess:
-// Canada has only 42 cities vs 376 in the US, so even a 4x handicap on
-// cross-border score left US destinations dominating the weighted pool.
-const CROSS_BORDER_MULT = 0.06;
-
 function pickDestination(graph, originName, rnd, preferSet = null) {
     const origin = graph.nodes[originName];
     const tripRoll = rnd();
@@ -122,7 +107,6 @@ function pickDestination(graph, originName, rnd, preferSet = null) {
         const distanceFriction = 1 / Math.sqrt(1 + miles / 800);
         let score = gravity * distanceFriction * (0.85 + rnd() * 0.3);
         if (preferSet && preferSet.has(name)) score *= PREFER_MULT;
-        if ((origin.country || "US") !== (node.country || "US")) score *= CROSS_BORDER_MULT;
         if (score > 0.0001) {
             candidates.push({ name, score });
             totalWeight += score;
@@ -149,16 +133,13 @@ const TIER_PAY_MULT = { 1: 1.35, 2: 1.15, 3: 1.0, 4: 0.85 };
 // then a destination, its A* route, and a payout fixed now (based on
 // optimal distance) so a detour later costs the driver real fuel/time
 // without changing what the job pays.
-export function generateContract(graph, originName, rnd = Math.random, driver = null) {
+export function generateContract(graph, originName, rnd = Math.random) {
     const { cargo, truckType, category } = pickCargo(originName, rnd);
     // Military loads route between installations; everything else uses the
     // plain gravity/distance picker.
     const prefer = truckType.id === "MILITARY" ? MILITARY_CITIES : null;
     const destination = pickDestination(graph, originName, rnd, prefer);
-    // Threading the driver's route class through here (rather than always
-    // using the plain-miles default) is what makes a driver's own traits
-    // finally show up in navigation - see routeClassOf/edgeCost in geo.js.
-    const path = findPath(graph, originName, destination, routeClassOf(driver));
+    const path = findPath(graph, originName, destination);
     const optimalMiles = path ? path.reduce((s, e) => s + e.miles, 0) : haversineMiles(graph.nodes[originName], graph.nodes[destination]);
     const tierMult = TIER_PAY_MULT[graph.nodes[destination].t] ?? 1;
     const payout = Math.round(optimalMiles * PAY_RATE_PER_MILE * truckType.multiplier * tierMult);
@@ -173,11 +154,11 @@ export function generateContract(graph, originName, rnd = Math.random, driver = 
 // Offers are de-duplicated by destination so the player is never asked to
 // choose between three loads to the same city, and any contract whose A*
 // route came back empty is discarded rather than offered.
-export function generateContractOffers(graph, originName, count = 3, rnd = Math.random, driver = null) {
+export function generateContractOffers(graph, originName, count = 3, rnd = Math.random) {
     const offers = [];
     const seenDest = new Set();
     for (let attempt = 0; attempt < count * 6 && offers.length < count; attempt++) {
-        const c = generateContract(graph, originName, rnd, driver);
+        const c = generateContract(graph, originName, rnd);
         if (!c.path || !c.path.length) continue;
         if (seenDest.has(c.destination)) continue;
         seenDest.add(c.destination);
