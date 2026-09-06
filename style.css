@@ -11,6 +11,15 @@
   --stop: #d1494a;
   --info: #3f6fb0;
 
+  /* Bottom-sheet geometry, owned by ui.js's drag handler. --sheet-h is
+     how tall the sheet is when open; --sheet-visible-h is how much of it
+     is actually on screen right now (the same value, or just the peeking
+     header once minimized). Everything that floats above the sheet - the
+     daily digest, the junction and load-board overlays - anchors to
+     --sheet-visible-h so it tracks the sheet as the user drags it. */
+  --sheet-h: 45vh;
+  --sheet-visible-h: 45vh;
+
   --font-display: "Oswald", "Arial Narrow", sans-serif;
   --font-body: "Public Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
@@ -235,7 +244,7 @@ html, body {
 #decision-overlay {
   position: fixed;
   left: 50%;
-  bottom: calc(45vh + 16px);
+  bottom: calc(var(--sheet-visible-h) + 16px);
   transform: translateX(-50%);
   width: min(92vw, 480px);
   background: var(--panel);
@@ -323,8 +332,8 @@ html, body {
 #bottom-sheet {
   position: fixed;
   left: 0; right: 0; bottom: 0;
-  height: 45vh;
-  max-height: 45vh;
+  height: var(--sheet-h);
+  max-height: var(--sheet-h);
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--panel);
   border-top: 2px solid var(--caution);
@@ -334,16 +343,33 @@ html, body {
   transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
 }
-#bottom-sheet.minimized { transform: translateY(calc(45vh - 56px)); }
+#bottom-sheet.minimized { transform: translateY(calc(var(--sheet-h) - 56px)); }
+/* The grab strip for resizing the sheet. Full width and ~19px tall so
+   there's a real touch target, with the visible pill drawn as a centered
+   pseudo-element - the bar itself was only 4px of hittable area, far too
+   fine to drag with a thumb. Same total vertical footprint as before, so
+   the collapsed peek height is unchanged. */
 #sheet-handle {
-  width: 40px; height: 4px;
+  position: relative;
+  width: 100%;
+  height: 19px;
+  flex-shrink: 0;
+  cursor: ns-resize;
+  touch-action: none;
+}
+#sheet-handle::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 9px;
+  transform: translateX(-50%);
+  width: 40px;
+  height: 4px;
   background: var(--dim);
   opacity: 0.5;
   border-radius: 2px;
-  margin: 9px auto 6px;
-  flex-shrink: 0;
-  cursor: pointer;
 }
+#sheet-handle:active::before { opacity: 0.9; }
 #sheet-tabs {
   display: flex;
   flex-shrink: 0;
@@ -618,9 +644,9 @@ html, body {
 #daily-digest {
   position: fixed;
   left: max(10px, env(safe-area-inset-left));
-  bottom: calc(45vh + 14px);
+  bottom: calc(var(--sheet-visible-h) + 14px);
   z-index: 7;
-  width: min(88vw, 268px);
+  width: min(88vw, 292px);
   background: var(--panel);
   border: 1px solid var(--line);
   border-left: 3px solid var(--caution);
@@ -657,13 +683,45 @@ html, body {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
-#daily-digest .digest-star {
+/* Driver superlatives, below a rule so they read as a separate block from
+   the four operating numbers above. Each is a fixed-width badge column
+   plus a two-line body, so both rows' text starts on the same left edge
+   regardless of which glyph the badge is. */
+#daily-digest .digest-awards {
   margin-top: 7px;
   padding-top: 7px;
   border-top: 1px solid var(--line);
-  font-size: 0.72rem;
-  color: var(--dim);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
+#daily-digest .digest-award {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 0.72rem;
+}
+#daily-digest .digest-badge {
+  flex: 0 0 0.95rem;
+  text-align: center;
+  color: var(--caution);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+#daily-digest .digest-award-title {
+  display: block;
+  color: var(--dim);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+}
+#daily-digest .digest-award-val {
+  display: block;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+#daily-digest .digest-award-val strong { color: var(--ink); }
 #daily-digest .digest-star strong { color: var(--ink); }
 
 
@@ -676,7 +734,7 @@ html, body {
 #contract-overlay {
   position: fixed;
   left: 50%;
-  bottom: calc(45vh + 16px);
+  bottom: calc(var(--sheet-visible-h) + 16px);
   transform: translateX(-50%);
   width: min(94vw, 620px);
   background: var(--panel);

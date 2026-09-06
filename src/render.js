@@ -609,9 +609,22 @@ const CONGESTION_BANDS = [
 // (follow/nav view), day/night tinted. Batches one beginPath()/stroke()
 // per (kind x layer) so the whole road network costs at most ~8 stroke
 // calls regardless of fleet size.
+//
+// Every road is drawn as its own straight segment rather than as one
+// continuous polyline per route, so with butt caps each band stopped dead
+// square at the node and left a wedge of bare ground on the outside of
+// every bend and fork - roads visibly failing to meet. A round cap adds
+// exactly the half-disc of radius `half` that closes that wedge, and
+// meets each band's own edge tangentially (band edge and cap rim are both
+// `half` from the node), which is the same geometry a round line JOIN
+// would produce if the segments were one path. It has to ride on the same
+// stroke() as the bands, not a separate pass: the band colours are
+// semi-transparent, so anything painted over them a second time
+// double-composites into a visibly darker blob at every junction.
+const BAND_CAP = "round";
 export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, congestion) {
   const k = roadDetailFactor(camera);
-  ctx.lineCap = "butt";
+  ctx.lineCap = BAND_CAP;
   ctx.lineJoin = "round";
 
   const visible = { highway: [], interstate: [] };
@@ -664,12 +677,17 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
       const fog = kind === "interstate" ? FOG_OFFSET : HWY_FOG;
       const dayC = ROAD_DAY[kind], nightC = ROAD_NIGHT[kind];
 
-      // Asphalt band
+      // Asphalt band. Round-capped (see BAND_CAP) so the pavement closes
+      // over every junction; the lane markings below go back to butt caps
+      // so they stop at the node instead of bulging past it into the
+      // intersection.
+      ctx.lineCap = BAND_CAP;
       ctx.strokeStyle = lerpRgba(dayC.band, nightC.band, colorT);
       ctx.lineWidth = half * 2;
       ctx.beginPath();
       for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
       ctx.stroke();
+      ctx.lineCap = "butt";
 
       // Shoulder outlines, both sides
       if (drawShoulders) {

@@ -115,14 +115,14 @@ const ECON_MAX_SAMPLES = 193; // 48h at 15-min spacing, plus one to diff against
 let econHistory = [];
 let lastEconSampleMin = -Infinity;
 
-// Daily digest: the fleet-wide totals as they stood at the start of the
-// current game-day, plus each truck's earnings at that moment, so the
-// midnight rollover can report the DAY's deltas rather than all-time
-// numbers (which the Dispatch tab already shows and which stop being
-// interesting once they're large).
+// Daily digest. Each truck carries its own per-day accumulators (see the
+// `day*` fields on Truck), zeroed at every rollover, so midnight reports
+// the DAY's operating numbers rather than all-time ones - which the
+// Dispatch tab already shows and which stop being interesting once
+// they're large. Per-truck rather than fleet-wide counters because the
+// day's superlatives (Top Earner, Lead Foot) need to name the truck, not
+// just the total.
 let dayIndex = 0;
-let dayStart = { miles: 0, earnings: 0, contracts: 0 };
-let dayStartEarningsById = new Map();
 let digestTimer = null;
 
 const state = {
@@ -180,15 +180,13 @@ function sampleEconomy() {
 // Daily digest
 // ---------------------------------------------------------------------
 function captureDayStart() {
-  let miles = 0, earnings = 0, contracts = 0;
-  dayStartEarningsById = new Map();
   for (const t of trucks) {
-    miles += t.totalMilesDriven;
-    earnings += t.earnings;
-    contracts += t.contractsCompleted;
-    dayStartEarningsById.set(t.id, t.earnings);
+    t.dayEarnings = 0;
+    t.dayMiles = 0;
+    t.dayDeliveries = 0;
+    t.dayBreakdowns = 0;
+    t.dayFuelSpend = 0;
   }
-  dayStart = { miles, earnings, contracts };
 }
 
 function hideDigest() {
@@ -203,24 +201,37 @@ function checkDayRollover() {
   const finished = dayIndex + 1; // the day that just ended, 1-based like the HUD clock
   dayIndex = nowDay;
 
-  let miles = 0, earnings = 0, contracts = 0, best = null, bestGain = 0;
+  let revenue = 0, deliveries = 0, breakdowns = 0, fuelExpense = 0;
+  let topEarner = null, leadFoot = null, leadFootMph = 0;
   for (const t of trucks) {
-    miles += t.totalMilesDriven;
-    earnings += t.earnings;
-    contracts += t.contractsCompleted;
-    const gain = t.earnings - (dayStartEarningsById.get(t.id) ?? t.earnings);
-    if (gain > bestGain) { bestGain = gain; best = t; }
+    revenue += t.dayEarnings;
+    deliveries += t.dayDeliveries;
+    breakdowns += t.dayBreakdowns;
+    fuelExpense += t.dayFuelSpend;
+    if (t.dayEarnings > 0 && (!topEarner || t.dayEarnings > topEarner.dayEarnings)) topEarner = t;
+    // Averaged over the WHOLE day, not just the hours spent rolling, so a
+    // truck that parked for a long layover or sat on the shoulder is
+    // correctly beaten by one that kept moving.
+    const avgMph = t.dayMiles / 24;
+    if (avgMph > leadFootMph) { leadFootMph = avgMph; leadFoot = t; }
   }
-  const dMiles = Math.max(0, miles - dayStart.miles);
-  const dEarn = Math.max(0, earnings - dayStart.earnings);
-  const dJobs = Math.max(0, contracts - dayStart.contracts);
+
+  const money = (n) => "$" + Math.round(n).toLocaleString();
+  const award = (badge, title, name, detail) =>
+    `<div class="digest-award"><span class="digest-badge">${badge}</span>
+      <span><span class="digest-award-title">${title}</span>
+      <span class="digest-award-val"><strong>${name}</strong> ${detail}</span></span></div>`;
 
   el.dailyDigest.innerHTML = `
     <div class="digest-title">Day ${finished} Complete</div>
-    <div class="digest-line"><span>Miles driven</span><span>${Math.round(dMiles).toLocaleString()}</span></div>
-    <div class="digest-line"><span>Revenue</span><span>$${Math.round(dEarn).toLocaleString()}</span></div>
-    <div class="digest-line"><span>Loads delivered</span><span>${dJobs.toLocaleString()}</span></div>
-    ${best ? `<div class="digest-star">Driver of the day: <strong>${best.name}</strong> &mdash; $${Math.round(bestGain).toLocaleString()}</div>` : ""}`;
+    <div class="digest-line"><span>Gross revenue</span><span>${money(revenue)}</span></div>
+    <div class="digest-line"><span>Loads delivered</span><span>${deliveries.toLocaleString()}</span></div>
+    <div class="digest-line"><span>Total breakdowns</span><span>${breakdowns.toLocaleString()}</span></div>
+    <div class="digest-line"><span>Fuel expense</span><span>${money(fuelExpense)}</span></div>
+    ${topEarner || leadFoot ? `<div class="digest-awards">
+      ${topEarner ? award("&#9733;", "Top Earner", topEarner.name, `+${money(topEarner.dayEarnings)}`) : ""}
+      ${leadFoot ? award("&#9889;", "Lead Foot", leadFoot.name, `${Math.round(leadFootMph)}&nbsp;mph 24h&nbsp;avg &bull; ${Math.round(leadFoot.dayMiles).toLocaleString()}&nbsp;mi`) : ""}
+    </div>` : ""}`;
   el.dailyDigest.classList.remove("hidden");
 
   if (digestTimer) clearTimeout(digestTimer);

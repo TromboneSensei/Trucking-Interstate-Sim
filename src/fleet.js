@@ -93,6 +93,14 @@ const FUEL_REFILL_MARGIN = 1.15; // refuel to cover the next leg with this much 
 
 // --- fatigue / circadian rest ----------------------------------------------
 const FATIGUE_PER_HOUR = 6.0;
+const FATIGUE_MAX = 100; // hard ceiling, so a driver who skipped rest can't read past a full gauge
+// Recovery is deliberately much faster than accrual: sleep restores far
+// more per hour than driving costs, which is what makes a single 4-hour
+// break in the rest window actually recharge a driver (4h x 25 = a full
+// 100-point gauge) instead of clawing back a quarter of it. At the old
+// symmetric 6/hour a truck could never sleep its way out of fatigue
+// inside one night's window.
+const FATIGUE_RECOVERY_PER_HOUR = 25.0;
 const FATIGUE_REST_THRESHOLD = 50;
 const REST_MIN_HOURS = 4.0;
 const REST_MAX_HOURS = 6.0;
@@ -356,6 +364,23 @@ export class Truck {
     this.disabledReason = null; // "BREAKDOWN" | "FUEL"
     this.fuelSpend = 0;
     this.downtimeHours = 0;
+    // A refuel in progress fills the tank GRADUALLY across the stop rather
+    // than snapping to full on wake, so the detail panel's fuel gauge
+    // visibly climbs while the truck sits at the pump (the panel already
+    // re-renders every frame for the viewed truck). null when not fueling.
+    this.refuelTarget = null;
+    this.refuelPerHour = 0;
+
+    // Per-day accumulators for the midnight digest, zeroed by main.js's
+    // captureDayStart() at every rollover. Deliberately separate from the
+    // lifetime counters above (earnings/totalMilesDriven/...), which keep
+    // accumulating uninterrupted - the digest reports the DAY, the
+    // Dispatch tab reports all time.
+    this.dayEarnings = 0; // gross contract payouts banked today
+    this.dayMiles = 0;
+    this.dayDeliveries = 0;
+    this.dayBreakdowns = 0; // mechanical failures + dry-tank halts
+    this.dayFuelSpend = 0; // diesel bought today, plus roadside assistance fees
     // The edge just completed - used to avoid an immediate U-turn when
     // resuming from a full stop (parkedAt/disabled clears `edge`, so the
     // junction/departure logic needs this to know what NOT to reverse
@@ -421,7 +446,9 @@ export class Truck {
   // when the next load is accepted.
   _arriveAtDestination(graph, rnd = Math.random) {
     this.earnings += this.contract.payout;
+    this.dayEarnings += this.contract.payout;
     this.contractsCompleted++;
+    this.dayDeliveries++;
     this.currentNode = this.contract.destination;
     this.edge = null;
     this.pendingEdge = null;
@@ -433,6 +460,10 @@ export class Truck {
     this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
     this.stopReason = "LAYOVER";
     this.milesSinceStop = 0; // a delivery + layover counts as a real stop for breakdown wear
+    // Top off while the trailer is being unloaded - a truck rolling out on
+    // a fresh contract leaves with a full tank, the same as a real yard
+    // turnaround, instead of starting the next haul on whatever was left.
+    beginRefuel(this, Math.min(this.dwellHoursLeft, FUEL_STOP_HOURS));
   }
 
   // Accept a specific contract (chosen by the driver, or by the player for
@@ -932,13 +963,52 @@ function refuelAmountNeeded(truck) {
   return Math.max(100, minFuel);
 }
 
-function applyRefuel(truck) {
-  const before = truck.fuel;
-  const after = refuelAmountNeeded(truck);
-  const cost = Math.max(0, after - before) * FUEL_PRICE_PER_UNIT;
+// Pumps `units` of diesel into the tank and bills for it. The single
+// place fuel is ever added, so every purchase - gradual pump stop,
+// roadside tow-and-fill - lands in the same lifetime/daily spend totals.
+function pumpFuel(truck, units) {
+  if (units <= 0) return;
+  const cost = units * FUEL_PRICE_PER_UNIT;
   truck.earnings -= cost;
   truck.fuelSpend += cost;
-  truck.fuel = after;
+  truck.dayFuelSpend += cost;
+  truck.fuel += units;
+}
+
+// Fills the tank instantly - the roadside recovery case, where a service
+// truck has already spent the whole disabled window getting there.
+function applyRefuel(truck) {
+  pumpFuel(truck, Math.max(0, refuelAmountNeeded(truck) - truck.fuel));
+}
+
+// Starts a GRADUAL fill spread across `hours` of the stop the truck is
+// about to sit through, rather than snapping the tank full on wake. The
+// gauge in the detail panel re-renders every frame, so ramping the
+// underlying value is what makes it visibly climb at the pump - no
+// separate animation layer, and the sim stays the single source of truth
+// (a truck woken early really is only part-filled, and only billed for
+// what went in).
+function beginRefuel(truck, hours) {
+  const need = Math.max(0, refuelAmountNeeded(truck) - truck.fuel);
+  if (need <= 0 || hours <= 0) { truck.refuelTarget = null; return; }
+  truck.refuelTarget = truck.fuel + need;
+  truck.refuelPerHour = need / hours;
+}
+
+// Advances an in-progress fill by one tick's worth of game time.
+function tickRefuel(truck, gameHours) {
+  if (truck.refuelTarget == null) return;
+  const units = Math.min(truck.refuelPerHour * gameHours, truck.refuelTarget - truck.fuel);
+  pumpFuel(truck, units);
+  if (truck.fuel >= truck.refuelTarget - 1e-6) truck.refuelTarget = null;
+}
+
+// Tops off whatever the ramp hasn't delivered yet and ends the fill - the
+// stop is over, so the pump either finished or gets to finish now.
+function finishRefuel(truck) {
+  if (truck.refuelTarget == null) return;
+  pumpFuel(truck, Math.max(0, truck.refuelTarget - truck.fuel));
+  truck.refuelTarget = null;
 }
 
 // True if minute-of-day `m` falls in [start, end), where the window may
@@ -983,6 +1053,9 @@ function parkForStop(truck, node, reason, rnd) {
   truck.dwellHoursLeft = reason === "FUEL"
     ? FUEL_STOP_HOURS
     : REST_MIN_HOURS + rnd() * (REST_MAX_HOURS - REST_MIN_HOURS);
+  // Fuel goes in over the whole pump stop (see beginRefuel). A REST stop
+  // is not at a pump, so it fills nothing.
+  if (reason === "FUEL") beginRefuel(truck, truck.dwellHoursLeft);
 }
 
 // Disables a truck ON THE SHOULDER, mid-edge - see the `disabledHoursLeft`
@@ -1113,8 +1186,9 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const miles = truck.speed * gameHours;
     truck.s += miles;
     truck.totalMilesDriven += miles;
+    truck.dayMiles += miles;
     truck.milesSinceStop += miles;
-    truck.fatigue += gameHours * FATIGUE_PER_HOUR;
+    truck.fatigue = Math.min(FATIGUE_MAX, truck.fatigue + gameHours * FATIGUE_PER_HOUR);
     truck.fuel = Math.max(0, truck.fuel - miles * burnPerMile(truck));
 
     // An arrival this tick is handled entirely by Phase 4 (refuel/rest at
@@ -1125,12 +1199,15 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
 
     if (truck.fuel <= 0) {
       truck.earnings -= FUEL_TOW_COST;
+      truck.dayFuelSpend += FUEL_TOW_COST; // roadside assistance is part of the day's fuel bill
+      truck.dayBreakdowns++;
       disableTruck(truck, "FUEL", FUEL_DISABLED_SERVICE_MIN_HOURS + rnd() * (FUEL_DISABLED_SERVICE_MAX_HOURS - FUEL_DISABLED_SERVICE_MIN_HOURS));
       continue;
     }
 
     const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles;
     if (rnd() < p) {
+      truck.dayBreakdowns++;
       disableTruck(truck, "BREAKDOWN", BREAKDOWN_REPAIR_MIN_HOURS + rnd() * (BREAKDOWN_REPAIR_MAX_HOURS - BREAKDOWN_REPAIR_MIN_HOURS));
     }
   }
@@ -1165,15 +1242,16 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     // future feature wouldn't read a stale high number.
     if (truck.parkedAt) {
       truck.dwellHoursLeft -= gameHours;
-      truck.fatigue = Math.max(0, truck.fatigue - gameHours * FATIGUE_PER_HOUR);
+      truck.fatigue = Math.max(0, truck.fatigue - gameHours * FATIGUE_RECOVERY_PER_HOUR);
+      tickRefuel(truck, gameHours);
       if (truck.dwellHoursLeft > 0) continue;
       truck.dwellHoursLeft = 0;
+      finishRefuel(truck);
 
       if (truck.stopReason !== "LAYOVER") {
         // REST or FUEL: resume the SAME contract's route rather than
         // taking a new load.
-        if (truck.stopReason === "FUEL") applyRefuel(truck);
-        else truck.fatigue = 0; // exact reset - don't rely on the sleep window alone (see nodeStopReason), or a truck waking still inside its window re-sleeps immediately
+        if (truck.stopReason === "REST") truck.fatigue = 0; // exact reset - don't rely on the sleep window alone (see nodeStopReason), or a truck waking still inside its window re-sleeps immediately
         truck.stopReason = null;
         truck.parkedAt = null;
         truck.milesSinceStop = 0;

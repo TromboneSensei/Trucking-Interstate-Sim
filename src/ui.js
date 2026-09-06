@@ -46,13 +46,7 @@ export function initUI(callbacks) {
     if (row && onSpotlightCargo) onSpotlightCargo(row.dataset.cargo);
   });
 
-  el.handle.addEventListener("click", () => {
-    el.sheet.classList.toggle("minimized");
-    // Expanding the sheet reveals a panel that has not been refreshed
-    // while it was hidden, so it needs the same immediate rebuild a tab
-    // switch gets.
-    if (onVisibleTabChange) onVisibleTabChange();
-  });
+  initSheetDrag();
   el.tabs.forEach((btn) => {
     btn.addEventListener("click", () => openTab(btn.dataset.tab));
   });
@@ -117,6 +111,94 @@ export function initUI(callbacks) {
   });
 }
 
+// ---------------------------------------------------------------------
+// Resizable bottom sheet
+//
+// The sheet's height lives in a CSS custom property rather than in a
+// class, so the user can park it at any height instead of picking from
+// two presets. Everything that floats above the sheet (daily digest,
+// junction and load-board overlays) anchors to --sheet-visible-h, which
+// is the open height normally and just the peeking header once
+// minimized - so they all track the sheet as it's dragged, and sit
+// directly above it wherever it ends up.
+// ---------------------------------------------------------------------
+const SHEET_MIN_PX = 96; // enough for the grab strip plus the tab row
+const SHEET_MAX_FRAC = 0.86; // leave a strip of map visible no matter what
+const SHEET_PEEK_PX = 56; // what's still on screen when minimized (matches the CSS transform)
+const SHEET_DRAG_SLOP_PX = 6; // movement under this is a tap, not a drag
+
+// Resolved lazily on first use: until the user drags, the height is
+// whatever the stylesheet's default (45vh) computes to, and is left in
+// vh so it keeps following viewport changes on its own.
+let sheetPx = null;
+let sheetDrag = null;
+
+function sheetHeightPx() {
+  if (sheetPx == null) sheetPx = el.sheet.getBoundingClientRect().height;
+  return sheetPx;
+}
+
+function applySheetHeight(px) {
+  sheetPx = Math.max(SHEET_MIN_PX, Math.min(window.innerHeight * SHEET_MAX_FRAC, px));
+  syncSheetVars();
+}
+
+function syncSheetVars() {
+  const style = document.documentElement.style;
+  if (sheetPx != null) style.setProperty("--sheet-h", sheetPx + "px");
+  const open = sheetPx != null ? sheetPx + "px" : "var(--sheet-h)";
+  style.setProperty("--sheet-visible-h", el.sheet.classList.contains("minimized") ? SHEET_PEEK_PX + "px" : open);
+}
+
+function setSheetMinimized(minimized) {
+  el.sheet.classList.toggle("minimized", minimized);
+  syncSheetVars();
+  // Expanding reveals a panel that hasn't been refreshed while it was
+  // hidden, so it needs the same immediate rebuild a tab switch gets.
+  if (onVisibleTabChange) onVisibleTabChange();
+}
+
+function initSheetDrag() {
+  el.handle.addEventListener("pointerdown", (e) => {
+    sheetDrag = { id: e.pointerId, startY: e.clientY, startH: sheetHeightPx(), moved: false };
+    el.handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  el.handle.addEventListener("pointermove", (e) => {
+    if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+    const dy = sheetDrag.startY - e.clientY; // dragging up makes the sheet taller
+    if (!sheetDrag.moved) {
+      if (Math.abs(dy) < SHEET_DRAG_SLOP_PX) return;
+      sheetDrag.moved = true;
+      // Dragging a collapsed sheet pulls it back open rather than doing
+      // nothing until the user taps it first.
+      if (el.sheet.classList.contains("minimized")) setSheetMinimized(false);
+    }
+    applySheetHeight(sheetDrag.startH + dy);
+  });
+
+  const endDrag = (e) => {
+    if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+    const dragged = sheetDrag.moved;
+    sheetDrag = null;
+    // A tap that never moved keeps the old collapse/expand shortcut; a
+    // real drag just leaves the sheet at whatever height it was released.
+    if (!dragged) setSheetMinimized(!el.sheet.classList.contains("minimized"));
+    else if (onVisibleTabChange) onVisibleTabChange();
+  };
+  el.handle.addEventListener("pointerup", endDrag);
+  el.handle.addEventListener("pointercancel", endDrag);
+
+  // A pixel height set on a tall window can overflow a short one (phone
+  // rotation, desktop resize), so re-clamp - but only once the user has
+  // actually dragged, since before that the height is still the
+  // stylesheet's own viewport-relative default.
+  window.addEventListener("resize", () => {
+    if (sheetPx != null) applySheetHeight(sheetPx);
+  });
+}
+
 // Called when the sim restarts under new settings: the old fleet/graph
 // this panel was showing (a drilldown, a selected city page, cached
 // trucks/graph references) no longer apply to the fresh run.
@@ -143,6 +225,7 @@ export function visibleTab() {
 
 function openTab(name) {
   el.sheet.classList.remove("minimized");
+  syncSheetVars(); // tapping a tab can un-minimize, so the float anchors have to follow
   activeTabName = name;
   if (onVisibleTabChange) onVisibleTabChange();
   el.tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -722,6 +805,13 @@ function renderTruckDetails(truck, isControlled) {
   const fuelColor = truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)";
   const fatigueColor = truck.fatigue > 50 ? "var(--stop)" : truck.fatigue > 30 ? "var(--caution)" : "var(--go)";
   const range = Math.round(estimatedRangeMiles(truck));
+  // The tank fills over the whole stop (fleet.js's beginRefuel), and this
+  // panel re-renders every frame for the viewed truck, so the gauge below
+  // visibly climbs while it's at the pump - call that out in the readout
+  // instead of showing a range estimate that's changing under the reader.
+  const fuelSub = truck.refuelTarget != null
+    ? `${Math.round(truck.fuel)}% &uarr; filling to ${Math.round(truck.refuelTarget)}%`
+    : `${Math.round(truck.fuel)}% · ~${range.toLocaleString()} mi range`;
 
   const traitChips = [];
   if (truck.driver.isNightOwl) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);">NIGHT OWL</span>`);
@@ -744,7 +834,7 @@ function renderTruckDetails(truck, isControlled) {
     ${controlBlock}
     ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls and load pickups are yours - the sim pauses and waits for you at the next fork, and at the load board when this run ends.</div>` : ""}
     <div class="section-label">Condition</div>
-    ${conditionBar("Fuel", `${Math.round(truck.fuel)}% · ~${range.toLocaleString()} mi range`, truck.fuel, 100, fuelColor)}
+    ${conditionBar("Fuel", fuelSub, truck.fuel, 100, fuelColor)}
     ${conditionBar("Fatigue", `${Math.round(truck.fatigue)}%`, truck.fatigue, 100, fatigueColor)}
     <div class="metric-grid" style="margin:12px 0;">
       <div class="metric-card"><div class="metric-title">Speed</div><div class="metric-value">${Math.round(truck.speed)} mph</div></div>
