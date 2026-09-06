@@ -92,13 +92,17 @@ export class Camera {
   // fixed region of the map), so update() below just eases toward it once and
   // settles, rather than continuously re-tracking a moving point. Mirrors
   // main.js's own fitZoom() - same 0.55 "leave room for the bottom sheet"
-  // reservation and the same top-level 0.92-style fudge factor - just fitting
-  // an arbitrary box instead of the whole world.
-  frameBox(minX, minY, maxX, maxY) {
+  // reservation - just fitting an arbitrary box instead of the whole world.
+  // `fillFactor` is how tightly the box fills that reserved area (0.85
+  // default matches fitZoom's own 0.92-style fudge closely enough); a single
+  // short corridor segment passes a lower value so the frame backs off and
+  // leaves room for the real towns just past each end of the highlighted
+  // stretch, rather than cropping right at its two endpoints.
+  frameBox(minX, minY, maxX, maxY, fillFactor = 0.85) {
     const boxW = Math.max(1e-6, maxX - minX);
     const boxH = Math.max(1e-6, maxY - minY);
     const availH = this.canvas.clientHeight * 0.55;
-    const zoom = this.clampZoom(Math.min(this.canvas.clientWidth / boxW, availH / boxH) * 0.85);
+    const zoom = this.clampZoom(Math.min(this.canvas.clientWidth / boxW, availH / boxH) * fillFactor);
     this.frameTarget = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom };
     this.mode = "FRAME";
   }

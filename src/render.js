@@ -971,13 +971,22 @@ function labelFont(px) {
   return s;
 }
 
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts) {
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts, forceLabels) {
   ctx.textAlign = "center";
   let lastFont = null;
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
-    if (node.t === 0) continue;
-    if (!showAllLabels) {
+    // forceLabels - the Dispatch tab's corridor spotlight (main.js's
+    // frameAndHighlightCorridor) - names the two real towns the highlighted
+    // segment actually runs between, bypassing both gates below: tier 0
+    // ("Junction"-flagged towns like Mettler or Gilroy) is otherwise never
+    // labeled at all, and even a labeled tier can still be below its normal
+    // reveal zoom at the segment's own fit-to-box zoom. Without this, tapping
+    // a corridor could highlight a road with no indication of what it
+    // actually connects.
+    const forced = forceLabels && forceLabels.has(name);
+    if (node.t === 0 && !forced) continue;
+    if (!showAllLabels && !forced) {
       const mult = LABEL_TIER_ZOOM_MULT[node.t] ?? Infinity;
       if (zoom < baseZoom * mult) continue;
     }
@@ -994,11 +1003,15 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       }
     }
     const radius = cityDotRadius(node);
-    let fontPx = LABEL_FONT_PX[node.t];
+    // Tier 0 has no entry of its own in LABEL_FONT_PX/LABEL_COLOR (it's
+    // never drawn except when forced) - falls back to tier 4's, the
+    // smallest/least prominent real size, which is the right read for an
+    // otherwise-unlabeled junction town suddenly worth naming.
+    let fontPx = LABEL_FONT_PX[node.t] || LABEL_FONT_PX[4];
     if (onRouteCities && !onRouteCities.has(name)) fontPx *= OFF_ROUTE_LABEL_SCALE;
     const font = labelFont(fontPx);
     if (font !== lastFont) { ctx.font = font; lastFont = font; }
-    ctx.fillStyle = LABEL_COLOR[node.t];
+    ctx.fillStyle = LABEL_COLOR[node.t] || LABEL_COLOR[4];
     const parked = parkedCounts ? parkedCounts.get(name) : 0;
     if (counterRotation) {
       // Nav view: labels should look like they're standing up off the
@@ -1022,7 +1035,7 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       ctx.stroke();
       ctx.fillStyle = "rgba(0,0,0,0.5)";
       ctx.fillText(node.name, 1.5, -stemH - 3.5);
-      ctx.fillStyle = LABEL_COLOR[node.t];
+      ctx.fillStyle = LABEL_COLOR[node.t] || LABEL_COLOR[4];
       ctx.fillText(node.name, 0, -stemH - 5);
       // The badge is drawn INSIDE this same counter-rotated, un-squashed
       // frame as the label it belongs to. Drawn outside it (as it first
@@ -1308,21 +1321,31 @@ function drawRouteSpotlight(ctx, canvas, camera, graph, edgeList, trucks, spotli
   }
   ctx.stroke();
 
-  // Every truck actually on the highlighted segment/route, redrawn as a
-  // plain bright dot on top of the veil - same indexByEdge lookup
-  // tallyCongestion already does per truck per frame, so this is a proven-
-  // cheap pattern even at fleet-cap size.
+  // Every truck actually on the highlighted segment/route, redrawn on top
+  // of the veil - same indexByEdge lookup tallyCongestion already does per
+  // truck per frame, so this is a proven-cheap pattern even at fleet-cap
+  // size. Drawn in the truck's own cargo color/shape/sizeMult (the same
+  // static per-type descriptor truckBuckets already caches - only its xs/ys
+  // arrays are frame-local scratch) rather than a flat dot: a spotlight
+  // should still let you tell the reefers from the tankers, same as
+  // anywhere else on the map. Never the whole fleet here (a segment's or a
+  // route's worth of trucks), so one beginPath()/fill() per truck is fine -
+  // this isn't the 10000-truck hot path the batching exists for.
   const scratch = { x: 0, y: 0, heading: 0 };
-  ctx.fillStyle = "#ffffff";
-  const r = Math.max(2, TRUCK_DOT_RADIUS * camera.zoom * 1.35);
+  const scratchXs = [0], scratchYs = [0];
   for (const t of trucks) {
     if (!t.edge) continue;
     const idx = edgeList.indexByEdge.get(t.edge);
     if (idx === undefined || !indices.has(idx)) continue;
+    const bucket = t.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(t.contract.truckType.id);
     truckPose(graph, t, scratch);
     const p = camera.worldToScreen(scratch.x, scratch.y);
+    const r = Math.max(2, TRUCK_DOT_RADIUS * (bucket.sizeMult || 1) * camera.zoom * 1.35);
+    scratchXs[0] = p.x;
+    scratchYs[0] = p.y;
+    ctx.fillStyle = bucket.color;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    addTruckShapes(ctx, bucket.shape || "circle", scratchXs, scratchYs, r);
     ctx.fill();
   }
 }
@@ -1496,7 +1519,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     onRouteCities = new Set(nodeSeq);
   }
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts, renderOpts.spotlightRoute && renderOpts.spotlightRoute.forceLabels);
 
   if (nodeSeq) {
     // Built once and stroked twice: a dark casing underneath, then the

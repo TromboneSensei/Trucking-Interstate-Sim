@@ -330,13 +330,23 @@ el.btnNavToggle.addEventListener("click", () => {
 // truck" - clearing state via unfollow() a second time, which is harmless,
 // but only by accident. Calling it here ourselves makes the transition
 // explicit instead of relying on next-frame cleanup to paper over it.
+// A single corridor segment is short enough that fitting it at frameBox's
+// normal 0.85 fill crops right at its own two endpoints - exactly where the
+// real towns it connects sit, with no room left on screen for their labels.
+// A looser fill here backs the camera off enough to carry both neighboring
+// towns into frame; forceLabels (below) is what actually guarantees they're
+// drawn, since one of those towns can easily be a real-but-low-tier place
+// (or a "Junction"-flagged tier-0 town like Mettler) that wouldn't clear the
+// normal label-reveal zoom even with the extra room.
+const CORRIDOR_FRAME_FILL = 0.55;
+
 function frameAndHighlightCorridor(rec) {
   const idx = edgeList.indexByEdge.get(rec.edge);
   if (idx == null) return;
   unfollow();
   const e = edgeList.edges[idx];
-  camera.frameBox(e.minX, e.minY, e.maxX, e.maxY);
-  state.spotlightRoute = { indices: new Set([idx]) };
+  camera.frameBox(e.minX, e.minY, e.maxX, e.maxY, CORRIDOR_FRAME_FILL);
+  state.spotlightRoute = { indices: new Set([idx]), forceLabels: new Set([e.from, e.to]) };
 }
 
 function frameAndHighlightHighway(rec) {
