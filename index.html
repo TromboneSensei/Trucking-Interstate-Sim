@@ -125,20 +125,27 @@
       <button class="tab-btn active" data-tab="overview">Dispatch</button>
       <button class="tab-btn" data-tab="rankings">Rankings</button>
       <button class="tab-btn" data-tab="economy">Economy</button>
-      <button class="tab-btn" data-tab="details">Unit</button>
+      <button class="tab-btn" data-tab="cb">CB Feed<span id="cb-unread" class="tab-badge hidden"></span></button>
     </div>
     <div class="tab-content">
       <div id="tab-overview" class="content-panel active"></div>
       <div id="tab-rankings" class="content-panel"></div>
       <div id="tab-economy" class="content-panel"></div>
-      <div id="tab-details" class="content-panel">
-        <div id="details-empty" class="placeholder-text">Tap a truck or city to inspect it.</div>
-        <div id="details-data" class="hidden"></div>
+      <div id="tab-cb" class="content-panel"></div>
+      <!-- Not a tab: tapping a truck or a city slides this over whichever
+           tab is open, and the back button (or picking any tab) closes it
+           again. Inspecting something is a detour from browsing, not a
+           fifth place to browse. -->
+      <div id="detail-sheet" class="hidden">
+        <div id="detail-bar">
+          <button id="detail-back" class="pill-btn">&larr; Back</button>
+          <span id="detail-bar-title"></span>
+        </div>
+        <div id="details-data"></div>
       </div>
     </div>
   </div>
 
-  <div id="cb-radio" aria-hidden="true"></div>
   <div id="daily-digest" class="hidden"></div>
   <div id="toast" class="hidden"></div>
   <div id="fatal-error" class="hidden"></div>

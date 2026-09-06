@@ -1,37 +1,47 @@
-// cb.js - the CB radio: a live chatter feed over the map, in the spirit of
-// a Twitch chat scroll. Two things feed it, and keeping them separate is
-// the whole design:
+// cb.js - the CB radio: a live chatter feed, rendered as a scrollback log
+// in its own tab of the bottom sheet. Two things feed it, and keeping them
+// separate is the whole design:
 //
 //   1. REAL EVENTS pushed out of the simulation (fleet.js's event queue) -
-//      breakdowns and dry tanks. These are the signal. A breakdown is the
-//      one thing in this sim you actually lose money to while not
-//      watching, so it outranks everything and is allowed to break the
-//      ambient rate limit. (A completed delivery is deliberately NOT one
-//      of these - "another one in the book" chatter for every one of
-//      hundreds of daily deliveries added nothing and crowded out
-//      everything more interesting.)
-//   2. AMBIENT FLAVOR generated here on a timer from whichever trucks are
-//      currently on screen - weather, scenery, truck stops, road banter.
-//      This is the noise, and it exists purely to make a screenful of
-//      moving dots feel inhabited.
+//      breakdowns and dry tanks - plus two conditions this module measures
+//      itself: a truck genuinely crawling below its own free-flow speed,
+//      and a truck with a genuinely disabled rig on the road ahead of it.
+//      These are the signal.
+//   2. AMBIENT FLAVOR generated here on a timer - weather, scenery, truck
+//      stops, road banter. This is the noise, and it exists purely to make
+//      a screenful of moving dots feel inhabited.
 //
-// Everything is throttled against the camera: zoomed out to the whole
-// country there are thousands of eligible trucks and a message every
-// couple of seconds would be meaningless wallpaper, so the feed slows
-// right down and holds only a few lines. Zoomed into one corridor the
-// same feed tightens up, because now it's reporting on trucks you can
-// actually see.
+// Two rules govern all of it:
 //
-// The DOM is deliberately the render target rather than the canvas: this
-// is text that needs to wrap, fade and stack, all of which CSS already
+//   EVERY SPEAKER IS ON SCREEN. The pool is exactly the trucks inside the
+//   frame the renderer just culled to - no exceptions, not even for a
+//   breakdown. Reading about Seattle while looking at St. Louis is noise
+//   wearing the costume of information.
+//
+//   EVERY CLAIM IS TRUE. A truck that names a city has just driven through
+//   it (see `passed` in cbPlaceContext); a truck that says it's stacked up
+//   is measurably below its own free-flow speed; a truck that warns of a
+//   breakdown ahead has one on its own edge within a few miles. Lines that
+//   can't be backed by simulation state were rewritten until they only
+//   claim things about the speaker's own cab.
+//
+// Everything is throttled against the camera. Zoomed into one corridor the
+// feed tightens up and leans ambient, because it's reporting on trucks you
+// can actually see. Zoomed out to the whole country every truck qualifies
+// and the alerts would drown everything else, so the high-priority lines
+// get a much longer floor and a streak limiter (see cbEmitStep) that
+// forces banter back in between them.
+//
+// The DOM is the render target rather than the canvas: this is text that
+// needs to wrap, scroll and be tapped, all of which the browser already
 // does, and it costs nothing per frame when nothing is being said.
 import { truckWorldPos } from "./render.js";
 import { travelDirectionLabel, localMinutesAtX } from "./geo.js";
 import { weatherSpeedMultAt } from "./weather.js";
+import { disabledPositionsOnEdge } from "./fleet.js";
 
-// Higher wins. CRITICAL jumps the queue and bypasses the ambient rate
-// limit (subject only to its own much shorter floor); FLAVOR is the
-// filler that gets dropped first whenever the queue is over budget.
+// Higher wins. CRITICAL and ALERT jump the queue; FLAVOR is the filler
+// that gets dropped first whenever the queue is over budget.
 export const CB_PRIORITY = { FLAVOR: 0, ROUTINE: 1, ALERT: 2, CRITICAL: 3 };
 
 // ---------------------------------------------------------------------
@@ -42,46 +52,52 @@ export const CB_PRIORITY = { FLAVOR: 0, ROUTINE: 1, ALERT: 2, CRITICAL: 3 };
 export const CB_TUNING = {
   // --- pacing, interpolated between fully zoomed out (…Out) and zoomed
   // in on a corridor (…In). See cbZoomT: 0 = whole country, 1 = corridor.
-  flavorIntervalMsOut: 5000, // one ambient line per this long, zoomed out
-  flavorIntervalMsIn: 2500,
-  maxVisibleOut: 3, // hard cap on lines on screen at once
-  maxVisibleIn: 6,
-  lifetimeMsOut: 9000, // how long a line stays before fading
-  lifetimeMsIn: 14000,
-  // How far in you have to zoom before the "In" ends of those ranges
-  // apply, as a multiple of the fit-the-country zoom.
+  // How far in you have to zoom before the "In" ends apply, as a multiple
+  // of the fit-the-country zoom.
   zoomRatioForFullDetail: 6,
+  // Floor between any two lines, whatever they are. This is the single
+  // knob for "the feed is too busy".
+  globalGapMsOut: 3600,
+  globalGapMsIn: 900,
+  // How often to try to generate one ambient line.
+  flavorIntervalMsOut: 5200,
+  flavorIntervalMsIn: 2300,
+  // Extra floors that apply only to the high-priority bands. Zoomed out,
+  // ten thousand trucks produce a steady drip of breakdowns; without these
+  // the feed would be nothing but red lines.
+  alertGapMsOut: 8000,
+  alertGapMsIn: 1600,
+  criticalGapMsOut: 5200,
+  criticalGapMsIn: 700,
+  // …and a hard limit on how many high-priority lines may run back to
+  // back. Once hit, the next line is forced to come from the ambient band
+  // if one is waiting - this is what keeps "important" and "random" mixed
+  // together nationwide instead of alternating between floods and silence.
+  maxHighStreakOut: 1,
+  maxHighStreakIn: 4,
 
-  // --- priority behaviour
-  // Minimum gap between any two lines, per priority. CRITICAL's is short
-  // on purpose: it's what lets a run of breakdowns come through in a
-  // burst instead of trickling out behind ambient chatter.
-  minGapMs: { 0: 900, 1: 900, 2: 500, 3: 260 },
-  // Pending lines never queue deeper than this; over budget, the
-  // lowest-priority oldest entries are dropped rather than delaying
-  // anything important behind stale banter.
-  queueCap: 12,
+  // --- queue
+  queueCap: 12, // pending lines never queue deeper than this
+  highQueueCap: 6, // …of which at most this many may be ALERT or above, so banter always has room
   // A queued line older than this is thrown away rather than shown. The
-  // feed reports on what is happening NOW; a jam/flavor line that only
-  // just reached the front of the queue after sitting eight seconds
-  // behind a backlog is stale enough to be misleading. Critical alerts
-  // are exempt - a breakdown is still a breakdown whenever you read it.
+  // feed reports on what is happening NOW; a jam line that only just
+  // reached the front after sitting eight seconds behind a backlog is
+  // stale enough to be misleading. Critical alerts are exempt - a
+  // breakdown is still a breakdown whenever you read it.
   staleMs: 3500,
-  // A breakdown off the edge of the screen still matters - you can't
-  // watch the whole country at once, and missing mechanical failures is
-  // the exact thing this feed exists to prevent. Flip this to true to
-  // make critical alerts obey the viewport like everything else.
-  criticalRespectsViewport: false,
+  logCap: 40, // messages kept in the scrollback before the oldest is dropped
 
   // --- content mix
-  // Traffic-jam alerts, detected from trucks running far below their own
-  // free-flow speed (see cbFindJam) - covers both "everyone's just slow
-  // here" and a disabled truck causing a rubberneck backup; the line bank
-  // itself speculates about a breakdown/wreck rather than the code ever
-  // confirming one, same as real CB chatter. Rate-limited hard - a jam
-  // persists for a while and doesn't need re-reporting every few seconds.
-  jamMinGapMs: 14000,
+  jamMinGapMs: 14000, // a jam persists; it doesn't need re-reporting every few seconds
   jamSlowdownFraction: 0.45, // below this share of free-flow speed counts as stuck
+  // How far back from a city a truck may still say it "just came through"
+  // there. Capped at half the edge as well, so on a short hop the claim
+  // expires before the truck is closer to the next town than the last.
+  justPassedMiles: 45,
+  // How far ahead a disabled truck has to be for a warning to be worth
+  // giving - and, more to the point, close enough that the warning is
+  // true of the road the speaker is actually on.
+  breakdownAheadMiles: 12,
   // Relative odds of each ambient category. Set any of these to 0 to
   // switch that flavor off entirely; raise `traffic` and drop `nature`
   // for a drier, more operational feed.
@@ -89,122 +105,127 @@ export const CB_TUNING = {
     nature: 3,
     weather: 3, // only eligible when the truck is actually inside a weather cell
     night: 2, // only eligible when it's actually dark where the truck is
-    landmark: 3,
-    coffee: 2,
+    landmark: 3, // only eligible when it has actually just passed a real town
+    coffee: 2, // ditto - the truck stop it's talking about is behind it
     traffic: 2,
     smalltalk: 2,
-    cargo: 2,
+    cargo: 2, // only eligible when it's actually running a contract
     police: 2, // ambient "bear" sighting - flavor, not a real enforcement mechanic
-    firstVisit: 4, // only eligible the first time THIS truck passes THIS city - see cbVisited
+    firstVisit: 4, // only the first time THIS truck passes THIS city - see cbVisited
+    breakdownAhead: 8, // only when there is genuinely a disabled rig ahead on this edge
   },
-  // How many random trucks to test for on-screen-ness before giving up on
-  // finding a speaker this tick. Caps the cost at a fixed few dozen
-  // regardless of fleet size - never a scan of all 10000.
+  // How many random trucks to test before giving up on finding a speaker
+  // this tick. Caps the cost at a fixed few dozen regardless of fleet
+  // size - never a scan of all 10000.
   speakerSampleAttempts: 40,
   // How soon to re-try after a sample turns up no on-screen speaker.
   flavorRetryMs: 400,
   // How many cities cbVisited remembers per truck before forgetting its
-  // oldest one - a long-lived truck passes through far more control
-  // cities over a session than are worth holding onto just to gate one
-  // flavor line, so this stays a rolling window rather than full history.
+  // oldest one - a long-lived truck passes through far more towns over a
+  // session than are worth holding onto just to gate one flavor line, so
+  // this stays a rolling window rather than full history.
   visitedMemory: 16,
 };
 
 // ---------------------------------------------------------------------
 // Phrase banks. Placeholders are filled from the speaking truck's real
-// position: {route} its highway, {dir} its heading, {near} the control
-// city it's running toward, {cargo} what's in the trailer, {type} the
-// trailer kind. Lines that name a place read as local because they ARE
-// local - the sim already knows all of this per truck.
+// position:
+//   {route}  its highway            {dir}    its heading
+//   {ahead}  the control city it is signed toward (always true: it's on
+//            the sign in front of the driver)
+//   {passed} a real town it has just driven through - ONLY available to
+//            categories gated on it, never a guess
+//   {cargo}  what's in the trailer  {type}   the trailer kind
+//   {dest}   where the load is going
+// Nothing in here asserts a road condition the sim hasn't measured; the
+// conditions that ARE measured live in CB_EVENT_LINES below.
 // ---------------------------------------------------------------------
 const CB_LINES = {
   nature: [
-    "Sun's coming up over {near}, prettiest office in the world.",
+    "Sun's coming up out ahead of me on {route}. Prettiest office in the world.",
     "Whole valley's gone gold out here on {route}. Wish you could see it.",
-    "Deer standing right on the shoulder near {near}. Easy on the hammer, boys.",
-    "Sky's doing something ridiculous west of {near} right now.",
+    "Deer standing right on the shoulder up here on {route}. Easy on the hammer, boys.",
+    "Sky's doing something ridiculous out my windshield on {route}.",
     "Hawk's been riding my mirror the last ten miles on {route}.",
-    "Ain't a cloud between me and {near}. Good day to be rolling.",
+    "Ain't a cloud between me and {ahead}. Good day to be rolling.",
     "Leaves turning all the way down {route}. Beats a windshield full of city.",
   ],
   weather: [
     "Rain's coming down sideways on {route}, easy does it {dir}bound.",
-    "Visibility's about a truck length out here near {near}. Slow it down.",
+    "Visibility's about a truck length out here on {route}. Slow it down.",
     "Wind's pushing me around on {route}. Watch it if you're running empty.",
-    "It's slick as glass on {route} coming into {near}.",
-    "Wipers on high since {near} and losing that fight.",
-    "Whatever this mess is, it's sitting right over {near}.",
+    "It's slick as glass on {route} headed for {ahead}.",
+    "Wipers have been on high for an hour now and losing that fight.",
+    "Whatever this mess is, it's sitting right on top of {route}.",
   ],
   night: [
     "Nothing out here but me and the mile markers on {route}.",
     "Quiet as a church on {route} this time of night.",
-    "Just me, {cargo}, and the white line into {near}.",
-    "Moon's lighting up the whole road ahead of {near}.",
-    "Third cup since dark and {near} still ain't any closer.",
+    "Just me, {cargo}, and the white line toward {ahead}.",
+    "Moon's lighting up the whole road ahead of me on {route}.",
+    "Third cup since dark and {ahead} still ain't any closer.",
   ],
   landmark: [
-    "Rolling past {near}. Same water tower, same rust.",
-    "{near} is looking about how you'd expect.",
-    "Passing that big sign outside {near} again. Somebody repaint it already.",
-    "Scales looked open coming into {near}, just so you know.",
-    "Bridge work's still up on {route} near {near}.",
-    "Made {near} sooner than the book said. Take that, dispatch.",
+    "Just rolled through {passed}. Same water tower, same rust.",
+    "{passed} is looking about how you'd expect.",
+    "Passed that big sign outside {passed} again. Somebody repaint it already.",
+    "Scales were open back through {passed}, just so you know.",
+    "Made {passed} sooner than the book said. Take that, dispatch.",
+    "Bridge work's still up on {route} back by {passed}.",
   ],
   coffee: [
-    "Truck stop outside {near} has the only decent coffee on {route}.",
-    "Pie's still good at that place off {route} near {near}. Trust me.",
-    "Anybody got a lot with open parking near {near}? Getting tight.",
-    "Showers were clean at the stop before {near}. Miracle.",
-    "Two dollars for a refill outside {near}. Highway robbery, appropriately.",
-    "Fueled up near {near}. Wallet's lighter, tank ain't.",
+    "Truck stop back in {passed} has the only decent coffee on {route}.",
+    "Pie's still good at that place off {route} in {passed}. Trust me.",
+    "Showers were clean at the stop in {passed}. Miracle.",
+    "Two dollars for a refill back in {passed}. Highway robbery, appropriately.",
+    "Grabbed a cup in {passed}. Wallet's lighter, I'm awake.",
   ],
   traffic: [
     "Four-wheelers everywhere on {route} {dir}. Keep your following distance.",
-    "Somebody in a hurry just cut me clean off near {near}.",
-    "Left lane's been blocked for six miles on {route}. Cute.",
-    "Rolling roadblock up ahead on {route}, two abreast doing the limit.",
-    "Traffic's stacking up coming into {near}. Might want to plan around it.",
+    "Somebody in a hurry just cut me clean off. Ten-four on that.",
+    "Left lane's been coned off for six miles on {route}. Cute.",
+    "Rolling roadblock up here on {route}, two abreast doing the limit.",
     "Whole convoy of us running {route} {dir} right now. Looks good in the mirror.",
   ],
   smalltalk: [
-    "Breaker one-nine, anybody got their ears on around {near}?",
+    "Breaker one-nine, anybody got their ears on out here on {route}?",
     "Radio check on {route}. Anybody copy?",
-    "How's the road looking ahead of {near}?",
+    "How's the road looking between here and {ahead}?",
     "Ten-four, catch you on the flip side.",
     "Dispatch is quiet today. Suspicious.",
-    "That's a big ten-four from {route}.",
+    "That's a big ten-four from {route} {dir}.",
   ],
   cargo: [
     "Hauling {cargo} up {route}. Pays the same as the boring stuff.",
-    "Got {cargo} on the {type} and a long way to {near} yet.",
+    "Got {cargo} on the {type} and a long way to {dest} yet.",
     "Whoever loaded this {cargo} owes me an alignment.",
-    "{cargo} bound for {near}. Nice and easy does it.",
+    "{cargo} bound for {dest}. Nice and easy does it.",
     "Riding heavy with {cargo} on {route}. She's pulling fine.",
   ],
   police: [
-    "Bear in the air near {near}, watch your speed on {route}.",
-    "Smokey's got somebody pulled over outside {near}.",
-    "County mountie sitting in the median before {near}. Ten-four on that.",
+    "Bear in the air over {route}. Watch your speed.",
+    "Smokey's got somebody pulled over up ahead on {route}.",
+    "County mountie sitting in the median before {ahead}. Ten-four on that.",
     "Bear's running radar on {route} {dir}. Ease off.",
-    "Full grown bear parked past the {near} exit. Y'all be careful.",
+    "Full grown bear parked at the {ahead} exit. Y'all be careful.",
   ],
-  // Generic - fires the first time THIS truck passes THIS city, no
-  // specific claim about what's there (see cbCityFlavor for the handful
+  // Generic - fires the first time THIS truck passes THIS town, no
+  // specific claim about what's there (see CB_CITY_FLAVOR for the handful
   // of cities that get a real one instead).
   firstVisitGeneric: [
-    "First time rolling through {near}. Not bad at all.",
-    "Never been to {near} before. Bigger than I figured.",
-    "New to me, this stretch by {near}. Kinda like it.",
-    "First trip out this way. {near}'s alright.",
-    "Ain't never hauled through {near} till today.",
-    "Dispatch finally sent me somewhere new - {near}, if you're wondering.",
+    "First time rolling through {passed}. Not bad at all.",
+    "Never been to {passed} before. Bigger than I figured.",
+    "First trip out this way. {passed}'s alright.",
+    "Ain't never hauled through {passed} till today.",
+    "Dispatch finally sent me somewhere new - {passed}, if you're wondering.",
   ],
 };
 
 // A handful of well-known cities get a real, specific line instead of the
-// generic first-visit filler above - the rest of the ~150-city graph
-// falls back to firstVisitGeneric rather than inventing a landmark for
-// somewhere that may not have one worth naming.
+// generic first-visit filler above - the rest of the ~750-city graph falls
+// back to firstVisitGeneric rather than inventing a landmark for somewhere
+// that may not have one worth naming. Keyed on {passed}, so the truck has
+// genuinely just been through the place it's describing.
 const CB_CITY_FLAVOR = {
   "St. Louis": "First time in St. Louis. That Arch is something else.",
   "Chicago": "First time in Chicago. Skyline hits different in person.",
@@ -225,48 +246,77 @@ const CB_CITY_FLAVOR = {
   "Phoenix": "First time in Phoenix. Didn't know heat could look shimmery like that.",
 };
 
-// Real-event lines. Same placeholder rules; {handle} is the truck name.
+// Lines backed by measured simulation state. BREAKDOWN and DRY_TANK come
+// straight off fleet.js's event queue; JAM fires only for a truck actually
+// running below CB_TUNING.jamSlowdownFraction of its own free-flow speed;
+// JAM_BREAKDOWN and BREAKDOWN_AHEAD fire only when there is a genuinely
+// disabled rig on the speaker's own edge, ahead of it, within
+// CB_TUNING.breakdownAheadMiles.
 const CB_EVENT_LINES = {
   BREAKDOWN: [
-    "Mayday, I'm dead in the water on {route} {dir} near {near}. Something let go.",
-    "Well, that's the end of that. Broke down on {route} outside {near}.",
-    "Got smoke and no power on {route} near {near}. Sitting on the shoulder.",
-    "She quit on me on {route} coming into {near}. Rolling nowhere.",
+    "Mayday, I'm dead in the water on {route} {dir} short of {ahead}. Something let go.",
+    "Well, that's the end of that. Broke down on {route} {dir}.",
+    "Got smoke and no power on {route}. Sitting on the shoulder.",
+    "She quit on me on {route} coming into {ahead}. Rolling nowhere.",
   ],
   DRY_TANK: [
-    "Ran her dry on {route} near {near}. Don't laugh, just send fuel.",
-    "Out of go-juice on {route} outside {near}. Rookie mistake.",
-    "Sitting on empty on {route} near {near}. This one's on me.",
-    "Tank's dry on {route} {dir} near {near}. Waiting on the fuel truck.",
+    "Ran her dry on {route} short of {ahead}. Don't laugh, just send fuel.",
+    "Out of go-juice on {route} {dir}. Rookie mistake.",
+    "Sitting on empty on {route}. This one's on me.",
+    "Tank's dry on {route} {dir} before {ahead}. Waiting on the fuel truck.",
   ],
   JAM: [
-    "We're stacked up solid on {route} {dir} coming into {near}. Find another way.",
-    "Parking lot on {route} near {near}. Been in third gear for a while now.",
-    "Heavy traffic on {route} {dir} outside {near}, barely rolling.",
-    "Whatever's ahead of us on {route} near {near}, it ain't moving.",
-    "Something's got us backed up on {route} near {near} - looks like somebody's broke down up there.",
-    "Dead stop on {route} {dir} near {near}. Smells like a breakdown or a wreck, one of the two.",
-    "Word back here is there's a truck sitting sideways somewhere ahead on {route}. That'll do it.",
+    "We're stacked up solid on {route} {dir} toward {ahead}. Find another way.",
+    "Parking lot on {route} {dir}. Been in third gear for a while now.",
+    "Heavy traffic on {route} {dir} out here, barely rolling.",
+    "Whatever's ahead of us on {route}, it ain't moving.",
+    "Crawling on {route} {dir}. Add an hour to whatever your book says.",
+  ],
+  JAM_BREAKDOWN: [
+    "Backed up on {route} {dir} - there's a rig broke down up ahead. That'll do it.",
+    "Dead stop on {route}. Somebody's sitting disabled a couple miles up.",
+    "We're crawling on {route} {dir} past a broke-down truck. Move over if you can.",
+  ],
+  BREAKDOWN_AHEAD: [
+    "Heads up {dir}bound on {route} - disabled rig on the right, hazards going.",
+    "Somebody's broke down on the shoulder just up ahead on {route}. Give him room.",
+    "Got a truck sitting dead a couple miles up on {route}. Move over if you've got the lane.",
+    "Four-wheelers are all braking for a broke-down rig ahead on {route}. Easy does it.",
+    "Breakdown ahead on {route} before {ahead}. Watch your speed coming up on it.",
   ],
 };
 
 // ---------------------------------------------------------------------
 // Module state
 // ---------------------------------------------------------------------
-let cbContainer = null;
+let cbFeedEl = null; // the #tab-cb panel - the scrollback lives here
+let cbBadgeEl = null; // unread-alert count on the tab button
+let cbOnSelectTruck = null; // tapping a line hands the truck back to main.js
+let cbIsFeedVisible = null; // () => is the CB tab the one on screen?
 let cbQueue = []; // pending lines, highest priority first (see cbEnqueue)
-let cbLive = []; // { node, expiresAt, removeAt } for what's on screen
 let cbLastEmitMs = 0;
+let cbLastHighMs = 0; // last ALERT-or-above line
+let cbHighStreak = 0; // consecutive ALERT-or-above lines
 let cbLastFlavorMs = 0;
 let cbLastJamMs = 0;
+let cbUnread = 0;
+let cbDisabledNotice = false; // is the panel currently showing the "switched off" placeholder?
 const cbScratchPos = { x: 0, y: 0 };
 
-// Per-truck rolling memory of which control cities it's already passed,
-// keyed by the truck object itself so a torn-down fleet's entries are
-// simply unreachable garbage rather than something resetCB has to walk
-// and clear. Capped per truck (see CB_TUNING.visitedMemory) - a "first
-// time here" line only needs to know whether THIS truck has been through
-// THIS city recently, not hold its entire lifetime route.
+// node -> truck, so a tapped line can hand back the rig that said it
+// without keeping ids alive across a fleet rebuild. Entries die with the
+// node, which resetCB removes wholesale.
+const cbNodeTruck = new WeakMap();
+
+// truck -> its most recent line, for the truck detail panel. Keyed on the
+// truck object so a torn-down fleet's entries are simply unreachable
+// garbage rather than something resetCB has to walk and clear.
+const cbLastMessage = new WeakMap();
+
+// Per-truck rolling memory of which towns it's already been through.
+// Capped per truck (CB_TUNING.visitedMemory) - a "first time here" line
+// only needs to know whether THIS truck has been through THIS town
+// recently, not hold its entire lifetime route.
 const cbVisited = new WeakMap();
 
 function cbMarkVisited(truck, city) {
@@ -282,8 +332,30 @@ function cbHasVisited(truck, city) {
   return !!set && set.has(city);
 }
 
-export function initCB(containerEl) {
-  cbContainer = containerEl;
+// The truck detail panel asks for this every frame it's open; returns
+// null for a rig that hasn't keyed the mic yet, which is the signal to
+// leave the block out entirely rather than show an empty quote.
+export function cbLastMessageFor(truck) {
+  return truck ? cbLastMessage.get(truck) || null : null;
+}
+
+// opts: { feedEl, badgeEl, onSelectTruck, isFeedVisible }
+export function initCB(opts) {
+  cbFeedEl = opts.feedEl || null;
+  cbBadgeEl = opts.badgeEl || null;
+  cbOnSelectTruck = opts.onSelectTruck || null;
+  cbIsFeedVisible = opts.isFeedVisible || null;
+  if (cbFeedEl) {
+    // Delegated, so forty rows cost one listener and a row can be dropped
+    // off the tail without any teardown.
+    cbFeedEl.addEventListener("click", (ev) => {
+      const row = ev.target.closest ? ev.target.closest(".cb-msg") : null;
+      if (!row) return;
+      const truck = cbNodeTruck.get(row);
+      if (truck && cbOnSelectTruck) cbOnSelectTruck(truck);
+    });
+    cbShowPlaceholder("Quiet on the channel.");
+  }
 }
 
 // Wipes the feed - queue, DOM and timers. Called whenever the sim is torn
@@ -291,12 +363,33 @@ export function initCB(containerEl) {
 // from the fleet that just stopped existing.
 export function resetCB() {
   cbQueue.length = 0;
-  for (const m of cbLive) m.node.remove();
-  cbLive.length = 0;
   cbLastEmitMs = 0;
+  cbLastHighMs = 0;
+  cbHighStreak = 0;
   cbLastFlavorMs = 0;
   cbLastJamMs = 0;
-  if (cbContainer) cbContainer.innerHTML = "";
+  cbUnread = 0;
+  cbSyncBadge();
+  if (cbFeedEl) cbShowPlaceholder("Quiet on the channel.");
+}
+
+function cbShowPlaceholder(text) {
+  if (!cbFeedEl) return;
+  cbFeedEl.innerHTML = "";
+  const p = document.createElement("div");
+  p.className = "cb-empty";
+  p.textContent = text;
+  cbFeedEl.appendChild(p);
+}
+
+function cbSyncBadge() {
+  if (!cbBadgeEl) return;
+  if (cbUnread > 0) {
+    cbBadgeEl.textContent = cbUnread > 9 ? "9+" : String(cbUnread);
+    cbBadgeEl.classList.remove("hidden");
+  } else {
+    cbBadgeEl.classList.add("hidden");
+  }
 }
 
 // 0 when the whole country is in frame, 1 once zoomed into a corridor.
@@ -322,27 +415,59 @@ function cbRouteLabel(route) {
   return route ? route.replace("US-", "US ").replace(" (West)", "").replace(" (East)", "") : "the slab";
 }
 
-// Everything a line might want to name about where this truck is right
-// now. Returns null for a truck with no meaningful position (mid-
-// transition between edges), which simply doesn't get to speak this tick.
+// "2:14p" - short enough to sit in a fixed gutter beside forty rows.
+function cbClock(gameSeconds) {
+  let m = Math.floor(((gameSeconds || 0) % 86400) / 60);
+  let h = Math.floor(m / 60);
+  m = m % 60;
+  const suffix = h >= 12 ? "p" : "a";
+  h = h % 12 || 12;
+  return `${h}:${m < 10 ? "0" + m : m}${suffix}`;
+}
+
+// ---------------------------------------------------------------------
+// Place facts
+// ---------------------------------------------------------------------
+// Everything a line is allowed to name about where this truck is right
+// now, split by how confident the sim actually is:
+//
+//   ahead   - the control city on the signs in front of the driver. Always
+//             safe: it's where this edge is pointed.
+//   passed  - a REAL town (tier 0 nodes are unnamed interchange filler)
+//             that this truck has driven through within the last
+//             justPassedMiles. Null the rest of the time, and the
+//             categories that name a town are gated on it, which is what
+//             makes "first time in St. Louis" mean the truck is in fact
+//             leaving St. Louis.
+//
+// Returns null for a truck with no meaningful position, which simply
+// doesn't get to speak this tick.
 function cbPlaceContext(graph, truck) {
   const type = truck.contract ? truck.contract.truckType : null;
   const base = {
     handle: truck.name,
     cargo: truck.contract ? truck.contract.cargo : "freight",
     type: type ? type.label.toLowerCase() : "trailer",
+    dest: truck.contract ? truck.contract.destination : null,
     color: type ? type.color : "#e8ecef",
+    passed: null,
   };
   if (truck.edge) {
     base.route = cbRouteLabel(truck.edge.route);
     base.dir = travelDirectionLabel(truck.edge);
-    base.near = truck.edge.control || truck.edge.to;
+    base.ahead = truck.edge.control || truck.edge.to;
+    const origin = graph.nodes[truck.edge.from];
+    // Half the edge as well as an absolute cap: on a 30-mile hop between
+    // two towns, "just came through" has to expire before the truck is
+    // nearer the next one than the last.
+    const window = Math.min(CB_TUNING.justPassedMiles, truck.edge.miles * 0.5);
+    if (origin && origin.t > 0 && truck.s <= window) base.passed = truck.edge.from;
     return base;
   }
   if (truck.parkedAt) {
     base.route = "the yard";
     base.dir = "";
-    base.near = truck.parkedAt;
+    base.ahead = truck.parkedAt;
     return base;
   }
   return null;
@@ -358,7 +483,9 @@ function cbFormat(template, place) {
 // `viewport` is the world-space box drawFrame already computed for its own
 // culling this frame, handed straight back to us - so "on screen" here
 // means exactly what it means to the renderer, with no second, subtly
-// different copy of the camera math to drift out of sync.
+// different copy of the camera math to drift out of sync. Nothing gets to
+// speak from off screen, breakdowns included: the feed describes what
+// you're looking at.
 function cbIsVisible(graph, truck, viewport) {
   if (!viewport) return true;
   truckWorldPos(graph, truck, cbScratchPos);
@@ -366,6 +493,22 @@ function cbIsVisible(graph, truck, viewport) {
     cbScratchPos.x >= viewport.minX && cbScratchPos.x <= viewport.maxX &&
     cbScratchPos.y >= viewport.minY && cbScratchPos.y <= viewport.maxY
   );
+}
+
+// Miles to the nearest disabled truck ahead of this one on its own edge,
+// or -1 if there isn't one inside the warning range. fleet.js already
+// builds the sorted per-edge list every tick for its rubberneck slowdown,
+// so this is a lookup plus a short walk, not a scan.
+function cbDisabledAhead(truck) {
+  if (!truck.edge) return -1;
+  const sorted = disabledPositionsOnEdge(truck.edge);
+  if (!sorted || !sorted.length) return -1;
+  for (let i = 0; i < sorted.length; i++) {
+    const gap = sorted[i] - truck.s;
+    if (gap <= 0) continue; // already behind us
+    return gap <= CB_TUNING.breakdownAheadMiles ? gap : -1;
+  }
+  return -1;
 }
 
 // Finds a truck that's both on screen and in a state worth talking from,
@@ -410,9 +553,10 @@ function cbFindJam(graph, trucks, viewport) {
 // Ambient flavor
 // ---------------------------------------------------------------------
 // Which categories this particular truck, here, right now, could
-// plausibly say something from. Weather lines need actual weather; night
-// lines need actual night. Gating them on the real simulation state is
-// what keeps the banter feeling local rather than random.
+// truthfully say something from. Weather lines need actual weather; night
+// lines need actual night; anything that names a town needs the truck to
+// have just left one. Gating on real simulation state is the whole reason
+// the banter reads as local rather than random.
 function cbEligibleCategories(graph, truck, cbCtx, place) {
   const weights = CB_TUNING.flavorWeights;
   const out = [];
@@ -423,35 +567,37 @@ function cbEligibleCategories(graph, truck, cbCtx, place) {
   };
 
   add("nature");
-  add("landmark");
-  add("coffee");
   add("traffic");
   add("smalltalk");
-  add("cargo");
   add("police");
+  if (truck.contract) add("cargo");
+  if (place.passed) {
+    add("landmark");
+    add("coffee");
+    // …and only the first time THIS truck has been through THIS town.
+    if (!cbHasVisited(truck, place.passed)) add("firstVisit");
+  }
 
-  if (cbCtx.showWeather && cbCtx.weather && truck.edge) {
+  if (cbCtx.showWeather && cbCtx.weather) {
     truckWorldPos(graph, truck, cbScratchPos);
     // < 1 means this truck is inside a cell and being slowed by it.
     if (weatherSpeedMultAt(cbCtx.weather, cbScratchPos.x, cbScratchPos.y) < 0.999) add("weather");
   }
-  if (truck.edge) {
-    truckWorldPos(graph, truck, cbScratchPos);
-    const mins = localMinutesAtX(cbScratchPos.x, cbCtx.gameSeconds);
-    if (mins >= 21 * 60 || mins < 5 * 60) add("night");
-  }
-  // Only a candidate the first time THIS truck has been seen near THIS
-  // control city - see cbVisited. `near` is a real city name whenever
-  // truck.edge is set (cbPlaceContext), which cbMakeFlavor has already
-  // confirmed before calling here.
-  if (!cbHasVisited(truck, place.near)) add("firstVisit");
+  truckWorldPos(graph, truck, cbScratchPos);
+  const mins = localMinutesAtX(cbScratchPos.x, cbCtx.gameSeconds);
+  if (mins >= 21 * 60 || mins < 5 * 60) add("night");
+
+  // Only when there is genuinely a disabled rig up the road on this very
+  // edge - see cbDisabledAhead. This one leaves the ambient band and goes
+  // out as an ALERT, because it's a real hazard report.
+  if (cbDisabledAhead(truck) > 0) add("breakdownAhead");
 
   return { out, total };
 }
 
 function cbMakeFlavor(graph, truck, cbCtx) {
   const place = cbPlaceContext(graph, truck);
-  if (!place) return null;
+  if (!place || !truck.edge) return null;
   const { out, total } = cbEligibleCategories(graph, truck, cbCtx, place);
   if (!total) return null;
 
@@ -462,105 +608,184 @@ function cbMakeFlavor(graph, truck, cbCtx) {
     if (roll <= 0) { category = entry.name; break; }
   }
 
-  if (category === "firstVisit") {
-    // Only actually marked visited once the line is spoken - a truck
-    // that was eligible but landed on a different category this tick
-    // stays eligible to say it next time instead of silently losing the
-    // moment.
-    cbMarkVisited(truck, place.near);
-    const specific = CB_CITY_FLAVOR[place.near];
-    return { priority: CB_PRIORITY.FLAVOR, handle: place.handle, color: place.color, text: specific || cbFormat(cbPick(CB_LINES.firstVisitGeneric), place) };
+  if (category === "breakdownAhead") {
+    return cbMessage(CB_PRIORITY.ALERT, truck, place, cbFormat(cbPick(CB_EVENT_LINES.BREAKDOWN_AHEAD), place));
   }
-  return {
-    priority: CB_PRIORITY.FLAVOR,
-    handle: place.handle,
-    color: place.color,
-    text: cbFormat(cbPick(CB_LINES[category]), place),
-  };
+  if (category === "firstVisit") {
+    // Only actually marked visited once the line is spoken - a truck that
+    // was eligible but landed on a different category this tick stays
+    // eligible to say it next time instead of silently losing the moment.
+    cbMarkVisited(truck, place.passed);
+    const specific = CB_CITY_FLAVOR[place.passed];
+    return cbMessage(CB_PRIORITY.FLAVOR, truck, place, specific || cbFormat(cbPick(CB_LINES.firstVisitGeneric), place));
+  }
+  return cbMessage(CB_PRIORITY.FLAVOR, truck, place, cbFormat(cbPick(CB_LINES[category]), place));
+}
+
+function cbMessage(priority, truck, place, text) {
+  return { priority, truck, handle: place.handle, color: place.color, text };
 }
 
 // ---------------------------------------------------------------------
 // Queue
 // ---------------------------------------------------------------------
-// Sorted insert, highest priority first, FIFO within a priority. Over
-// budget, the tail (oldest of the lowest priority present) is what goes -
-// so a flood of breakdowns pushes banter out rather than the reverse.
+// Sorted insert, highest priority first, FIFO within a priority. Two caps
+// apply: an overall depth, and a separate one on the ALERT-and-above band
+// so a nationwide drip of breakdowns can never squeeze the banter out
+// entirely - a feed of nothing but red lines is as unreadable as a feed of
+// nothing but weather.
 function cbEnqueue(msg, nowMs) {
   msg.queuedAt = nowMs;
+
+  if (msg.priority >= CB_PRIORITY.ALERT) {
+    let highs = 0;
+    let oldest = -1;
+    for (let i = 0; i < cbQueue.length; i++) {
+      if (cbQueue[i].priority < CB_PRIORITY.ALERT) continue;
+      highs++;
+      if (oldest < 0 || cbQueue[i].queuedAt < cbQueue[oldest].queuedAt) oldest = i;
+    }
+    if (highs >= CB_TUNING.highQueueCap && oldest >= 0) cbQueue.splice(oldest, 1);
+  }
+
   let i = cbQueue.length;
   while (i > 0 && cbQueue[i - 1].priority < msg.priority) i--;
   cbQueue.splice(i, 0, msg);
-  if (cbQueue.length > CB_TUNING.queueCap) cbQueue.length = CB_TUNING.queueCap;
+
+  // Over budget: drop the OLDEST of the lowest-priority band, not simply
+  // the tail. The tail is the newest banter, and throwing that away means
+  // the feed shows only lines that have already gone stale.
+  if (cbQueue.length > CB_TUNING.queueCap) {
+    const lowest = cbQueue[cbQueue.length - 1].priority;
+    let j = cbQueue.length - 1;
+    while (j > 0 && cbQueue[j - 1].priority === lowest) j--;
+    cbQueue.splice(j, 1);
+  }
 }
 
 // Turns one simulation event (BREAKDOWN or DRY_TANK - the only kinds
-// fleet.js emits) into a queued critical line.
+// fleet.js emits) into a queued critical line, if the rig is on screen.
 function cbIngestEvent(graph, evt, viewport, nowMs) {
   const truck = evt.truck;
   if (!truck) return;
   const bank = CB_EVENT_LINES[evt.kind];
   if (!bank) return;
-  if (CB_TUNING.criticalRespectsViewport && !cbIsVisible(graph, truck, viewport)) return;
+  if (!cbIsVisible(graph, truck, viewport)) return;
 
   const place = cbPlaceContext(graph, truck);
   if (!place) return;
-  cbEnqueue({
-    priority: CB_PRIORITY.CRITICAL,
-    handle: place.handle,
-    color: place.color,
-    text: cbFormat(cbPick(bank), place),
-    critical: true,
-  }, nowMs);
+  cbEnqueue(cbMessage(CB_PRIORITY.CRITICAL, truck, place, cbFormat(cbPick(bank), place)), nowMs);
 }
 
 // ---------------------------------------------------------------------
-// Rendering
+// Rendering - a scrollback, newest at the top
 // ---------------------------------------------------------------------
-function cbRender(msg, nowMs, lifetimeMs) {
-  const node = document.createElement("div");
-  node.className = msg.critical ? "cb-msg cb-critical" : "cb-msg";
+function cbPublish(msg, gameSeconds) {
+  const time = cbClock(gameSeconds);
+  if (msg.truck) cbLastMessage.set(msg.truck, { text: msg.text, time, priority: msg.priority });
+  if (!cbFeedEl) return;
 
+  const placeholder = cbFeedEl.querySelector(".cb-empty");
+  if (placeholder) placeholder.remove();
+
+  const node = document.createElement("div");
+  node.className =
+    "cb-msg" +
+    (msg.priority >= CB_PRIORITY.CRITICAL ? " cb-critical" : msg.priority >= CB_PRIORITY.ALERT ? " cb-alert" : "");
+
+  const stamp = document.createElement("span");
+  stamp.className = "cb-time";
+  stamp.textContent = time;
+
+  const body = document.createElement("div");
+  body.className = "cb-body";
   const handle = document.createElement("span");
   handle.className = "cb-handle";
   handle.style.color = msg.color;
-  handle.textContent = msg.handle + ":";
-
+  handle.textContent = msg.handle;
   const text = document.createElement("span");
   text.className = "cb-text";
-  text.textContent = " " + msg.text;
+  text.textContent = msg.text;
+  body.appendChild(handle);
+  body.appendChild(text);
 
-  node.appendChild(handle);
-  node.appendChild(text);
-  cbContainer.appendChild(node);
-  // A critical alert holds twice as long - it's the one you might have
-  // looked away from.
-  const life = msg.critical ? lifetimeMs * 2 : lifetimeMs;
-  cbLive.push({ node, expiresAt: nowMs + life, removeAt: 0 });
+  node.appendChild(stamp);
+  node.appendChild(body);
+  if (msg.truck) cbNodeTruck.set(node, msg.truck);
+
+  // Inserting at the top pushes everything down, which would yank the
+  // ground out from under someone reading further back. If they've
+  // scrolled away from the top, scroll by exactly as much as we just
+  // grew so their place doesn't move.
+  const wasScrolled = cbFeedEl.scrollTop > 2;
+  cbFeedEl.insertBefore(node, cbFeedEl.firstChild);
+  if (wasScrolled) cbFeedEl.scrollTop += node.offsetHeight;
+
+  while (cbFeedEl.childElementCount > CB_TUNING.logCap) cbFeedEl.removeChild(cbFeedEl.lastChild);
+
+  // An alert you weren't looking at is exactly what the badge is for.
+  if (msg.priority >= CB_PRIORITY.ALERT && !(cbIsFeedVisible && cbIsFeedVisible())) {
+    cbUnread++;
+    cbSyncBadge();
+  }
 }
 
-// Fades out anything past its lifetime, drops anything past its fade, and
-// trims the oldest lines whenever the zoom-derived cap has tightened.
-function cbSweep(nowMs, maxVisible) {
-  for (let i = cbLive.length - 1; i >= 0; i--) {
-    const m = cbLive[i];
-    if (m.removeAt) {
-      if (nowMs >= m.removeAt) { m.node.remove(); cbLive.splice(i, 1); }
-    } else if (nowMs >= m.expiresAt) {
-      m.node.classList.add("cb-leaving");
-      m.removeAt = nowMs + 400; // matches the CSS transition
+// ---------------------------------------------------------------------
+// Emission
+// ---------------------------------------------------------------------
+// One line per frame at most, and never two closer together than the
+// zoom-derived global gap. The interesting part is what happens when the
+// head of the queue is an alert: nationwide there are always more alerts
+// than the feed can carry, so an alert that's too soon after the last one
+// - or that would extend a run of them past the streak limit - steps
+// aside for whatever banter is waiting instead. That interleaving is the
+// difference between a feed that reports the country and one that just
+// lists its breakdowns.
+function cbEmitStep(nowMs, cbCtx, t) {
+  // Two ways a queued line stops being worth showing between being written
+  // and reaching the front:
+  //   - it sat long enough to no longer be true (criticals are exempt; a
+  //     breakdown reads the same whenever you see it), or
+  //   - its speaker has driven off the edge of the screen since. Zoomed in
+  //     a rig crosses the frame in a couple of seconds, so checking the
+  //     viewport only at enqueue time is not the same promise as checking
+  //     it here. This is the check that actually guarantees every line in
+  //     the feed came from something you can see.
+  for (let i = cbQueue.length - 1; i >= 0; i--) {
+    const m = cbQueue[i];
+    if (m.priority < CB_PRIORITY.CRITICAL && nowMs - m.queuedAt > CB_TUNING.staleMs) { cbQueue.splice(i, 1); continue; }
+    if (m.truck && !cbIsVisible(cbCtx.graph, m.truck, cbCtx.viewport)) cbQueue.splice(i, 1);
+  }
+  if (!cbQueue.length) return;
+  if (nowMs - cbLastEmitMs < cbLerp(CB_TUNING.globalGapMsOut, CB_TUNING.globalGapMsIn, t)) return;
+
+  let idx = 0;
+  const head = cbQueue[0];
+  if (head.priority >= CB_PRIORITY.ALERT) {
+    const gap =
+      head.priority >= CB_PRIORITY.CRITICAL
+        ? cbLerp(CB_TUNING.criticalGapMsOut, CB_TUNING.criticalGapMsIn, t)
+        : cbLerp(CB_TUNING.alertGapMsOut, CB_TUNING.alertGapMsIn, t);
+    const tooSoon = nowMs - cbLastHighMs < gap;
+    const streaked = cbHighStreak >= Math.round(cbLerp(CB_TUNING.maxHighStreakOut, CB_TUNING.maxHighStreakIn, t));
+    if (tooSoon || streaked) {
+      const alt = cbQueue.findIndex((m) => m.priority < CB_PRIORITY.ALERT);
+      if (alt >= 0) idx = alt;
+      // Nothing else to say: hold the alert back if it's genuinely too
+      // soon, but let a streak through rather than going silent.
+      else if (tooSoon) return;
     }
   }
-  // Count only lines not already on their way out, so a burst doesn't
-  // instantly evict the messages the user is mid-read of.
-  let alive = 0;
-  for (const m of cbLive) if (!m.removeAt) alive++;
-  for (let i = 0; i < cbLive.length && alive > maxVisible; i++) {
-    const m = cbLive[i];
-    if (m.removeAt) continue;
-    m.node.classList.add("cb-leaving");
-    m.removeAt = nowMs + 400;
-    alive--;
+
+  const msg = cbQueue.splice(idx, 1)[0];
+  cbLastEmitMs = nowMs;
+  if (msg.priority >= CB_PRIORITY.ALERT) {
+    cbLastHighMs = nowMs;
+    cbHighStreak++;
+  } else {
+    cbHighStreak = 0;
   }
+  cbPublish(msg, cbCtx.gameSeconds);
 }
 
 // ---------------------------------------------------------------------
@@ -570,15 +795,29 @@ function cbSweep(nowMs, maxVisible) {
 //          showWeather, events }
 // `events` is whatever fleet.js emitted this tick (drained by main.js).
 export function updateCB(nowMs, cbCtx) {
-  if (!cbContainer) return;
+  if (!cbFeedEl) return;
   if (!cbCtx.enabled) {
-    if (cbLive.length || cbQueue.length) resetCB();
+    if (!cbDisabledNotice) {
+      cbQueue.length = 0;
+      cbShowPlaceholder("CB radio is switched off.");
+      cbUnread = 0;
+      cbSyncBadge();
+      cbDisabledNotice = true;
+    }
     return;
+  }
+  if (cbDisabledNotice) {
+    cbShowPlaceholder("Quiet on the channel.");
+    cbDisabledNotice = false;
+  }
+
+  // Looking at the feed clears the badge - that's what "unread" means.
+  if (cbUnread && cbIsFeedVisible && cbIsFeedVisible()) {
+    cbUnread = 0;
+    cbSyncBadge();
   }
 
   const t = cbZoomT(cbCtx.camera);
-  const maxVisible = Math.round(cbLerp(CB_TUNING.maxVisibleOut, CB_TUNING.maxVisibleIn, t));
-  const lifetimeMs = cbLerp(CB_TUNING.lifetimeMsOut, CB_TUNING.lifetimeMsIn, t);
   const flavorInterval = cbLerp(CB_TUNING.flavorIntervalMsOut, CB_TUNING.flavorIntervalMsIn, t);
 
   // 1. Real events first - they're the reason this thing exists.
@@ -586,20 +825,17 @@ export function updateCB(nowMs, cbCtx) {
     for (const evt of cbCtx.events) cbIngestEvent(cbCtx.graph, evt, cbCtx.viewport, nowMs);
   }
 
-  // 2. Traffic-jam watch: a visible truck crawling well under its own
-  // free-flow speed. Outranks banter and deliveries, but not a breakdown.
+  // 2. Traffic watch: a visible truck crawling well under its own
+  // free-flow speed. It only gets to blame a breakdown when there is one
+  // on its edge ahead of it; otherwise it just reports being slow.
   if (nowMs - cbLastJamMs >= CB_TUNING.jamMinGapMs) {
     const stuck = cbFindJam(cbCtx.graph, cbCtx.trucks, cbCtx.viewport);
     if (stuck) {
       cbLastJamMs = nowMs;
       const place = cbPlaceContext(cbCtx.graph, stuck);
       if (place) {
-        cbEnqueue({
-          priority: CB_PRIORITY.ALERT,
-          handle: place.handle,
-          color: place.color,
-          text: cbFormat(cbPick(CB_EVENT_LINES.JAM), place),
-        }, nowMs);
+        const bank = cbDisabledAhead(stuck) > 0 ? CB_EVENT_LINES.JAM_BREAKDOWN : CB_EVENT_LINES.JAM;
+        cbEnqueue(cbMessage(CB_PRIORITY.ALERT, stuck, place, cbFormat(cbPick(bank), place)), nowMs);
       }
     }
   }
@@ -622,20 +858,5 @@ export function updateCB(nowMs, cbCtx) {
     }
   }
 
-  // 4. Emit at most one line per frame, gated by that priority's own
-  // floor. Because the queue is priority-sorted, a critical alert waiting
-  // behind banter gets to use CRITICAL's much shorter gap immediately.
-  // Anything that sat too long to still be true is dropped rather than
-  // shown late (critical alerts excepted - see CB_TUNING.staleMs).
-  while (cbQueue.length) {
-    const next = cbQueue[0];
-    if (!next.critical && nowMs - next.queuedAt > CB_TUNING.staleMs) { cbQueue.shift(); continue; }
-    if (nowMs - cbLastEmitMs < CB_TUNING.minGapMs[next.priority]) break;
-    cbQueue.shift();
-    cbLastEmitMs = nowMs;
-    cbRender(next, nowMs, lifetimeMs);
-    break; // one line per frame, so a backlog still reads as a conversation
-  }
-
-  cbSweep(nowMs, maxVisible);
+  cbEmitStep(nowMs, cbCtx, t);
 }

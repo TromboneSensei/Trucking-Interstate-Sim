@@ -72,7 +72,8 @@ const el = {
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
   dailyDigest: document.getElementById("daily-digest"),
-  cbRadio: document.getElementById("cb-radio"),
+  cbFeed: document.getElementById("tab-cb"),
+  cbUnread: document.getElementById("cb-unread"),
   settingCBRadio: document.getElementById("setting-cb-radio"),
 };
 
@@ -595,7 +596,16 @@ function bootSim(newSettings) {
 // ---------------------------------------------------------------------
 // UI wiring + main loop
 // ---------------------------------------------------------------------
-initCB(el.cbRadio);
+// The feed lives in its own tab now, so it needs to know when it's the
+// panel on screen (to clear its unread badge) and what to do when a line
+// is tapped: fly the camera to the rig that said it and open its page,
+// which is exactly followTruck.
+initCB({
+  feedEl: el.cbFeed,
+  badgeEl: el.cbUnread,
+  onSelectTruck: followTruck,
+  isFeedVisible: () => visibleTab() === "cb",
+});
 initUI({
   onSelectTruck: followTruck,
   onToggleControl: toggleControl,
@@ -607,6 +617,11 @@ initUI({
   // force the periodic refresh to fire on the very next frame rather than
   // leaving it stale (or blank) for up to 400ms.
   onVisibleTabChange: () => { lastUiRefresh = 0; },
+  // Closing the detail sheet ends the inspection, so stop live-refreshing
+  // a panel that isn't on screen. The camera deliberately keeps following
+  // - browsing another tab while a rig stays centred is the point of the
+  // sheet being a detour rather than a tab; Exit Follow is how you let go.
+  onCloseDetails: () => { state.detailsView = null; },
 });
 bootSim(DEFAULT_SETTINGS);
 

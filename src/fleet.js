@@ -141,6 +141,17 @@ function emitFleetEvent(kind, truck) {
   fleetEvents.push({ kind, truck });
 }
 
+// The most recent tick's edgeId -> sorted array of disabled trucks' `.s`
+// positions, kept so callers outside the sim (cb.js, asking whether a
+// truck is actually creeping past a breakdown before it says so on the
+// radio) can answer that in a map lookup instead of scanning the fleet.
+// Same object the tick used, not a copy - read-only by convention.
+let lastDisabledByEdge = new Map();
+
+export function disabledPositionsOnEdge(edge) {
+  return edge ? lastDisabledByEdge.get(edgeId(edge)) : undefined;
+}
+
 // Returns everything queued since the last call and empties the queue.
 export function drainFleetEvents() {
   if (!fleetEvents.length) return NO_EVENTS;
@@ -1146,6 +1157,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
   const disabledByEdge = new Map();
   const laneGroups = buildLaneGroups(trucks, disabledByEdge);
+  lastDisabledByEdge = disabledByEdge;
 
   // Precomputed once per tick, before Phase 1 mutates anything: each
   // truck's leader (the next entry in its lane array, or null), from the

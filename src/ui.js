@@ -6,6 +6,7 @@
 "use strict";
 import { travelDirectionLabel } from "./geo.js";
 import { estimatedRangeMiles } from "./fleet.js";
+import { cbLastMessageFor } from "./cb.js";
 
 const el = {
   sheet: document.getElementById("bottom-sheet"),
@@ -14,7 +15,9 @@ const el = {
   overview: document.getElementById("tab-overview"),
   rankings: document.getElementById("tab-rankings"),
   economy: document.getElementById("tab-economy"),
-  detailsEmpty: document.getElementById("details-empty"),
+  detailSheet: document.getElementById("detail-sheet"),
+  detailBack: document.getElementById("detail-back"),
+  detailBarTitle: document.getElementById("detail-bar-title"),
   detailsData: document.getElementById("details-data"),
 };
 
@@ -26,6 +29,9 @@ let onToggleControl = null;
 // now, so it needs to know to render the newly-revealed one right away
 // instead of leaving it blank until the next periodic tick.
 let onVisibleTabChange = null;
+// Fired when the detail sheet is dismissed, so main.js can stop pinning
+// the camera to whatever unit was being inspected.
+let onCloseDetails = null;
 let dispatchDrill = null; // null = the Dispatch summary cards; "corridors" | "interstates" = drilled into that ranking
 let rankingsDrillKey = null; // null = the Rankings leader cards; a key (possibly "city:"-prefixed) = drilled into that ranking
 let selectedCityName = null; // set once a city is picked out of a city ranking - replaces the Rankings tab with that city's full page
@@ -37,6 +43,7 @@ export function initUI(callbacks) {
   onToggleControl = callbacks.onToggleControl;
   onSpotlightCargo = callbacks.onSpotlightCargo;
   onVisibleTabChange = callbacks.onVisibleTabChange;
+  onCloseDetails = callbacks.onCloseDetails;
 
   // Tapping a cargo row spotlights that cargo type on the map. Delegated
   // like the other panels, since the Economy tab is rebuilt wholesale on
@@ -100,6 +107,8 @@ export function initUI(callbacks) {
     // starting mid-scroll instead of at its own top.
     el.rankings.scrollTop = 0;
   });
+
+  el.detailBack.addEventListener("click", () => closeDetailSheet());
 
   el.detailsData.addEventListener("click", (e) => {
     if (e.target.closest("[data-control-toggle]")) onToggleControl && onToggleControl();
@@ -208,8 +217,7 @@ export function resetUIState() {
   selectedCityName = null;
   lastTrucks = [];
   lastGraph = null;
-  el.detailsEmpty.classList.remove("hidden");
-  el.detailsData.classList.add("hidden");
+  closeDetailSheet();
   el.detailsData.innerHTML = "";
 }
 
@@ -219,13 +227,20 @@ export function resetUIState() {
 // renders in the app. Also tracks whether the sheet is collapsed, since a
 // minimized sheet shows no panel at all.
 let activeTabName = "overview";
+let detailOpen = false;
+
+// What main.js should spend a refresh on. "details" whenever the detail
+// sheet is covering the tabs, since the tab underneath it isn't being
+// looked at - the sheet is a detour over the tabs, not one of them.
 export function visibleTab() {
-  return el.sheet.classList.contains("minimized") ? null : activeTabName;
+  if (el.sheet.classList.contains("minimized")) return null;
+  return detailOpen ? "details" : activeTabName;
 }
 
 function openTab(name) {
   el.sheet.classList.remove("minimized");
   syncSheetVars(); // tapping a tab can un-minimize, so the float anchors have to follow
+  closeDetailSheet(); // picking a tab is also how you back out of a unit page
   activeTabName = name;
   if (onVisibleTabChange) onVisibleTabChange();
   el.tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -233,11 +248,27 @@ function openTab(name) {
   document.getElementById(`tab-${name}`).classList.add("active");
 }
 
-// User explicitly tapped a truck/city: switch to the Details tab and render.
+function closeDetailSheet() {
+  if (!detailOpen) return;
+  detailOpen = false;
+  el.detailSheet.classList.add("hidden");
+  if (onCloseDetails) onCloseDetails();
+  if (onVisibleTabChange) onVisibleTabChange();
+}
+
+// User explicitly tapped a truck/city (on the map, in a ranking, or on a
+// CB message): slide the detail sheet over whatever tab is open. Not a
+// tab switch - the tab bar keeps whatever was selected, and Back returns
+// straight to it.
 export function openDetailsFor(entity, kind, isControlled, trucks, graph) {
-  openTab("details");
+  el.sheet.classList.remove("minimized");
+  syncSheetVars();
+  detailOpen = true;
+  el.detailSheet.classList.remove("hidden");
+  el.detailsData.scrollTop = 0;
   if (kind === "truck") renderTruckDetails(entity, isControlled);
   else renderCityDetails(entity, graph, trucks);
+  if (onVisibleTabChange) onVisibleTabChange();
 }
 
 // Per-frame refresh of the followed truck's numbers - does NOT switch
@@ -791,8 +822,7 @@ function currentRoadDetail(truck) {
 }
 
 function renderTruckDetails(truck, isControlled) {
-  el.detailsEmpty.classList.add("hidden");
-  el.detailsData.classList.remove("hidden");
+  el.detailBarTitle.textContent = "Unit";
   const archetype = truck.driver.getArchetype();
   const etaMiles = etaMilesOf(truck);
   const roadDetail = currentRoadDetail(truck);
@@ -812,6 +842,18 @@ function renderTruckDetails(truck, isControlled) {
   const fuelSub = truck.refuelTarget != null
     ? `${Math.round(truck.fuel)}% &uarr; filling to ${Math.round(truck.refuelTarget)}%`
     : `${Math.round(truck.fuel)}% · ~${range.toLocaleString()} mi range`;
+
+  // The last thing this driver actually said on the CB, if anything -
+  // ties the handle scrolling past in the feed to the unit being
+  // inspected. Omitted entirely for a truck that's never transmitted
+  // rather than showing an empty placeholder.
+  const lastCB = cbLastMessageFor(truck);
+  const cbBlock = lastCB
+    ? `<div class="detail-cb">
+        <div class="detail-cb-label">Last on the CB &bull; <span class="detail-cb-time">${lastCB.time}</span></div>
+        <div class="detail-cb-text">&ldquo;${lastCB.text}&rdquo;</div>
+      </div>`
+    : "";
 
   const traitChips = [];
   if (truck.driver.isNightOwl) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);">NIGHT OWL</span>`);
@@ -833,6 +875,7 @@ function renderTruckDetails(truck, isControlled) {
     ${roadDetail ? `<div class="detail-sub" style="margin-bottom:10px;color:var(--caution);font-size:1.6rem;font-weight:700;">${roadDetail}</div>` : `<div style="margin-bottom:10px;"></div>`}
     ${controlBlock}
     ${isControlled ? `<div class="detail-sub" style="margin-bottom:10px;">Junction calls and load pickups are yours - the sim pauses and waits for you at the next fork, and at the load board when this run ends.</div>` : ""}
+    ${cbBlock}
     <div class="section-label">Condition</div>
     ${conditionBar("Fuel", fuelSub, truck.fuel, 100, fuelColor)}
     ${conditionBar("Fatigue", `${Math.round(truck.fatigue)}%`, truck.fatigue, 100, fatigueColor)}
@@ -856,8 +899,7 @@ function renderTruckDetails(truck, isControlled) {
 function renderCityDetails(city, graph, trucks) {
   lastTrucks = trucks;
   lastGraph = graph;
-  el.detailsEmpty.classList.add("hidden");
-  el.detailsData.classList.remove("hidden");
+  el.detailBarTitle.textContent = "City";
   el.detailsData.innerHTML = cityDetailsHTML(city, graph, trucks);
 }
 

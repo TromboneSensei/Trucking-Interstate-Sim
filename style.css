@@ -391,7 +391,7 @@ html, body {
   cursor: pointer;
 }
 .tab-btn.active { color: var(--caution); border-bottom-color: var(--caution); }
-.tab-content { flex: 1; min-height: 0; overflow: hidden; }
+.tab-content { flex: 1; min-height: 0; overflow: hidden; position: relative; }
 .content-panel { display: none; height: 100%; overflow-y: auto; padding: 12px; }
 .content-panel.active { display: block; }
 .placeholder-text { color: var(--dim); font-style: italic; text-align: center; padding: 24px 0; }
@@ -639,61 +639,141 @@ html, body {
 }
 
 /* ---------------------------------------------------------------------
-   CB radio - the live chatter feed. Bottom RIGHT, mirroring the daily
-   digest's bottom-left slot so the two never fight for the same corner,
-   and anchored to --sheet-visible-h like everything else that floats
-   above the sheet. pointer-events: none throughout, since this sits over
-   the map and must never eat a tap meant for a truck.
-
-   No panel background: individual messages carry their own so the feed
-   reads as text over the map rather than a box parked on it, and an
-   empty feed is completely invisible.
+   CB radio - the live chatter feed, now a tab in the sheet rather than a
+   panel floating over the map (it ate far too much of a phone screen
+   there). Newest at the top, so the thing that just happened is the thing
+   you're already looking at, and the whole list is a scrollback you can
+   pull down through rather than three lines that evaporate.
 --------------------------------------------------------------------- */
-#cb-radio {
-  position: fixed;
-  right: max(10px, env(safe-area-inset-right));
-  bottom: calc(var(--sheet-visible-h) + 14px);
-  z-index: 7;
-  width: min(62vw, 260px);
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  pointer-events: none;
-}
+#tab-cb { padding: 8px 10px; }
 .cb-msg {
-  max-width: 100%;
-  background: rgba(18, 22, 28, 0.82);
-  border-left: 2px solid var(--line);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 9px;
+  margin-bottom: 5px;
+  background: var(--panel-strong);
+  border-left: 3px solid var(--line);
   border-radius: 2px;
-  padding: 4px 8px;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  line-height: 1.3;
-  color: var(--dim);
-  opacity: 1;
-  transition: opacity 0.4s linear;
+  cursor: pointer;
   animation: cb-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-/* Set by cb.js one fade-length before the node is actually removed. */
-.cb-msg.cb-leaving { opacity: 0; }
+.cb-msg:active { background: #2a3441; }
 @keyframes cb-in {
-  from { opacity: 0; transform: translateX(10px); }
+  from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: none; }
+}
+.cb-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
+}
+.cb-body { flex: 1; min-width: 0; }
+.cb-handle {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.68rem;
+  display: block;
+}
+.cb-text {
+  display: block;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  color: var(--dim);
 }
 /* A breakdown or a dry tank - the whole reason the feed is worth
    watching, so it gets the hazard accent and brighter body text. */
-.cb-msg.cb-critical {
-  border-left-color: var(--stop);
-  background: rgba(48, 20, 22, 0.86);
-  color: var(--ink);
+.cb-msg.cb-critical { border-left-color: var(--stop); background: rgba(58, 26, 28, 0.72); }
+.cb-msg.cb-critical .cb-text { color: var(--ink); }
+/* A jam / breakdown-ahead warning - real, but not this truck's own
+   emergency, so it sits a step below critical. */
+.cb-msg.cb-alert { border-left-color: var(--caution); }
+.cb-msg.cb-alert .cb-text { color: var(--ink); }
+.cb-empty {
+  color: var(--dim);
+  font-style: italic;
+  text-align: center;
+  padding: 22px 8px;
+  font-size: 0.78rem;
 }
-.cb-handle {
-  font-weight: 700;
+
+/* Unread-critical count on the CB tab, so a breakdown still gets noticed
+   while you're reading another tab. */
+.tab-badge {
+  display: inline-block;
+  min-width: 15px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--stop);
+  color: #fff;
   font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-size: 0.58rem;
+  line-height: 15px;
+  vertical-align: middle;
 }
-.cb-text { color: inherit; }
+
+/* ---------------------------------------------------------------------
+   Detail sheet - a truck's or a city's page. Deliberately NOT a tab: it
+   slides over whatever tab is open and is dismissed with Back, so
+   inspecting one unit is a detour rather than a permanent slot in the
+   tab bar competing with the four things you actually browse.
+--------------------------------------------------------------------- */
+#detail-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes detail-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+#detail-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+#detail-back { background: var(--panel-strong); color: var(--ink); padding: 6px 12px; }
+#detail-bar-title {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+#details-data { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+
+/* The truck's own last transmission, echoed on its detail page so the
+   handle in the feed and the unit you're inspecting are visibly the same
+   driver. */
+.detail-cb {
+  margin: 10px 0 2px;
+  padding: 8px 10px;
+  background: var(--panel-strong);
+  border-left: 3px solid var(--caution);
+  border-radius: 2px;
+}
+.detail-cb-label {
+  font-family: var(--font-body);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 3px;
+}
+.detail-cb-text { font-size: 0.78rem; line-height: 1.35; color: var(--ink); font-style: italic; }
+.detail-cb-time { font-family: var(--font-mono); font-size: 0.62rem; color: var(--dim); }
 
 /* Daily digest - a end-of-day dispatch summary that slides in at
    midnight. Deliberately corner-anchored rather than modal: it reports,
