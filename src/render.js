@@ -1646,5 +1646,16 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   }
 
   ctx.restore();
-  return { congestedSegments: congestion ? congestion.congestedCount : 0 };
+  // The world-space box this frame actually covered, handed back so
+  // anything outside the renderer that needs to ask "is this on screen?"
+  // (cb.js) uses the same numbers rather than keeping its own copy of the
+  // camera math to drift out of sync. In FOLLOW_NAV the true region is a
+  // rotated parallelogram, so this is the bounding box of the padded
+  // circle used above - conservative, never too small.
+  return {
+    congestedSegments: congestion ? congestion.congestedCount : 0,
+    viewport: nav
+      ? { minX: cullCx - cullRadius, maxX: cullCx + cullRadius, minY: cullCy - cullRadius, maxY: cullCy + cullRadius }
+      : { minX: cullMinX, maxX: cullMaxX, minY: cullMinY, maxY: cullMaxY },
+  };
 }

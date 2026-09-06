@@ -1,11 +1,12 @@
 // main.js - boot + the single game loop. Ties the graph, fleet
 // simulation, camera, renderer, and dashboard together.
 import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
-import { spawnFleet, updateFleet, BASE_TIME_SCALE } from "./fleet.js";
+import { spawnFleet, updateFleet, drainFleetEvents, BASE_TIME_SCALE } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos, truckPose } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
 import { chooseOffer } from "./economy.js";
+import { initCB, resetCB, updateCB } from "./cb.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
@@ -31,6 +32,7 @@ const DEFAULT_SETTINGS = {
   showCongestion: true,
   showWeather: false,
   showRushHour: true,
+  showCBRadio: true,
 };
 
 const canvas = document.getElementById("map");
@@ -70,6 +72,8 @@ const el = {
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
   dailyDigest: document.getElementById("daily-digest"),
+  cbRadio: document.getElementById("cb-radio"),
+  settingCBRadio: document.getElementById("setting-cb-radio"),
 };
 
 window.addEventListener("error", (e) => {
@@ -486,6 +490,7 @@ function openSettings() {
   el.settingCongestion.checked = settings.showCongestion;
   el.settingWeather.checked = settings.showWeather;
   el.settingRushHour.checked = settings.showRushHour;
+  el.settingCBRadio.checked = settings.showCBRadio;
   el.settingsOverlay.classList.remove("hidden");
 }
 
@@ -516,6 +521,7 @@ el.btnSettingsApply.addEventListener("click", () => {
     showCongestion: el.settingCongestion.checked,
     showWeather: el.settingWeather.checked,
     showRushHour: el.settingRushHour.checked,
+    showCBRadio: el.settingCBRadio.checked,
   };
   closeSettings();
   bootSim(newSettings);
@@ -536,6 +542,10 @@ function bootSim(newSettings) {
   lastEconSampleMin = -Infinity;
   dayIndex = Math.floor(settings.startSeconds / 86400);
   hideDigest();
+  // The CB feed and the sim's event queue both hold references to trucks
+  // from the fleet about to be replaced, so both are emptied here.
+  resetCB();
+  drainFleetEvents();
   trucks = spawnFleet(graph, settings.fleetSize);
   truckById = new Map(trucks.map((t) => [t.id, t]));
   // Must come AFTER the fleet exists: it snapshots per-truck earnings to
@@ -585,6 +595,7 @@ function bootSim(newSettings) {
 // ---------------------------------------------------------------------
 // UI wiring + main loop
 // ---------------------------------------------------------------------
+initCB(el.cbRadio);
 initUI({
   onSelectTruck: followTruck,
   onToggleControl: toggleControl,
@@ -703,6 +714,24 @@ function frame(now) {
     });
     lastCongestedSegments = frameStats.congestedSegments;
     el.clock.textContent = formatClock(state.gameSeconds);
+
+    // CB radio. Runs after drawFrame so it can reuse that frame's own
+    // cull box as its definition of "on screen", and is handed whatever
+    // the sim emitted this tick (breakdowns, dry tanks) to rank against
+    // its ambient chatter. Draining unconditionally - even with the feed
+    // switched off - keeps fleet.js's bounded queue from sitting full of
+    // stale trucks.
+    updateCB(now, {
+      enabled: settings.showCBRadio,
+      graph,
+      trucks,
+      viewport: frameStats.viewport,
+      camera,
+      gameSeconds: state.gameSeconds,
+      weather,
+      showWeather: settings.showWeather,
+      events: drainFleetEvents(),
+    });
 
     // Whatever the Unit tab is currently showing refreshes live - a
     // followed truck's numbers every frame (speed/odometer/ETA are worth

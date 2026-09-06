@@ -126,6 +126,29 @@ const RUBBERNECK_WORST_MULT = 0.45; // cruise-speed multiplier right alongside a
 // How many loads a parked truck gets to choose between.
 const OFFER_COUNT = 3;
 
+// --- simulation event feed -------------------------------------------
+// Notable things that happened this tick, for anything outside the sim
+// that wants to react to them (currently the CB radio). Deliberately a
+// drained queue rather than a callback: fleet.js stays a pure function of
+// its inputs with no reference to the UI, and the headless harnesses -
+// which never drain this - are unaffected beyond the bounded array below.
+const FLEET_EVENT_CAP = 64; // hard cap so an undrained queue can't grow without bound
+const fleetEvents = [];
+const NO_EVENTS = [];
+
+function emitFleetEvent(kind, truck) {
+  if (fleetEvents.length >= FLEET_EVENT_CAP) fleetEvents.shift();
+  fleetEvents.push({ kind, truck });
+}
+
+// Returns everything queued since the last call and empties the queue.
+export function drainFleetEvents() {
+  if (!fleetEvents.length) return NO_EVENTS;
+  const out = fleetEvents.slice();
+  fleetEvents.length = 0;
+  return out;
+}
+
 // World-space length of an edge divided by its real mileage - varies
 // slightly edge to edge (geographic projection), so gap thresholds
 // derived from it are computed per-edge rather than with one global
@@ -1201,6 +1224,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
       truck.earnings -= FUEL_TOW_COST;
       truck.dayFuelSpend += FUEL_TOW_COST; // roadside assistance is part of the day's fuel bill
       truck.dayBreakdowns++;
+      emitFleetEvent("DRY_TANK", truck);
       disableTruck(truck, "FUEL", FUEL_DISABLED_SERVICE_MIN_HOURS + rnd() * (FUEL_DISABLED_SERVICE_MAX_HOURS - FUEL_DISABLED_SERVICE_MIN_HOURS));
       continue;
     }
@@ -1208,6 +1232,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles;
     if (rnd() < p) {
       truck.dayBreakdowns++;
+      emitFleetEvent("BREAKDOWN", truck);
       disableTruck(truck, "BREAKDOWN", BREAKDOWN_REPAIR_MIN_HOURS + rnd() * (BREAKDOWN_REPAIR_MAX_HOURS - BREAKDOWN_REPAIR_MIN_HOURS));
     }
   }

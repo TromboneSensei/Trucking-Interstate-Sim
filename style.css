@@ -638,6 +638,63 @@ html, body {
   flex-shrink: 0;
 }
 
+/* ---------------------------------------------------------------------
+   CB radio - the live chatter feed. Bottom RIGHT, mirroring the daily
+   digest's bottom-left slot so the two never fight for the same corner,
+   and anchored to --sheet-visible-h like everything else that floats
+   above the sheet. pointer-events: none throughout, since this sits over
+   the map and must never eat a tap meant for a truck.
+
+   No panel background: individual messages carry their own so the feed
+   reads as text over the map rather than a box parked on it, and an
+   empty feed is completely invisible.
+--------------------------------------------------------------------- */
+#cb-radio {
+  position: fixed;
+  right: max(10px, env(safe-area-inset-right));
+  bottom: calc(var(--sheet-visible-h) + 14px);
+  z-index: 7;
+  width: min(62vw, 260px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  pointer-events: none;
+}
+.cb-msg {
+  max-width: 100%;
+  background: rgba(18, 22, 28, 0.82);
+  border-left: 2px solid var(--line);
+  border-radius: 2px;
+  padding: 4px 8px;
+  font-family: var(--font-body);
+  font-size: 0.7rem;
+  line-height: 1.3;
+  color: var(--dim);
+  opacity: 1;
+  transition: opacity 0.4s linear;
+  animation: cb-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+/* Set by cb.js one fade-length before the node is actually removed. */
+.cb-msg.cb-leaving { opacity: 0; }
+@keyframes cb-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+/* A breakdown or a dry tank - the whole reason the feed is worth
+   watching, so it gets the hazard accent and brighter body text. */
+.cb-msg.cb-critical {
+  border-left-color: var(--stop);
+  background: rgba(48, 20, 22, 0.86);
+  color: var(--ink);
+}
+.cb-handle {
+  font-weight: 700;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+}
+.cb-text { color: inherit; }
+
 /* Daily digest - a end-of-day dispatch summary that slides in at
    midnight. Deliberately corner-anchored rather than modal: it reports,
    it doesn't interrupt, and the sim keeps running behind it. */
