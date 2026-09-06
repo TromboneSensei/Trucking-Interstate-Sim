@@ -155,6 +155,12 @@ const state = {
   contractTimer: 0,
   // Cargo-type id to spotlight on the map (everything else dims), or null.
   spotlightCargo: null,
+  // Set by tapping a corridor/highway row in the Dispatch drilldown - a set
+  // of edgeList indices to highlight (render.js's drawRouteSpotlight) while
+  // the camera flies to fit them (camera.frameBox). Cleared the moment the
+  // camera leaves FRAME mode (dragging the map, or following a truck), same
+  // spirit as followedTruckId's own drag-resync below.
+  spotlightRoute: null,
 };
 
 // Records one economy sample when enough game-time has passed. Cheap
@@ -307,6 +313,46 @@ el.btnNavToggle.addEventListener("click", () => {
   camera.mode = toNav ? "FOLLOW_NAV" : "FOLLOW";
   el.btnNavToggle.classList.toggle("active", toNav);
 });
+
+// ---------------------------------------------------------------------
+// Corridor / highway spotlight - tapping a "Busiest Corridor" or "Busiest
+// Interstate" row in the Dispatch drilldown (ui.js) flies the camera to fit
+// that segment (or the whole route) and dims everything that isn't part of
+// it, the same tap-to-focus idea as a CB line's tap-to-follow. Unlike
+// tap-to-follow this targets a fixed region of the map, not a moving truck,
+// so it rides camera.js's one-shot FRAME mode rather than FOLLOW.
+//
+// unfollow() runs first in both: without it, a truck being followed would
+// leave camera.mode at FOLLOW for one more frame after frameBox() sets it to
+// FRAME (frameBox always wins, since it runs after), and the very next tick's
+// isFollowMode resync (below, in frame()) would see mode!=FOLLOW while
+// state.followedTruckId is still set and treat it as "camera fell off the
+// truck" - clearing state via unfollow() a second time, which is harmless,
+// but only by accident. Calling it here ourselves makes the transition
+// explicit instead of relying on next-frame cleanup to paper over it.
+function frameAndHighlightCorridor(rec) {
+  const idx = edgeList.indexByEdge.get(rec.edge);
+  if (idx == null) return;
+  unfollow();
+  const e = edgeList.edges[idx];
+  camera.frameBox(e.minX, e.minY, e.maxX, e.maxY);
+  state.spotlightRoute = { indices: new Set([idx]) };
+}
+
+function frameAndHighlightHighway(rec) {
+  const indices = new Set();
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  edgeList.edges.forEach((e, i) => {
+    if (e.kind !== "interstate" || e.baseRoute !== rec.route) return;
+    indices.add(i);
+    minX = Math.min(minX, e.minX); maxX = Math.max(maxX, e.maxX);
+    minY = Math.min(minY, e.minY); maxY = Math.max(maxY, e.maxY);
+  });
+  if (!indices.size) return;
+  unfollow();
+  camera.frameBox(minX, minY, maxX, maxY);
+  state.spotlightRoute = { indices };
+}
 
 function toggleControl() {
   const followed = getFollowedTruck();
@@ -564,6 +610,7 @@ function bootSim(newSettings) {
   state.detailsView = null;
   state.decisionTruck = null;
   state.decisionTimer = 0;
+  state.spotlightRoute = null;
 
   el.timeSlider.value = String(settings.defaultTimeScale);
   el.timeReadout.textContent = settings.defaultTimeScale.toFixed(1) + "x";
@@ -622,6 +669,8 @@ initUI({
   // - browsing another tab while a rig stays centred is the point of the
   // sheet being a detour rather than a tab; Exit Follow is how you let go.
   onCloseDetails: () => { state.detailsView = null; },
+  onSelectCorridor: frameAndHighlightCorridor,
+  onSelectHighway: frameAndHighlightHighway,
 });
 bootSim(DEFAULT_SETTINGS);
 
@@ -705,6 +754,11 @@ function frame(now) {
       // VIEW buttons showing for a camera that's no longer following.
       unfollow();
     }
+    // Same idea as the followedTruckId resync just above, for the corridor/
+    // highway spotlight: the moment the camera leaves FRAME mode - dragging
+    // the map, or a fresh followTruck()/frameBox() call moving it elsewhere -
+    // the highlighted-edge set is stale and should stop dimming the map.
+    if (camera.mode !== "FRAME" && state.spotlightRoute) state.spotlightRoute = null;
     camera.update();
 
     parkedCounts.clear();
@@ -723,6 +777,7 @@ function frame(now) {
       showWeather: settings.showWeather,
       weather,
       spotlightCargo: state.spotlightCargo,
+      spotlightRoute: state.spotlightRoute,
       parkedCounts,
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
@@ -740,6 +795,7 @@ function frame(now) {
       enabled: settings.showCBRadio,
       graph,
       trucks,
+      visibleTrucks: frameStats.visibleTrucks,
       viewport: frameStats.viewport,
       camera,
       gameSeconds: state.gameSeconds,

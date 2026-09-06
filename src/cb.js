@@ -73,7 +73,7 @@ export const CB_TUNING = {
   // back. Once hit, the next line is forced to come from the ambient band
   // if one is waiting - this is what keeps "important" and "random" mixed
   // together nationwide instead of alternating between floods and silence.
-  maxHighStreakOut: 1,
+  maxHighStreakOut: 2,
   maxHighStreakIn: 4,
 
   // --- queue
@@ -85,11 +85,25 @@ export const CB_TUNING = {
   // stale enough to be misleading. Critical alerts are exempt - a
   // breakdown is still a breakdown whenever you read it.
   staleMs: 3500,
+  // ALERT-tier lines (JAM/JAM_BREAKDOWN/BREAKDOWN_AHEAD) get their own,
+  // longer staleness floor. They're already rate-limited by
+  // alertGapMsOut/criticalGapMsOut above (up to 8000ms zoomed out) and by
+  // the streak limiter, which can legitimately hold one back for longer
+  // than staleMs while it waits its turn - without a separate floor here,
+  // the freshness check would delete a still-true alert before it ever got
+  // a turn, which is a bug (it's stale-BY-THE-CLOCK, not stale-as-in-no-
+  // longer-true). Sized comfortably above the largest of those gaps.
+  staleMsHigh: 9000,
   logCap: 40, // messages kept in the scrollback before the oldest is dropped
 
   // --- content mix
   jamMinGapMs: 14000, // a jam persists; it doesn't need re-reporting every few seconds
-  jamSlowdownFraction: 0.45, // below this share of free-flow speed counts as stuck
+  // Below this share of free-flow speed counts as stuck. Kept comfortably
+  // under 0.45 (which also caught routine deceleration cbFindJam's own
+  // arrivalBraking exclusion doesn't cover, e.g. easing through a tight
+  // junction or a lane change) so a JAM report means genuinely stuck, not
+  // "slowed down a little."
+  jamSlowdownFraction: 0.35,
   // How far back from a city a truck may still say it "just came through"
   // there. Capped at half the edge as well, so on a short hop the claim
   // expires before the truck is closer to the next town than the last.
@@ -123,8 +137,11 @@ export const CB_TUNING = {
   // How many cities cbVisited remembers per truck before forgetting its
   // oldest one - a long-lived truck passes through far more towns over a
   // session than are worth holding onto just to gate one flavor line, so
-  // this stays a rolling window rather than full history.
-  visitedMemory: 16,
+  // this stays a rolling window rather than full history. Wide enough that
+  // a genuine cross-country haul (which can pass through several dozen real
+  // towns) doesn't cycle back around and re-claim "first time here" on a
+  // city it already announced earlier in the same trip.
+  visitedMemory: 64,
 };
 
 // ---------------------------------------------------------------------
@@ -511,21 +528,28 @@ function cbDisabledAhead(truck) {
   return -1;
 }
 
-// Finds a truck that's both on screen and in a state worth talking from,
-// by random sampling rather than scanning - at 10000 trucks a full filter
-// pass every few seconds would cost more than everything else this module
-// does put together.
-function cbFindSpeaker(graph, trucks, viewport) {
-  if (!trucks.length) return null;
+// Finds a truck that's both on screen and in a state worth talking from, by
+// random sampling rather than scanning - at 10000 trucks a full filter pass
+// every few seconds would cost more than everything else this module does
+// put together. `pool` is render.js's own list of trucks that survived this
+// frame's cull test (drawFrame's return value, handed in as cbCtx.
+// visibleTrucks) - NOT the whole fleet. Sampling the whole fleet was the
+// original approach here, and it quietly starved the feed exactly when it
+// should be busiest: zoomed into a corridor with a handful of trucks on
+// screen out of a 10000-truck fleet, a 40-draw sample against the full
+// array is a near-guaranteed miss every attempt. Sampling the pre-culled
+// pool instead means every draw is already a valid candidate location-wise;
+// only the state filters below (disabled/parked/etc.) can still miss.
+function cbFindSpeaker(pool) {
+  if (!pool.length) return null;
   for (let i = 0; i < CB_TUNING.speakerSampleAttempts; i++) {
-    const truck = trucks[Math.floor(Math.random() * trucks.length)];
+    const truck = pool[Math.floor(Math.random() * pool.length)];
     // A truck sitting broken down has its own (critical) line already;
     // don't let it also chat about the scenery. Parked trucks are skipped
     // too: every ambient line names the road it's rolling on, and a truck
     // at a dock has no route or heading to put in one.
     if (truck.disabledHoursLeft > 0) continue;
     if (!truck.edge) continue;
-    if (!cbIsVisible(graph, truck, viewport)) continue;
     return truck;
   }
   return null;
@@ -535,15 +559,15 @@ function cbFindSpeaker(graph, trucks, viewport) {
 // be doing on an open road, and not merely braking for its own exit.
 // `freeFlowSpeed` is captured by fleet.js before rush hour, rubbernecking
 // and car-following are applied, so this is the same "is it congestion?"
-// question the map's heat overlay asks, just per truck.
-function cbFindJam(graph, trucks, viewport) {
-  if (!trucks.length) return null;
+// question the map's heat overlay asks, just per truck. `pool` - see
+// cbFindSpeaker above.
+function cbFindJam(pool) {
+  if (!pool.length) return null;
   for (let i = 0; i < CB_TUNING.speakerSampleAttempts; i++) {
-    const truck = trucks[Math.floor(Math.random() * trucks.length)];
+    const truck = pool[Math.floor(Math.random() * pool.length)];
     if (!truck.edge || truck.disabledHoursLeft > 0 || truck.arrivalBraking) continue;
     if (!(truck.freeFlowSpeed > 0)) continue;
     if (truck.speed / truck.freeFlowSpeed > CB_TUNING.jamSlowdownFraction) continue;
-    if (!cbIsVisible(graph, truck, viewport)) continue;
     return truck;
   }
   return null;
@@ -753,7 +777,14 @@ function cbEmitStep(nowMs, cbCtx, t) {
   //     the feed came from something you can see.
   for (let i = cbQueue.length - 1; i >= 0; i--) {
     const m = cbQueue[i];
-    if (m.priority < CB_PRIORITY.CRITICAL && nowMs - m.queuedAt > CB_TUNING.staleMs) { cbQueue.splice(i, 1); continue; }
+    if (m.priority < CB_PRIORITY.CRITICAL) {
+      // ALERT-tier lines get the longer staleMsHigh floor (see CB_TUNING) -
+      // they're the ones actually held up by alertGapMsOut/the streak
+      // limiter, and the plain staleMs used for FLAVOR/ROUTINE is shorter
+      // than that hold-back can legitimately run.
+      const limit = m.priority >= CB_PRIORITY.ALERT ? CB_TUNING.staleMsHigh : CB_TUNING.staleMs;
+      if (nowMs - m.queuedAt > limit) { cbQueue.splice(i, 1); continue; }
+    }
     if (m.truck && !cbIsVisible(cbCtx.graph, m.truck, cbCtx.viewport)) cbQueue.splice(i, 1);
   }
   if (!cbQueue.length) return;
@@ -791,9 +822,12 @@ function cbEmitStep(nowMs, cbCtx, t) {
 // ---------------------------------------------------------------------
 // Per-frame entry point
 // ---------------------------------------------------------------------
-// cbCtx: { enabled, graph, trucks, viewport, camera, gameSeconds, weather,
-//          showWeather, events }
+// cbCtx: { enabled, graph, trucks, visibleTrucks, viewport, camera,
+//          gameSeconds, weather, showWeather, events }
 // `events` is whatever fleet.js emitted this tick (drained by main.js).
+// `visibleTrucks` is drawFrame's own post-cull truck list (see
+// cbFindSpeaker/cbFindJam) - `trucks` itself is only used for cbIsVisible's
+// per-truck rechecks and the headless-harness fallback.
 export function updateCB(nowMs, cbCtx) {
   if (!cbFeedEl) return;
   if (!cbCtx.enabled) {
@@ -819,6 +853,12 @@ export function updateCB(nowMs, cbCtx) {
 
   const t = cbZoomT(cbCtx.camera);
   const flavorInterval = cbLerp(CB_TUNING.flavorIntervalMsOut, CB_TUNING.flavorIntervalMsIn, t);
+  // The on-screen pool cbFindSpeaker/cbFindJam sample from - render.js's own
+  // per-frame cull result, so it agrees exactly with what's actually drawn.
+  // Falls back to the whole fleet when it's missing (the headless
+  // regression harnesses call updateCB without a real render pass), which
+  // reproduces the original unfiltered behavior there.
+  const pool = cbCtx.visibleTrucks || cbCtx.trucks;
 
   // 1. Real events first - they're the reason this thing exists.
   if (cbCtx.events) {
@@ -829,7 +869,7 @@ export function updateCB(nowMs, cbCtx) {
   // free-flow speed. It only gets to blame a breakdown when there is one
   // on its edge ahead of it; otherwise it just reports being slow.
   if (nowMs - cbLastJamMs >= CB_TUNING.jamMinGapMs) {
-    const stuck = cbFindJam(cbCtx.graph, cbCtx.trucks, cbCtx.viewport);
+    const stuck = cbFindJam(pool);
     if (stuck) {
       cbLastJamMs = nowMs;
       const place = cbPlaceContext(cbCtx.graph, stuck);
@@ -843,7 +883,7 @@ export function updateCB(nowMs, cbCtx) {
   // 3. Ambient filler, only when the timer says so and only from a truck
   // that's actually on screen.
   if (nowMs - cbLastFlavorMs >= flavorInterval) {
-    const speaker = cbFindSpeaker(cbCtx.graph, cbCtx.trucks, cbCtx.viewport);
+    const speaker = cbFindSpeaker(pool);
     const msg = speaker ? cbMakeFlavor(cbCtx.graph, speaker, cbCtx) : null;
     if (msg) {
       cbEnqueue(msg, nowMs);

@@ -59,6 +59,15 @@ export function compassLabel(deg) {
 
 const COMPASS_WORD = { N: "North", NE: "Northeast", E: "East", SE: "Southeast", S: "South", SW: "Southwest", W: "West", NW: "Northwest" };
 
+// A physical route like I-76 can be split into two non-contiguous segments
+// in the data (route names "I-76 (West)"/"I-76 (East)") - this strips that
+// suffix so both halves roll up into one "I-76" total. Shared by ui.js
+// (interstate ranking rollup) and render.js (highway-wide highlight
+// matching), so both agree on what "the same highway" means.
+export function baseRouteName(route) {
+    return route.replace(" (West)", "").replace(" (East)", "");
+}
+
 // US highway numbering convention (both the Interstate and the older US
 // Numbered Highway systems): ODD route numbers run north-south, EVEN
 // numbers run east-west - the reliable rule, not "ends in 0/5" (a

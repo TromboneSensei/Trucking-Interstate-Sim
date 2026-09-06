@@ -4,7 +4,7 @@
 // to (re)render whenever something changes. Real CSS classes throughout
 // (no inline-styled template strings).
 "use strict";
-import { travelDirectionLabel } from "./geo.js";
+import { travelDirectionLabel, baseRouteName } from "./geo.js";
 import { estimatedRangeMiles } from "./fleet.js";
 import { cbLastMessageFor } from "./cb.js";
 
@@ -24,6 +24,11 @@ const el = {
 let onSelectTruck = null;
 let onSpotlightCargo = null;
 let onToggleControl = null;
+// Tapping a specific corridor/highway row in either drilldown list, mirroring
+// tap-to-follow on a CB line: main.js flies the camera to fit the segment (or
+// the whole route) and dims everything that isn't part of it.
+let onSelectCorridor = null;
+let onSelectHighway = null;
 // Fired whenever which panel is on screen changes (tab switch, or the
 // sheet being collapsed/expanded). main.js only refreshes the visible tab
 // now, so it needs to know to render the newly-revealed one right away
@@ -44,6 +49,8 @@ export function initUI(callbacks) {
   onSpotlightCargo = callbacks.onSpotlightCargo;
   onVisibleTabChange = callbacks.onVisibleTabChange;
   onCloseDetails = callbacks.onCloseDetails;
+  onSelectCorridor = callbacks.onSelectCorridor;
+  onSelectHighway = callbacks.onSelectHighway;
 
   // Tapping a cargo row spotlights that cargo type on the map. Delegated
   // like the other panels, since the Economy tab is rebuilt wholesale on
@@ -324,13 +331,6 @@ function corridorCounts(trucks) {
   return [...counts.values()].sort((a, b) => b.count - a.count);
 }
 
-// A physical route like I-76 can be split into two non-contiguous
-// segments in the data (route names "I-76 (West)"/"I-76 (East)") - this
-// strips that suffix so both halves roll up into one "I-76" total.
-function baseRouteName(route) {
-  return route.replace(" (West)", "").replace(" (East)", "");
-}
-
 // Every truck currently on an interstate, tallied by which interstate
 // (both directions, all corridors of that route combined) - "busiest
 // interstate overall" rather than "busiest single segment".
@@ -562,11 +562,13 @@ function renderRoadDrilldown(trucks, key) {
   const list = document.createElement("div");
   if (key === "corridors") {
     corridorCounts(trucks).slice(0, 10).forEach((rec, i) => {
-      list.appendChild(listRow(i + 1, shieldLabel(rec.edge.route), `near ${rec.edge.control}`, rec.count, " trucks"));
+      list.appendChild(listRow(i + 1, shieldLabel(rec.edge.route), `near ${rec.edge.control}`, rec.count, " trucks",
+        () => onSelectCorridor && onSelectCorridor(rec)));
     });
   } else {
     interstateCounts(trucks).slice(0, 10).forEach((rec, i) => {
-      list.appendChild(listRow(i + 1, shieldLabel(rec.route), "all corridors", rec.count, " trucks"));
+      list.appendChild(listRow(i + 1, shieldLabel(rec.route), "all corridors", rec.count, " trucks",
+        () => onSelectHighway && onSelectHighway(rec)));
     });
   }
   el.overview.appendChild(list);

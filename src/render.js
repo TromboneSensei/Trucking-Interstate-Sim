@@ -10,7 +10,7 @@
 // frame against camera.baseZoom (the initial fit-to-screen zoom set by
 // main.js).
 import {
-  WORLD_WIDTH, WORLD_HEIGHT, hashStr, mulberry32,
+  WORLD_WIDTH, WORLD_HEIGHT, hashStr, mulberry32, baseRouteName,
   localMinutesAtX, rawDarknessAtX, effectiveDarkness, NIGHT_DARKNESS_MAX,
 } from "./geo.js";
 import { STATE_BORDER_RINGS } from "./states-data.js";
@@ -133,6 +133,14 @@ const truckBuckets = new Map(Object.values(TRUCK_TYPES).map((tt) => [tt.id, { co
 // more bucket, so this costs nothing extra at scale.
 const DISABLED_TRUCK_COLOR = "#facc15";
 truckBuckets.set("DISABLED", { color: DISABLED_TRUCK_COLOR, shape: "circle", sizeMult: 1, xs: [], ys: [] });
+
+// Every truck that survived this frame's cull test, gathered in the same
+// pass that sorts trucks into truckBuckets below - reused (not
+// reallocated) every frame like truckBuckets itself. Handed back in
+// drawFrame's return value so cb.js can pick an ambient speaker/jam-report
+// truck straight out of what's actually on screen instead of sampling the
+// whole fleet and hoping a hit lands (see cbFindSpeaker/cbFindJam).
+const visibleTruckList = [];
 
 // Precomputed (cos, sin) unit-offsets for each polygon shape, so per-truck
 // drawing is just a multiply-by-radius-and-add - no per-truck trig or
@@ -437,6 +445,11 @@ export function buildEdgeList(graph) {
       edges.push({
         ax: node.x, ay: node.y, bx: other.x, by: other.y,
         kind: e.kind,
+        // from/to/baseRoute exist purely so the Dispatch tab's corridor/
+        // highway spotlight (drawRouteSpotlight below) can test membership
+        // per edge without re-deriving a route name from anywhere else -
+        // the normal road/congestion rendering below never reads these.
+        from: name, to: e.to, baseRoute: baseRouteName(e.route),
         px: -dy / len, py: dx / len,
         len, // world-space length, so congestion can be a DENSITY not a raw count
         minX: Math.min(node.x, other.x), maxX: Math.max(node.x, other.x),
@@ -1256,6 +1269,64 @@ export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }) {
   return out;
 }
 
+// Dispatch tab's "busiest corridor" / "busiest highway" spotlight - tapping
+// either drilldown row (ui.js) hands main.js a set of edgeList indices to
+// highlight; main.js flies the camera to fit them (Camera.frameBox) and
+// passes the same set in here as renderOpts.spotlightRoute every frame.
+//
+// Deliberately a POST-pass rather than a change to drawRoads' own batching:
+// everything above (roads, city dots, labels, the normal truck batch) has
+// already been drawn and the world-space transform already popped back to
+// screen space, so this just (1) veils the whole canvas one shade darker
+// and (2) redraws the matching edges/trucks on top at full brightness,
+// using camera.worldToScreen() directly rather than re-entering the
+// transform. That keeps drawRoads' single-stroke-per-kind batching (and its
+// FOLLOW_NAV tilt handling) completely untouched - this overlay only ever
+// runs in plain FREE/FRAME framing, never FOLLOW_NAV, so the lack of tilt
+// handling here is fine by construction.
+const SPOTLIGHT_VEIL = "rgba(4, 7, 13, 0.62)";
+const SPOTLIGHT_ROAD_COLOR = "#ffd24a";
+function drawRouteSpotlight(ctx, canvas, camera, graph, edgeList, trucks, spotlight) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.fillStyle = SPOTLIGHT_VEIL;
+  ctx.fillRect(0, 0, w, h);
+
+  const { indices } = spotlight;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = SPOTLIGHT_ROAD_COLOR;
+  ctx.lineWidth = Math.max(2.5, 11 * camera.zoom);
+  ctx.beginPath();
+  const edges = edgeList.edges;
+  for (const i of indices) {
+    const e = edges[i];
+    if (!e) continue;
+    const a = camera.worldToScreen(e.ax, e.ay);
+    const b = camera.worldToScreen(e.bx, e.by);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+  }
+  ctx.stroke();
+
+  // Every truck actually on the highlighted segment/route, redrawn as a
+  // plain bright dot on top of the veil - same indexByEdge lookup
+  // tallyCongestion already does per truck per frame, so this is a proven-
+  // cheap pattern even at fleet-cap size.
+  const scratch = { x: 0, y: 0, heading: 0 };
+  ctx.fillStyle = "#ffffff";
+  const r = Math.max(2, TRUCK_DOT_RADIUS * camera.zoom * 1.35);
+  for (const t of trucks) {
+    if (!t.edge) continue;
+    const idx = edgeList.indexByEdge.get(t.edge);
+    if (idx === undefined || !indices.has(idx)) continue;
+    truckPose(graph, t, scratch);
+    const p = camera.worldToScreen(scratch.x, scratch.y);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, selectedTruck, renderOpts = {}) {
   const w = canvas.clientWidth, h = canvas.clientHeight;
   ctx.fillStyle = VOID_COLOR;
@@ -1485,6 +1556,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // overlapping, differently-colored dots ends up on top can occasionally
   // differ from before - imperceptible at a 3.5px dot radius.
   for (const b of truckBuckets.values()) { b.xs.length = 0; b.ys.length = 0; }
+  visibleTruckList.length = 0;
 
   // In FOLLOW_NAV, the followed truck gets a directional arrow instead of
   // a plain dot (drawn separately, below) - so it's pulled out of the
@@ -1530,6 +1602,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // vanishing even if it briefly computes as just outside the
     // (already generous) bound.
     if (!visible && truck !== selectedTruck) continue;
+    if (visible) visibleTruckList.push(truck);
 
     const bucket = truck.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
     bucket.xs.push(p.x);
@@ -1646,6 +1719,11 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   }
 
   ctx.restore();
+
+  if (renderOpts.spotlightRoute) {
+    drawRouteSpotlight(ctx, canvas, camera, graph, edgeList, trucks, renderOpts.spotlightRoute);
+  }
+
   // The world-space box this frame actually covered, handed back so
   // anything outside the renderer that needs to ask "is this on screen?"
   // (cb.js) uses the same numbers rather than keeping its own copy of the
@@ -1654,6 +1732,11 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // circle used above - conservative, never too small.
   return {
     congestedSegments: congestion ? congestion.congestedCount : 0,
+    // Trucks that passed this frame's own cull test, in cb.js's terms:
+    // exactly the pool it's allowed to pick an ambient speaker/jam-report
+    // truck from (see cbFindSpeaker/cbFindJam) - never a fresh copy, so
+    // handing it out costs nothing beyond the array itself.
+    visibleTrucks: visibleTruckList,
     viewport: nav
       ? { minX: cullCx - cullRadius, maxX: cullCx + cullRadius, minY: cullCy - cullRadius, maxY: cullCy + cullRadius }
       : { minX: cullMinX, maxX: cullMaxX, minY: cullMinY, maxY: cullMaxY },

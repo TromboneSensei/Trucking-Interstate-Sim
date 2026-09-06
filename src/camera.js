@@ -34,8 +34,9 @@ export class Camera {
     this.baseZoom = zoom; // the initial fit-to-screen zoom; render.js keys city-label tiers off this
     this.minZoom = minZoom;
     this.maxZoom = maxZoom;
-    this.mode = "FREE"; // "FREE" | "FOLLOW" | "FOLLOW_NAV"
+    this.mode = "FREE"; // "FREE" | "FOLLOW" | "FOLLOW_NAV" | "FRAME"
     this.followTarget = null;
+    this.frameTarget = null; // FRAME-only: the fixed {x,y,zoom} frameBox() is easing toward
     this.onTap = onTap;
     this.visualCenterYRatio = 0.42; // bias the focal point up so the bottom sheet doesn't cover it
     // FOLLOW_NAV pushes the pivot further down than flat FOLLOW's 0.42 -
@@ -82,6 +83,24 @@ export class Camera {
   unfollow() {
     this.mode = "FREE";
     this.followTarget = null;
+    this.frameTarget = null;
+  }
+
+  // One-shot "fly to and fit this box" - used by main.js's corridor/highway
+  // spotlight (tapping a Dispatch drilldown row), NOT by truck-follow: unlike
+  // FOLLOW's followTarget, frameTarget doesn't move every frame (the box is a
+  // fixed region of the map), so update() below just eases toward it once and
+  // settles, rather than continuously re-tracking a moving point. Mirrors
+  // main.js's own fitZoom() - same 0.55 "leave room for the bottom sheet"
+  // reservation and the same top-level 0.92-style fudge factor - just fitting
+  // an arbitrary box instead of the whole world.
+  frameBox(minX, minY, maxX, maxY) {
+    const boxW = Math.max(1e-6, maxX - minX);
+    const boxH = Math.max(1e-6, maxY - minY);
+    const availH = this.canvas.clientHeight * 0.55;
+    const zoom = this.clampZoom(Math.min(this.canvas.clientWidth / boxW, availH / boxH) * 0.85);
+    this.frameTarget = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom };
+    this.mode = "FRAME";
   }
 
   clampZoom(z) {
@@ -96,6 +115,11 @@ export class Camera {
     }
     if (this.mode === "FOLLOW_NAV") {
       this.heading += shortestAngleDelta(this.heading, this.targetHeading) * HEADING_LERP;
+    }
+    if (this.mode === "FRAME" && this.frameTarget) {
+      this.x += (this.frameTarget.x - this.x) * FOLLOW_LERP;
+      this.y += (this.frameTarget.y - this.y) * FOLLOW_LERP;
+      this.zoom += (this.frameTarget.zoom - this.zoom) * FOLLOW_LERP;
     }
   }
 
@@ -115,7 +139,7 @@ export class Camera {
     const startDrag = (sx, sy) => {
       dragging = true; moved = false; tapStart = Date.now();
       lastX = sx; lastY = sy;
-      if (this.mode === "FOLLOW" || this.mode === "FOLLOW_NAV") this.unfollow();
+      if (this.mode === "FOLLOW" || this.mode === "FOLLOW_NAV" || this.mode === "FRAME") this.unfollow();
     };
     const doDrag = (sx, sy) => {
       const dx = sx - lastX, dy = sy - lastY;
