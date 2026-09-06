@@ -421,6 +421,11 @@ export function buildEdgeList(graph) {
   // rebuilding an "a|b|route" string for every truck every frame - at
   // 5000 trucks that string churn would dwarf the drawing itself.
   const indexByEdge = new Map();
+  // Which of the segment's two directions a given directed edge object is
+  // ("forward" = the `e` encountered first below, "back" = its reverse) -
+  // see the long comment on tallyCongestion for why congestion is tallied
+  // per direction rather than blended into one shared average.
+  const directionByEdge = new Map();
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     for (const e of graph.adjacency[name]) {
@@ -438,61 +443,119 @@ export function buildEdgeList(graph) {
         minY: Math.min(node.y, other.y), maxY: Math.max(node.y, other.y),
       });
       indexByEdge.set(e, idx);
+      directionByEdge.set(e, 0);
       // The reverse direction is a different object on the other node's
-      // adjacency list; find it so both directions of travel count toward
-      // the same physical segment's congestion.
+      // adjacency list; find it so both directions of travel are tallied
+      // against the same physical segment (each kept in its own
+      // direction's bucket - see tallyCongestion).
       const back = graph.adjacency[e.to].find((r) => r.to === name && r.route === e.route);
-      if (back) indexByEdge.set(back, idx);
+      if (back) { indexByEdge.set(back, idx); directionByEdge.set(back, 1); }
     }
   }
   let totalLen = 0;
   for (const e of edges) totalLen += e.len;
-  cached = { edges, indexByEdge, totalLen, counts: new Int32Array(edges.length), slowdownSum: new Float32Array(edges.length) };
+  cached = {
+    edges, indexByEdge, directionByEdge, totalLen,
+    // Raw (reset every tallyCongestion call) per-direction truck counts.
+    countsFwd: new Int32Array(edges.length), countsBack: new Int32Array(edges.length),
+    // Raw per-direction slowdown sums, same reset cadence as counts.
+    sumFwd: new Float32Array(edges.length), sumBack: new Float32Array(edges.length),
+    // Persistent (NOT reset per call) exponentially-smoothed per-direction
+    // average slowdown, so a segment sitting near a band boundary doesn't
+    // flicker in and out of color frame to frame - see tallyCongestion.
+    smoothFwd: new Float32Array(edges.length), smoothBack: new Float32Array(edges.length),
+  };
   edgeListCache.set(graph, cached);
   return cached;
 }
 
-// Live truck count AND live slowdown per physical road segment, reusing
-// two typed arrays rather than allocating per frame. `counts` is still
-// used to floor out a lightly-traveled segment from ever reading as
-// congested regardless of speed (see CONGESTION_MIN_TRUCKS); actual
-// congestion classification is by `slowdownSum/counts` - each truck's
-// live speed against its own `freeFlowSpeed` snapshot (fleet.js Phase 1,
-// captured before rush hour/rubberneck/follow/arrival caps) - which is
-// fleet-size independent by construction: a 500-truck fleet and a
-// 10000-truck fleet both read "half of normal speed" the same way,
-// unlike the old density-relative-to-fleet-mean approach.
+// How long (real seconds) the EMA below takes to settle - long enough to
+// kill frame-to-frame flicker at a band boundary, short enough that a jam
+// clearing still reads as clearing within a few seconds rather than
+// minutes. Tied to REAL time deliberately, not game time: a jam should
+// look visually stable at any point on the time-scale slider, not flicker
+// faster just because the sim is running at 8x.
+const CONGESTION_SMOOTH_SECONDS = 2.5;
+let lastTallyMs = null;
+
+// Highest CONGESTION_BANDS index this (truck count, average slowdown)
+// pair qualifies for, or -1 if it qualifies for none. Shared by the HUD
+// count and the per-frame paint pass so the two can never disagree about
+// what counts as "congested".
+function bandIndexFor(n, slowdown) {
+  let best = -1;
+  for (let i = 0; i < CONGESTION_BANDS.length; i++) {
+    const band = CONGESTION_BANDS[i];
+    if (n >= band.minTrucks && slowdown >= band.slowdown) best = i;
+  }
+  return best;
+}
+
+// Live truck count AND live slowdown per physical road segment, PER
+// DIRECTION, reusing typed arrays rather than allocating per frame.
+// `countsFwd`/`countsBack` floor out a lightly-traveled direction from
+// ever reading as congested regardless of speed; actual classification is
+// by `sum*/count*` - each truck's live speed against its own
+// `freeFlowSpeed` snapshot (fleet.js Phase 1, captured before rush
+// hour/rubberneck/follow/arrival caps) - which is fleet-size independent
+// by construction: a 500-truck fleet and a 10000-truck fleet both read
+// "half of normal speed" the same way, unlike the old density-relative-
+// to-fleet-mean approach.
+//
+// Tallied PER DIRECTION rather than blended into one shared average
+// (the original version of this): a real one-directional pile-up -
+// exactly what rubbernecking around a disabled truck produces - could
+// average out below every band's threshold once diluted by a free-
+// flowing opposite direction on the same physical road, silently hiding
+// real jams. Each direction is now classified independently (see
+// bandIndexFor) and painted if EITHER qualifies.
 function tallyCongestion(edgeList, trucks) {
-  const counts = edgeList.counts;
-  const slowdownSum = edgeList.slowdownSum;
-  counts.fill(0);
-  slowdownSum.fill(0);
+  const { countsFwd, countsBack, sumFwd, sumBack, smoothFwd, smoothBack, directionByEdge, indexByEdge } = edgeList;
+  countsFwd.fill(0); countsBack.fill(0);
+  sumFwd.fill(0); sumBack.fill(0);
   for (const truck of trucks) {
     // A disabled truck's own speed/freeFlowSpeed reflects the instant it
     // broke down, not the live jam - excluding it means the segment's
     // reading comes entirely from the REAL traffic rubbernecking around
-    // it, which is the actual congestion worth showing.
-    if (!truck.edge || truck.disabledHoursLeft > 0) continue;
-    const idx = edgeList.indexByEdge.get(truck.edge);
+    // it, which is the actual congestion worth showing. A truck braking
+    // for ITS OWN upcoming stop (arrivalBraking, fleet.js Phase 1) is
+    // excluded for the same reason: that slowdown is self-caused, not a
+    // traffic effect - without this, every busy city's arrival apron
+    // would read as a jam just because several trucks happen to be
+    // decelerating into it at once.
+    if (!truck.edge || truck.disabledHoursLeft > 0 || truck.arrivalBraking) continue;
+    const idx = indexByEdge.get(truck.edge);
     if (idx === undefined) continue;
-    counts[idx]++;
     const slowdown = truck.freeFlowSpeed > 0 ? Math.max(0, 1 - truck.speed / truck.freeFlowSpeed) : 0;
-    slowdownSum[idx] += slowdown;
+    if (directionByEdge.get(truck.edge) === 0) { countsFwd[idx]++; sumFwd[idx] += slowdown; }
+    else { countsBack[idx]++; sumBack[idx] += slowdown; }
   }
+
+  // Exponentially smooth each direction's average slowdown - counts stay
+  // raw/instantaneous (a truck leaving the segment should immediately be
+  // able to un-floor it), only the slowdown average used for banding is
+  // smoothed, so a value oscillating right around a threshold settles
+  // into one band instead of repainting every frame.
+  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const dtReal = lastTallyMs == null ? 1 : Math.max(0, Math.min(1, (now - lastTallyMs) / 1000));
+  lastTallyMs = now;
+  const alpha = 1 - Math.exp(-dtReal / CONGESTION_SMOOTH_SECONDS);
+  for (let idx = 0; idx < countsFwd.length; idx++) {
+    const avgFwd = countsFwd[idx] > 0 ? sumFwd[idx] / countsFwd[idx] : 0;
+    const avgBack = countsBack[idx] > 0 ? sumBack[idx] / countsBack[idx] : 0;
+    smoothFwd[idx] += (avgFwd - smoothFwd[idx]) * alpha;
+    smoothBack[idx] += (avgBack - smoothBack[idx]) * alpha;
+  }
+
   // Network-wide congested-segment count for the HUD - computed over
   // EVERY edge (not just the on-screen/culled subset drawRoads paints),
   // so it reads as a fleet-wide health stat that doesn't fluctuate as the
   // player pans or zooms, same spirit as the Busiest Corridor metric.
   let congestedCount = 0;
-  for (let idx = 0; idx < counts.length; idx++) {
-    const n = counts[idx];
-    if (n === 0) continue;
-    const slowdown = slowdownSum[idx] / n;
-    for (const band of CONGESTION_BANDS) {
-      if (n >= band.minTrucks && slowdown >= band.slowdown) { congestedCount++; break; }
-    }
+  for (let idx = 0; idx < countsFwd.length; idx++) {
+    if (bandIndexFor(countsFwd[idx], smoothFwd[idx]) >= 0 || bandIndexFor(countsBack[idx], smoothBack[idx]) >= 0) congestedCount++;
   }
-  return { counts, slowdownSum, congestedCount };
+  return { countsFwd, countsBack, smoothFwd, smoothBack, congestedCount };
 }
 
 function edgeVisible(e, cull) {
@@ -652,7 +715,7 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
   // pavement itself glowing hot. Widths track the same LOD cross-fade as
   // the roads underneath, so the heat never floats wider than its road.
   if (congestion) {
-    const counts = congestion.counts, slowdownSum = congestion.slowdownSum;
+    const { countsFwd, countsBack, smoothFwd, smoothBack } = congestion;
     ctx.save();
     // Deliberately opaque source-over rather than additive: the road
     // should BECOME amber/red, not glow toward white. Additive blending
@@ -674,17 +737,18 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
       const shoulderCentre = (fogOff + bandHalf) / 2;
       const shoulderW = Math.max(bandHalf - fogOff, 1.4 / camera.zoom);
       for (let bi = CONGESTION_BANDS.length - 1; bi >= 0; bi--) {
-        const band = CONGESTION_BANDS[bi];
-        const next = CONGESTION_BANDS[bi + 1];
-        const lo = band.slowdown, hi = next ? next.slowdown : Infinity;
         let started = false;
         for (let j = 0; j < list.length; j++) {
           const e = list[j];
           const idx = idxs[j];
-          const n = counts[idx];
-          if (n < band.minTrucks) continue; // too few trucks to call it congestion, not just a light road
-          const slowdown = slowdownSum[idx] / n;
-          if (slowdown < lo || slowdown >= hi) continue;
+          // Each direction classified independently and the WORSE (higher
+          // band index) of the two wins - a jammed direction is never
+          // hidden by a free-flowing opposite direction sharing this same
+          // physical segment's slot. Painted only on the single bi that
+          // matches the effective band, so a segment never double-paints.
+          const bandFwd = bandIndexFor(countsFwd[idx], smoothFwd[idx]);
+          const bandBack = bandIndexFor(countsBack[idx], smoothBack[idx]);
+          if (Math.max(bandFwd, bandBack) !== bi) continue;
           if (!started) { ctx.beginPath(); started = true; }
           ctx.moveTo(e.ax + e.px * shoulderCentre, e.ay + e.py * shoulderCentre);
           ctx.lineTo(e.bx + e.px * shoulderCentre, e.by + e.py * shoulderCentre);
@@ -692,7 +756,7 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
           ctx.lineTo(e.bx - e.px * shoulderCentre, e.by - e.py * shoulderCentre);
         }
         if (started) {
-          ctx.strokeStyle = band.color;
+          ctx.strokeStyle = CONGESTION_BANDS[bi].color;
           ctx.lineWidth = shoulderW;
           ctx.stroke();
         }

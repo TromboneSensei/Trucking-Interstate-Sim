@@ -134,31 +134,182 @@ function minSafeMiles(graph, edge) {
   return MIN_DOT_GAP_WORLD_UNITS / worldUnitsPerMile(graph, edge);
 }
 
-const NICKNAMES = [
-  "Rubber Ducky", "Iron Duck", "Mad Max", "Big Rig", "Rolling Thunder", "Night Owl",
-  "Highway Star", "Lone Wolf", "White Line", "Overdrive", "Blacktop Runner", "Steel Horse",
-  "Convoy King", "Hammer Down", "Ten-Four", "Double Nickel", "Rusty Bucket", "Silver Bullet",
-  "Red Rocket", "Ghost Hauler", "Pathfinder", "Trailblazer", "Nomad", "Drifter",
-  "Texas Tornado", "Yankee Clipper", "Desert Rat", "Cornhusker", "Bayou Beast", "Windy City",
-  "Old Betsy", "Thunder Road", "Midnight Rider", "Grave Digger", "Asphalt Cowboy", "Gear Jammer",
+// 1000 hand-picked CB-handle-style names (user-supplied list), so a fleet
+// of any realistic size mostly gets one truck per name before any name
+// repeats at all - unlike the old scheme, which drew from a 36-name pool
+// and appended a suffix computed from the GLOBAL truck-id counter (e.g.
+// truck #1000 got " 28" regardless of which random name it happened to
+// draw, since 1000/36≈28 - a number with no relation to how many times
+// that specific name had actually been used).
+const TRUCK_NAMES = [
+  "Rubber Ducky", "Big Mack", "Snowman", "Pig Pen", "Bear Bait", "White Line Fever", "Asphalt Cowboy", "Gearjammer",
+  "Mile Marker Mike", "Road Runner", "Midnight Special", "Diesel Dan", "Highballer", "Kingpin", "Flatbed Fred", "Long Haul Paul",
+  "Highway Star", "Rolling Thunder", "Iron Mule", "Leadfoot Larry", "Smokey Chaser", "Silver Bullet", "Turbo Tommy", "Interstate Ike",
+  "Golden Eagle", "Blue Mule", "Chrome Horn", "Prairie Dog", "Bull Hauler", "Ten-Four", "Convoy Captain", "Shift Kicker",
+  "Super Slab", "Brake Check", "Screamin' Demon", "Rooster Tail", "Road Dog", "Night Owl", "Double Clutch", "Tailgater",
+  "Cross-Country Cody", "Blacktop Bandit", "Overdrive Ollie", "Sleeper Cab Sal", "Rig Rider", "Jake Brake Jake", "Highway Ghost", "Big Rig Barney",
+  "Freight Train Frankie", "Redline Ray", "Wayfarer", "Interstate Ranger", "Piston Pete", "Diesel Drifter", "White Line Willie", "Roadmaster",
+  "Mile Muncher", "Gear Grinder", "Highway Hypnotist", "Big Steer", "Turnpike Ted", "Tar Heel Express", "Blue Highway", "Lone Wolf",
+  "Six-Wheeler", "Freightliner Phil", "Kenworth Kenny", "Peterbilt Pete", "Western Star Steve", "Road Rebel", "Longbed Larry", "Coast-to-Coast",
+  "Diesel Jockey", "High-Gear Hank", "Flathead Frank", "Truckin' Travis", "Pavement Pounder", "Interstate Jim", "Rig Roamer", "Mile Marker",
+  "Asphalt Ace", "Highway Hawk", "Long Haul Harry", "Clutch Master", "Freight Train", "Big Iron", "Overdrive", "Supercharged Sam",
+  "Blacktop Bruce", "Diesel Duke", "Axle Grease", "Heavy Hauler", "Highway Hopper", "Pavement Pusher", "Interstate Artie", "Highway Hound",
+  "Big Cam Bob", "Road Warden", "Diesel Deacon", "Turnpike Terry", "Bubba Ray", "Billy Bob", "Cletus Wayne", "Earl Junior",
+  "Jethro Tull", "Booger Red", "Cooter Brown", "Dwayne Higgins", "Waylon Boyd", "Buckshot", "Skeeter Davis", "Clem Kadiddle",
+  "Roscoe P. Coltrane", "Buford T.", "Jebediah", "Bocephus", "Rufus Lee", "Hurlan Peep", "Otis Skaggs", "Junior Samples",
+  "Hooter", "Leroy Jenkins", "Virgil Puckett", "Dale Junior Junior", "Merle Haggard Fan #1", "Cletus the Slack-Jawed", "T-Bone Taylor", "Burl Ives",
+  "Elrod McPhee", "Clovis Green", "Booger Jim", "Gator Bait", "Swamp Donkey", "Catfish Hunter", "Possum Trot", "Mudflap Miller",
+  "Moonshine Mike", "Copperhead", "Bucktooth Bobby", "Earl \"Lugnut\" Snodgrass", "Skeeter McNut", "Billy Ray Cyrus Fan Club", "Hound Dog Hank", "Cooter Davenport",
+  "Deke Slayton", "Jim Bob Cooter", "Cleatus Judd", "Billy Joe Bob", "Hank Jr. Jr.", "Red Dirt Roy", "Bubba Gump", "Skeeter Skaggs",
+  "Banjo Bob", "Coonhound", "Rustbucket Ray", "Crawdad", "Dixie Dan", "Kudzu Karl", "Grits 'N Gravy", "Porkchop Pete",
+  "Cornbread", "Turnip Green", "Skillet", "Moonpie", "Biscuit", "Gumbo Gary", "Hog Wild", "Razorback",
+  "Possum Belly", "Sweet Tea Sam", "Moonshine Mullins", "Copperhead Carl", "Redneck Rick", "Trailer Hitch Tim", "John Deere Dan", "Dixie Chick Magnet",
+  "Mudbogger", "Duck Blind Dan", "Bass Pro Barry", "Rebel Yell", "Swamp Fox", "Cottonmouth", "Banjo Boy", "Sweet Potato",
+  "Hog Waller", "Gator Gizzard", "Chitlins Charlie", "Cornstalk", "Hayseed", "Moonshine Mule", "Country Fried Carl", "Dip Can Dave",
+  "Camo Chris", "Yella Dog", "Big Country", "Backwoods Benny", "Boondock Bob", "Mudflap Mack", "Hillbilly Hank", "Red Dirt Dan",
+  "Buc-ee's Fanatic", "Beaver Nugget", "Roller Grill Rick", "Flying J Phil", "Love's Lothario", "TA Tony", "Pilot Pete", "Tornado Roller Ron",
+  "Gas Station Sushi", "Roller Dog Dan", "Glurp Guzzler", "Five-Hour Energy", "Monster Energy Mike", "Red Bull Ralph", "Pepperoni Stick Pete", "Coffee Pot Slim",
+  "3 A.M. Pancake", "Waffle House Brawler", "Cracker Barrel Crafter", "Truckstop Omelet", "Slim Jim Jim", "Big Gulp Greg", "Funnel Cake Frankie", "Corn Dog Carl",
+  "Pork Rind Randy", "Glazed Donut Dave", "Powdered Donut Phil", "French Fry Fred", "Honey Bun Hank", "Jerky Jerry", "Cheese Curd Chuck", "Funyun Frank",
+  "Jalapeno Popper", "Chili Cheese Mac", "Big Gulp Gary", "Truckstop Casanova", "Deep Fried Dan", "Hot Dog Harry", "Tornado Roll Terry", "Coffee Stain Steve",
+  "Styrofoam Cup", "Thermos Tom", "64-Ounce Sipper", "Meat Stick Mike", "Sour Gummy Guy", "Funky Frito", "Funnel Cake Fred", "Roadside Pretzel",
+  "Honey Bun Bob", "Glazed & Confused", "Bacon Grease", "Gravy Boat", "Biscuit & Gravy", "Truckstop Buffet", "Iron Skillet Sam", "Waffle House Wendy",
+  "Diner Counter Dan", "Pie Slice Pete", "Coffee Refill Ray", "Bottomless Cup", "French Toast Frankie", "Hashbrowns Scattered", "Smothered & Covered", "Chicken Fried Chuck",
+  "Truckstop T-Bone", "Meatloaf Mike", "Meatball Sub Sal", "Double Cheeseburger Dan", "Mega Melter", "Jalapeno Jack", "Nacho Cheese Nick", "Cheeto Dust Chad",
+  "Pork Rind Paul", "Slim Jim Jimmy", "Jerky Jack", "Gummy Worm Wayne", "Sour Patch Pete", "Jawbreaker Joe", "Sugar High Sam", "Caffeine Crash",
+  "Monster Can Mike", "Rockstar Ronnie", "5-Hour Hunter", "Redline Ralph", "Energy Shot Eddie", "2-for-1 Taquito", "Roller Grill Royalty", "Gas Station Gourmet",
+  "Corn Dog King", "Funnel Cake Phil", "Maple Bacon Bob", "Diner Booth Dave", "Pancake Stack Pat", "Syrup Chugger", "Sugar Packet Sal", "Pie A La Mode",
+  "Road Diner Don", "Cinnamon Roll Ron", "Gravy Train", "Sweet Roll Roy", "Caterpillar Carl", "Detroit Diesel", "Cummins Casey", "Torque Wrench",
+  "Camshaft Chuck", "Turbo Tim", "Blowout Bob", "Crankshaft", "Dipstick Dan", "Piston Ring Pete", "Overhaul Ollie", "Blown Gasket",
+  "Radiator Ralph", "Alternator Artie", "Fan Belt Frank", "Differential Dave", "Axle Snap", "Air Brake Andy", "Fifth Wheel Phil", "Kingpin Kenny",
+  "Leaf Spring Larry", "U-Joint Jack", "Fuel Pump Frank", "Turbocharger", "Manifold Mike", "Exhaust Pipe Pete", "Header Hank", "Supercharger Sam",
+  "Nitrous Nick", "Dyno Dan", "Grease Gun Greg", "Ball Joint Bob", "Brake Drum Dan", "Camshaft Cody", "Cylinder Six", "Cylinder Eight",
+  "V12 Vince", "Dual Exhaust", "Chrome Stacks", "Straight Pipes", "Jake Brake Johnny", "Transmission Tom", "Low Gear Leo", "High RPM",
+  "Clutch Burner", "Oil Pressure Pete", "Temp Gauge Ted", "Flywheel Fred", "Valve Cover Vince", "Spark Plug Spud", "Glow Plug Gary", "Turbo Whistle",
+  "Diesel Soot", "Black Smoke Bob", "Ash Can", "Muffler Mike", "Header Hater", "Rust Bucket", "Bondo Bill", "WD-40 Wayne",
+  "Duct Tape Dan", "Zip Tie Zach", "Ratchet Ralph", "Socket Wrench", "Torque Converter", "Sway Bar Sam", "Tie Rod Tim", "Control Arm Carl",
+  "Bushing Bob", "Piston Slap", "Blown Turbo", "Bad Alternator", "Squeaky Belt", "Dead Battery Dave", "Jumper Cables", "Fuel Injector",
+  "Glow Plug Gus", "Air Tank Tom", "Brake Shoe Bob", "Slack Adjuster", "Cam Follower", "Rocker Arm", "Crankcase Carl", "Oil Pan Pete",
+  "Dipstick Danny", "Grease Pit Phil", "Lube Job", "Pit Stop Paul", "Impact Wrench", "Floor Jack Fred", "Heavy Duty Hank", "Mega Torque",
+  "High Compression", "Chrome Bumper", "Mudflap Mike", "Bug Guard Bob", "Visor Vince", "Cabover Calvin", "Splitter Switch", "Dual Tandem",
+  "Speed Trap Sammy", "Radar Dodger", "Weigh Station Bandit", "Scale Dodger", "Bypass Bill", "Ghost Rider", "Night Hawk", "Phantom Freight",
+  "Midnight Marauder", "Bootlegger Bob", "Bandit", "The Duke of Hazard", "Smokey's Nightmare", "Fuzz Buster", "Copper Catcher", "Blue Light Special",
+  "DOT Evader", "Logbook Forger", "Fake Manifest", "Overweight Otis", "Runaway Ramp", "Red Light Randy", "Midnight Express", "Blackout Bob",
+  "Highway Houdini", "Midnight Shift", "Blind Spot", "Ghost Hauler", "Shadow Runner", "Stealth Semi", "Radar Runner", "Kojak Dodger",
+  "Bear Hunter", "Trooper Troll", "State Line Leap", "Turnpike Phantom", "Black Hat", "Lawless Larry", "Rebel Road", "Renegade Ron",
+  "Wild Card", "Rogue Rig", "Desert Drifter", "Midnight Maverick", "Fast Eddy", "Hammer Lane Harlan", "Speeding Ticket", "Points on License",
+  "Outlaw Wayne", "The Midnight Ram", "Hell on Wheels", "Asphalt Assassin", "Highway Hijacker", "Diesel Desperado", "The Smuggler", "High Plains Drifter",
+  "Sidewinder", "Road Pirate", "Blacktop Buccaneer", "Lawman's Bane", "Patrol Dodger", "The Shadow", "Night Creeper", "Backroad Bandit",
+  "Midnight Cowboy", "County Line Crusher", "Highway Outlaw", "Iron Outlaw", "Rebel Without a Rig", "The Fugitive", "Runaway Truck", "Wild Horse Wayne",
+  "Speed Trap Troy", "Blind Faith", "No Brakes Ned", "Danger Zone", "Flat Out Frankie", "Full Throttle Phil", "Zero Tolerance", "Bad Influence",
+  "The Instigator", "Trouble Maker", "Road Menace", "Hazard Sign", "Caution Cone", "Speed Demon", "Fast Lane Fred", "Hammer Drop",
+  "Floorboard Frank", "Pedal to Metal", "Full Tilt", "High Velocity", "Over-the-Limit", "Leadfoot Louie", "High Tail", "Smoke Screen",
+  "The Marauder", "Desert Mirage", "Highway Mirage", "The Phantom", "Captain Underpants", "Disco Dan", "Neon Flamingo", "Cosmic Cowboy",
+  "Space Cadet", "Dumpster Fire", "Lawn Mower Larry", "Bermuda Triangle", "Mothman", "Bigfoot Bob", "Area 51 Al", "Alien Abductee",
+  "Quantum Leap", "Captain Chaos", "Lord of the Rigs", "Sir Hauls-A-Lot", "Freight Daddy", "Big Daddy Diesel", "Cuddle Bug", "Fuzzy Dice",
+  "Hula Girl", "Dashboard Jesus", "Lava Lamp Larry", "Disco Rig", "Funkytown Fred", "Polyester Pete", "Rhinestone Randy", "Cowboy Hat Al",
+  "Roller Skate Roy", "Bowling Ball Bob", "Pocket Lint", "Half-Baked", "Rusty Zipper", "Mystery Meat", "Soup Can Sam", "Rubber Chicken",
+  "Banana Peel", "Flying Squirrel", "Wobbly Knee", "Two-Toed Tommy", "Left Turn Clyde", "Wrong Way Wendy", "Lost Again Larry", "U-Turn Tony",
+  "GPS Hater", "Atlas User", "Paper Map Paul", "Compass Carl", "Dead End Dan", "Detour Dave", "Wrong Exit Rick", "Pothole Pete",
+  "Speed Bump Bob", "Orange Barrel", "Roadkill Randy", "Armadillo Artie", "Raccoon Rob", "Possum Pete", "Skid Mark", "Fender Bender",
+  "Blind Spot Bob", "Wide Turn Wayne", "Tailpipe Terry", "Muddy Waters", "Squeegee Sam", "Windex Wayne", "Air Freshener Al", "Pine Tree Pete",
+  "Little Tree Larry", "Fuzzy Slippers", "Trucker Hat Chad", "Overalls Ollie", "Sleeveless Steve", "Tan Line Terry", "Trucker Arm", "Flip Flop Frank",
+  "Sweatpants Sammy", "Bathrobe Bob", "Morning Breath", "Bedhead Ben", "Sleepy Joe", "Wide Awake Wayne", "Caffeinated Carl", "Sugar Rush",
+  "Daydream Believer", "Night Crawler", "Worm Farmer", "Frog Leg Frank", "Swamp Monster", "Sasquatch Sam", "Yeti Pete", "Abominable Snowman",
+  "Chupacabra Charlie", "Alien Freight", "UFO Dave", "Crop Circle Carl", "Flying Saucer", "Roswell Ray", "Tin Foil Tim", "Conspiracy Cody",
+  "Grizzly Adams", "Black Bear", "Honey Badger", "Wolverine Wayne", "Mad Dog", "Bullfrog", "Timber Wolf", "Road Rat",
+  "Swamp Possum", "Desert Tortoise", "Blue Heeler", "Coonhound Cody", "Snapping Turtle", "Bald Eagle", "Prairie Hawk", "Cuckoo Bird",
+  "Iron Horse", "Stallion Steve", "Wild Mustang", "Billy Goat", "Mountain Lion", "Bobcat Bob", "Raccoon Ray", "Porcupine Pete",
+  "Armadillo Andy", "Skunk Averse", "Coyote Chris", "Jackrabbit", "Mule Skinner", "Moccasin Mike", "Cottonmouth Cody", "Diamondback Dan",
+  "Rattlesnake Rick", "Python Pete", "Gator Gus", "Bullshark", "Gray Wolf", "Silver Fox", "Red Fox", "Coyote Ugly",
+  "Bull Moose", "Elk Horn", "White Tail", "Buck Hunter", "Antler Andy", "Wild Boar", "Razorback Ray", "Badger Bob",
+  "Ferret Fred", "Otter Pop", "Beaver Tail", "Mud Turtle", "Pelican Pete", "Sea Gull Sam", "Hawk Eye", "Osprey Ollie",
+  "Falcon Frank", "Vulture Vince", "Crow Bar", "Raven Ray", "Black Bird", "Woodpecker Woody", "Roadrunner Ronnie", "Blue Jay",
+  "Cardinal Carl", "Robin Red", "Mockingbird", "Screech Owl", "Barn Owl", "Hoot Owl", "Bat Out of Hell", "Pack Mule",
+  "Donkey Kong", "Gray Mare", "Black Stallion", "Pinto Pete", "Bronco Buster", "Wild Bronco", "Steer Horn", "Longhorn Larry",
+  "Angus Andy", "Hereford Hank", "Dairy Dan", "Bullseye Bob", "Red Bull Roy", "Buffalo Bill", "Bison Bob", "Moose Jaw Mike",
+  "Grizzly Gus", "Kodiak Ken", "Polar Bear Paul", "Walrus Wally", "Wolverine Walt", "Timber Rattler", "Diamondback Dave", "Whitetail Woody",
+  "Blacktail Ben", "Longhorn Lou", "Bighorn Bill", "Mountain Ram", "Black Ice Bob", "Blizzard Bill", "Thunderhead", "Tornado Tom",
+  "Foggy Bottom", "Sunstroke Sam", "Heatwave Hank", "Rocky Mountain High", "Prairie Fire", "Whiteout Wayne", "Flash Flood", "Mudslide Mike",
+  "Dust Storm Dan", "Sandstorm Sam", "Glacier Gary", "Avalanche Al", "Hailstorm Harry", "Sleet King", "Frostbite Frank", "Polar Express",
+  "Monsoon Mike", "Hurricane Hank", "Typhoon Tim", "Gale Force", "Chinook Charlie", "Santa Ana Sam", "Sirocco Steve", "Dust Devil",
+  "Whirlwind Wayne", "Tornado Alley", "Twister Tom", "Lightning Larry", "Thunder Roll", "Storm Chaser", "Cloudburst", "Drizzle Dan",
+  "Puddle Jumper", "Hydroplane Hank", "Washout Wayne", "Canyon Carver", "Mountain Climber", "Switchback Steve", "Donner Pass Dan", "Eisenhower Ike",
+  "Cabbage Hill Carl", "Grapevine Greg", "Lookout Mountain", "Continental Divide", "High Pass Hank", "Desert Sun", "Salt Flat Sam", "Death Valley Dave",
+  "Mojave Mike", "Badlands Bob", "Tundra Tom", "Everglades Ed", "Bayous Bob", "Swamp Dog", "Piney Woods", "Redwood Rick",
+  "Timber Trail", "Gravel Grinder", "Dirt Road Dan", "Backroad Bob", "Rocky Road", "Pothole Phil", "Chug Hole Chuck", "Rumble Strip",
+  "Guardrail Gary", "Bridge Freeze", "Culvert Carl", "Underpass Pete", "Low Clearance", "Overpass Ollie", "Clearance 13-6", "Steep Grade",
+  "Runaway Ramp Ray", "6 Percent Grade", "Switchback Sal", "Hairpin Hank", "Blind Curve", "Fog Horn", "Headlight Beam", "High Beam Harry",
+  "Tail Light Tim", "Amber Light", "Flash Hazard", "Blown Tire", "Shredded Tread", "Alligator Alley", "Road Gator", "Retread Ralph",
+  "Rubber Chunk", "Debris Dave", "Cone Zone", "Work Zone Wayne", "Detour Dan", "Pavement Groove", "Grooved Road", "Fresh Tar",
+  "Billy Ray", "Bobby Joe", "Jimmy Dean", "Tommy Lee", "Johnny Cash", "Ricky Bobby", "Donnie Ray", "Bobby Lee",
+  "Danny Joe", "Kenny Wayne", "Stevie Ray", "Randy Travis", "Ronnie Gene", "Jerry Lee", "Terry Ray", "Gary Wayne",
+  "Larry Dale", "Terry Dale", "Ricky Dale", "Billy Wayne", "Johnny Ray", "Sammy Lee", "Jesse Lee", "Cody Ray",
+  "Tyler Joe", "Hunter Ray", "Chase Lee", "Mason Wayne", "Wyatt Lee", "Colten Ray", "Travis Wayne", "Tanner Lee",
+  "Dakota Ray", "Dalton Wayne", "Austin Lee", "Dallas Wayne", "Houston Ray", "Savannah Sam", "Memphis Slim", "Nashville Nick",
+  "Jackson Hole", "Montgomery Mike", "Tallahassee Tom", "Raleigh Ray", "Charlotte Charlie", "Augusta Artie", "Macon Mike", "Columbus Chris",
+  "Dayton Dan", "Toledo Tom", "Akron Al", "Cleveland Cliff", "Gary Indiana", "Peoria Pete", "Rockford Ray", "Duluth Dan",
+  "Fargo Fred", "Bismarck Bob", "Billings Bob", "Casper Chris", "Cheyenne Chad", "Laramie Lee", "Reno Ray", "Vegas Vance",
+  "Phoenix Phil", "Tucson Tom", "Flagstaff Frank", "Yuma Ray", "Barstow Bob", "Fresno Fred", "Bakersfield Bob", "Modesto Mike",
+  "Stockton Steve", "Redding Ray", "Eugene Earl", "Salem Sam", "Tacoma Tom", "Spokane Steve", "Boise Bob", "Pocatello Pete",
+  "Ogden Ollie", "Provo Pete", "Pueblo Phil", "Sterling Steve", "Colby Chris", "Salina Sam", "Topeka Tom", "Wichita Wayne",
+  "Tulsa Tom", "Enid Earl", "Norman Nick", "Lawton Larry", "Amarillo Artie", "Lubbock Lee", "Abilene Al", "Midland Mike",
+  "Odessa Ollie", "Waco Wayne", "Temple Tom", "Killeen Kenny", "John Wayne", "Clint Eastwood", "The Sundance Kid", "Butch Cassidy",
+  "Stampede Steve", "Wild Bill Hickok", "Wyatt Earp", "Doc Holliday", "Jesse James", "Billy the Kid", "Calamity Jane", "Annie Oakley",
+  "Davey Crockett", "Daniel Boone", "Paul Bunyan", "Babe the Blue Ox", "Pecos Bill", "Casey Jones", "John Henry", "Big Joe & Phantom 309",
+  "Rubber Duck", "Spider Mike", "The Bandit", "Cletus Snow", "Buford T. Justice", "Sheriff Lobo", "B.J. McKay", "Bear the Chimp",
+  "Maximum Overdrive", "Duel Peterbilt", "Convoy Leader", "White Line Warrior", "Road Warrior", "Mad Max", "Long Haul Legend", "King of the Road",
+  "Highwayman", "Willie Nelson's Co-Pilot", "Waylon's Guitar", "Cash's Cadillac", "Merle's Train", "Waylon Jennings Jr.", "Hank Williams Sr. Ghost", "Smokey Bear",
+  "Smokey's Worst Nightmare", "Uncle Sam's Hauler", "Captain America Rig", "Evel Knievel", "Daredevil Dan", "Flying Dutchman", "Ghost of Route 66", "Lincoln Highway Lou",
+  "Dixie Flyer", "Broadway Bob", "Sunset Strip Sam", "Pacific Coast Phil", "Great Lakes Gary", "Big Sky Bob", "Lone Star Larry", "Golden Gate Greg",
+  "Alamo Al", "Blue Ridge Bob", "Appalachian Artie", "Ozark Ollie", "Sierra Steve", "Cascade Charlie", "Great Plains Gary", "Heartland Hank",
+  "Rust Belt Rusty", "Corn Belt Carl", "Sun Belt Sal", "Bible Belt Billy", "Magnolia Mike", "Palmetto Pete", "Bluegrass Bob", "Yosemite Sam",
+  "Buckeye Bob", "Hoosier Hank", "Hawkeye Harry", "Gopher Gary", "Old Yeller", "Jayhawk Joe", "Sooner Sam", "Cowboy Bob",
+  "Outlaw Josey", "The Man with No Name", "Pale Rider", "Unforgiven Al", "Tombstone Tom", "High Noon Hank", "Stagecoach Steve", "Wells Fargo Wayne",
+  "Pony Express Pete", "Deadwood Dick", "Silver Dollar Sam", "Rawhide Ray", "Wagon Train Wayne", "Lonesome Dove", "Gus McCrae", "Woodrow Call",
 ];
 
-let nextId = 1;
-function randomName(rnd) {
-  const base = NICKNAMES[Math.floor(rnd() * NICKNAMES.length)];
-  const n = nextId;
-  return n > NICKNAMES.length ? `${base} ${Math.ceil(n / NICKNAMES.length)}` : base;
+// A fresh shuffle of TRUCK_NAMES, walked round-robin as trucks spawn:
+// index 0..999 hands out every name once (no suffix), 1000..1999 hands
+// them out a second time (suffix " 2"), and so on - so for any fleet
+// size, a name's Nth use is always labeled "Name N", never a number
+// disconnected from how many trucks actually share that name. Reset at
+// the top of every spawnFleet() call so a fresh 5000-truck fleet uses
+// each of the 1000 names exactly 5 times, starting clean rather than
+// continuing wherever the previous fleet's cursor left off.
+let namePool = TRUCK_NAMES;
+let nameCursor = 0;
+
+function resetNamePool(rnd) {
+  namePool = TRUCK_NAMES.slice();
+  for (let i = namePool.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [namePool[i], namePool[j]] = [namePool[j], namePool[i]];
+  }
+  nameCursor = 0;
 }
+
+function nextTruckName() {
+  const idx = nameCursor % TRUCK_NAMES.length;
+  const round = Math.floor(nameCursor / TRUCK_NAMES.length) + 1;
+  nameCursor++;
+  const base = namePool[idx];
+  return round > 1 ? `${base} ${round}` : base;
+}
+
+let nextId = 1;
 
 export class Truck {
   constructor(graph, spawnCityName, rnd = Math.random) {
     this.id = nextId++;
-    this.name = randomName(rnd);
+    this.name = nextTruckName();
     this.driver = new DriverDNA(rnd);
     this.currentNode = spawnCityName;
     this.edge = null;
     this.s = 0; // miles traveled along the current edge
     this.speed = 0; // current mph, eases toward the edge's limit
+    this.freeFlowSpeed = 0; // open-road cruise speed snapshot (weather included), read by render.js's congestion tally
+    this.arrivalBraking = false; // true while decelerating for ITS OWN upcoming stop (arrivalSpeedCap engaged) - excluded from congestion tallying, since it isn't a traffic effect
     this.totalMilesDriven = 0;
     this.earnings = 0;
     this.contractsCompleted = 0;
@@ -340,6 +491,7 @@ function rankAndCapOptions(graph, options, plannedEdge) {
 // flat pick handed small cities disproportionately more starting trucks
 // purely from pool arithmetic, independent of how "important" they are.
 export function spawnFleet(graph, count, rnd = Math.random) {
+  resetNamePool(rnd);
   const cities = Object.values(graph.nodes).filter((n) => n.t > 0 && n.t <= 3);
   let totalWeight = 0;
   for (const c of cities) totalWeight += c.w;
@@ -940,7 +1092,13 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     // multiplier (not a hard cap) for the same reason, and composes with
     // the follow cap below since it's applied before that Math.min.
     targetSpeed *= rubberneckMult(disabledByEdge.get(edgeId(truck.edge)), graph, truck);
+    // A truck slowing for ITS OWN upcoming stop is not congestion - flag it
+    // here (before the cap is applied) so render.js's tallyCongestion can
+    // exclude it, the same way a disabled truck is excluded, rather than
+    // letting every busy city's arrival apron read as a traffic jam.
+    const preArrivalSpeed = targetSpeed;
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
+    truck.arrivalBraking = targetSpeed < preArrivalSpeed;
     targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed));
 
     const rate = targetSpeed >= truck.speed ? truck.driver.accelRate : truck.driver.decelRate;

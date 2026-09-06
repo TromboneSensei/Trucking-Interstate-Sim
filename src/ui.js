@@ -61,6 +61,12 @@ export function initUI(callbacks) {
   // its click targets are wired here once against the stable parent
   // rather than re-attached per render.
   el.overview.addEventListener("click", (e) => {
+    const truckRow = e.target.closest("[data-truck]");
+    if (truckRow) {
+      const t = lastTrucks.find((tt) => tt.id === Number(truckRow.dataset.truck));
+      if (t && onSelectTruck) onSelectTruck(t);
+      return;
+    }
     const drillCard = e.target.closest("[data-drill]");
     const chip = e.target.closest("[data-chip]");
     const back = e.target.closest("[data-back]");
@@ -354,6 +360,7 @@ export function renderDispatchTab(trucks, graph, congestedSegments = 0) {
 
   preserveScroll(el.overview, () => {
     el.overview.innerHTML = "";
+    if (dispatchDrill === "disabled") { renderDisabledDrilldown(trucks); return; }
     if (dispatchDrill) { renderRoadDrilldown(trucks, dispatchDrill); return; }
 
     const moving = trucks.filter((t) => t.edge);
@@ -368,6 +375,7 @@ export function renderDispatchTab(trucks, graph, congestedSegments = 0) {
     const corridor = corridors[0];
     const interstates = interstateCounts(trucks);
     const topInterstate = interstates[0];
+    const disabledCount = trucks.reduce((s, t) => s + (t.disabledHoursLeft > 0 ? 1 : 0), 0);
 
     const grid = document.createElement("div");
     grid.className = "metric-grid";
@@ -380,8 +388,37 @@ export function renderDispatchTab(trucks, graph, congestedSegments = 0) {
     grid.appendChild(metricCard("Busiest Corridor", corridor ? shieldLabel(corridor.edge.route) : "—", corridor ? `near ${corridor.edge.control} • ${corridor.count} trucks` : "", "info", "corridors"));
     grid.appendChild(metricCard("Busiest Interstate", topInterstate ? shieldLabel(topInterstate.route) : "—", topInterstate ? `${topInterstate.count} trucks total` : "", "info", "interstates"));
     grid.appendChild(metricCard("Congested Segments", congestedSegments, "running below free-flow speed"));
+    grid.appendChild(metricCard("Broken Down", disabledCount, disabledCount ? "tap to see the fleet" : "fleet's all rolling", disabledCount ? "bad" : "good", disabledCount ? "disabled" : undefined));
     el.overview.appendChild(grid);
   });
+}
+
+// Every currently-disabled truck (out of fuel or a mechanical breakdown),
+// worst-off (most time left) first - the dispatcher's own "who needs a
+// tow" list. Mirrors renderRoadDrilldown's header/back-button shape but
+// lists trucks (data-truck, picked up by initUI's el.overview delegation)
+// rather than roads.
+function renderDisabledDrilldown(trucks) {
+  const header = document.createElement("div");
+  header.className = "detail-header";
+  header.style.marginTop = "2px";
+  header.innerHTML = `<button class="pill-btn" data-back style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button>
+    <div class="detail-title" style="font-size:1rem;">Broken Down</div><span></span>`;
+  el.overview.appendChild(header);
+
+  const disabled = trucks.filter((t) => t.disabledHoursLeft > 0).sort((a, b) => b.disabledHoursLeft - a.disabledHoursLeft);
+  const list = document.createElement("div");
+  if (!disabled.length) {
+    list.innerHTML = `<div class="placeholder-text">Nobody's broken down right now.</div>`;
+  } else {
+    const REASON_LABEL = { FUEL: "Out of fuel", BREAKDOWN: "Breakdown" };
+    disabled.forEach((t, i) => {
+      const eta = t.disabledHoursLeft < 1 ? "under an hour" : Math.ceil(t.disabledHoursLeft) + "h";
+      const where = t.edge ? `on ${shieldLabel(t.edge.route)} near ${t.edge.control}` : `near ${t.currentNode}`;
+      list.appendChild(listRow(i + 1, t.name, `${REASON_LABEL[t.disabledReason] || "Disabled"} • ${where}`, eta, " left", null, ["truck", t.id]));
+    });
+  }
+  el.overview.appendChild(list);
 }
 
 const ROAD_DRILL_LABEL = { corridors: "Busiest Corridors", interstates: "Busiest Interstates" };

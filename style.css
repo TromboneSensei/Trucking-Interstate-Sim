@@ -382,6 +382,7 @@ html, body {
 }
 .metric-card.good { border-left-color: var(--go); }
 .metric-card.info { border-left-color: var(--info); }
+.metric-card.bad { border-left-color: var(--stop); }
 .metric-card:active { background: #2a3441; }
 .metric-title {
   font-family: var(--font-body);
