@@ -857,9 +857,36 @@ function renderTruckDetails(truck, isControlled) {
       </div>`
     : "";
 
+  // Identity chips: always-true personality traits from driver.js, shown
+  // regardless of what the truck happens to be doing this exact frame.
+  // Order roughly most-to-least consequential; isSuperSpeeder is a
+  // strict subset of isOutlaw (see driver.js) so both can legitimately
+  // show together - the Speeder chip is the "why" behind the Outlaw one.
   const traitChips = [];
-  if (truck.driver.isNightOwl) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);">NIGHT OWL</span>`);
   if (truck.driver.isOutlaw) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--stop);border-color:var(--stop);">OUTLAW — never sleeps</span>`);
+  if (truck.driver.isSuperSpeeder) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--stop);border-color:var(--stop);">SUPER-SPEEDER — pushes 100+ mph</span>`);
+  if (truck.driver.isNightOwl) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);">NIGHT OWL</span>`);
+  if (truck.driver.isDrafter) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--go);border-color:var(--go);">DRAFTER — tucks in to save fuel</span>`);
+  if (truck.driver.isLaneCamper) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--caution);border-color:var(--caution);">LANE CAMPER — won't move over</span>`);
+  if (truck.driver.hustle < 0.2 && !truck.driver.isOutlaw) traitChips.push(`<span class="chip active" style="cursor:default;background:var(--dim);border-color:var(--dim);">LOT LOITERER — long layovers</span>`);
+
+  // "Right now" chips: momentary behavior this specific tick, not a fixed
+  // trait - these come and go as the truck's situation changes (see
+  // fleet.js's applyFollowAndPassing/render.js's fatigue jitter).
+  const liveChips = [];
+  if (truck.isDrafting) liveChips.push(`<span class="chip active" style="cursor:default;background:var(--go);border-color:var(--go);">● DRAFTING NOW</span>`);
+  if (truck.onShoulder) liveChips.push(`<span class="chip active" style="cursor:default;background:var(--stop);border-color:var(--stop);">● ON THE SHOULDER</span>`);
+  if (truck.driver.isLaneCamper && truck.lane === 1 && truck.passingLeaderId != null) liveChips.push(`<span class="chip active" style="cursor:default;background:var(--caution);border-color:var(--caution);">● BLOCKING THE PASSING LANE</span>`);
+  if (truck.fatigue > 85) liveChips.push(`<span class="chip active" style="cursor:default;background:var(--stop);border-color:var(--stop);">● WEAVING — EXHAUSTED</span>`);
+
+  // Home Base: Hometown Backhauler's domicile + how far this run has
+  // taken the truck from it (economy.js's chooseOffer reads the same
+  // two fields to bias load selection). Purely descriptive here, no
+  // interactivity.
+  const attachment = truck.driver.homeAttachment;
+  const attachmentLabel = attachment > 0.75 ? "always angling for a load home" : attachment > 0.5 ? "keeps an eye out for backhauls" : "rarely looks back";
+  const milesFromHome = Math.round(truck.milesSinceHome);
+  const homesickLabel = milesFromHome < 500 ? "just visited" : milesFromHome < 3000 ? "getting the itch" : "desperate to get back";
 
   el.detailsData.innerHTML = `
     <div class="detail-header">
@@ -890,11 +917,16 @@ function renderTruckDetails(truck, isControlled) {
       <div class="metric-card"><div class="metric-title">Cruise Mult.</div><div class="metric-value">${truck.driver.cruiseMult.toFixed(2)}&times;</div></div>
       <div class="metric-card"><div class="metric-title">Fuel Spent</div><div class="metric-value">$${Math.round(truck.fuelSpend).toLocaleString()}</div></div>
       <div class="metric-card"><div class="metric-title">Downtime</div><div class="metric-value">${truck.downtimeHours.toFixed(1)}h</div></div>
+      <div class="metric-card"><div class="metric-title">Home Base</div><div class="metric-value">${truck.homeCity}</div><div class="metric-sub">${attachmentLabel}</div></div>
+      <div class="metric-card"><div class="metric-title">From Home</div><div class="metric-value">${milesFromHome.toLocaleString()} mi</div><div class="metric-sub">${homesickLabel}</div></div>
     </div>
+    <div class="section-label">Driver DNA</div>
     ${statBar("Aggression", truck.driver.aggression, "var(--stop)")}
     ${statBar("Skill", truck.driver.skill, "var(--info)")}
     ${statBar("Hustle", truck.driver.hustle, "var(--go)")}
-    ${traitChips.length ? `<div class="chip-row" style="margin-top:8px;">${traitChips.join("")}</div>` : ""}
+    ${statBar("Compliance", truck.driver.compliance, "var(--caution)")}
+    ${traitChips.length ? `<div class="section-label">Traits</div><div class="chip-row">${traitChips.join("")}</div>` : ""}
+    ${liveChips.length ? `<div class="section-label">Right Now</div><div class="chip-row">${liveChips.join("")}</div>` : ""}
   `;
 }
 
