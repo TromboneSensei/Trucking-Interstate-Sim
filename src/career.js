@@ -140,6 +140,8 @@ const HEAT_COOLDOWN_PER_HOUR = 0.8; // law attention fades on its own, slowly, i
 const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat at 100
 const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
 const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
+export const SETTLEMENT_INTERVAL_HOURS = 168; // 1 game-week, elapsed GAME time - same convention as every other career.js timer, not real/wall-clock time
+const SETTLEMENT_OVERHEAD_PCT = 0.15; // insurance/permits/truck payment - the ongoing cost of OWNING a rig you don't personally drive, taken off the top before it reaches profile.cash
 
 // --- Hotshot missions ------------------------------------------------------
 //
@@ -418,6 +420,7 @@ function newProfile() {
     completedMissionIds: [],
     nextHiredId: 1, // Phase 11: hired trucks get string ids "H-1", "H-2", ... from THIS counter, never fleet.js's own numeric nextId - see the plan's "Hired Fleet ID Namespace" note
     hiredTrucks: [],
+    lastSettlementGameSeconds: null, // lazily set to the first gameSeconds checkSettlement() ever sees (career start OR a just-loaded save) - see checkSettlement's own doc comment
     log: [], // recent toast-worthy events, capped - see pushLog
   };
 }
@@ -589,6 +592,42 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
   if (truck?.agent) truck.agent.recompute();
 }
 
+// Sweeps each hired truck's net-new earnings (since its own last
+// settlement) into profile.cash, minus SETTLEMENT_OVERHEAD_PCT -
+// insurance/permits/the truck payment, the ongoing cost of OWNING a rig
+// rather than driving one yourself. Runs once per SETTLEMENT_INTERVAL_HOURS
+// of elapsed GAME time - checked from both the live per-frame tick (main.js)
+// and advanceTime's onSubstep below, so a week that passes entirely inside
+// one long sleep still pays out instead of waiting for the player to wake
+// up first. `trucks` is only ever used here to look up the handful of ids
+// already recorded in profile.hiredTrucks by id - never scanned/iterated
+// for its own sake (career.js otherwise stays out of the fleet array
+// entirely; see confirmHire's doc comment on that split).
+export function checkSettlement(gameSeconds, trucks) {
+  if (profile.lastSettlementGameSeconds == null) {
+    profile.lastSettlementGameSeconds = gameSeconds; // first check since career start/load - nothing to settle yet, just start the clock
+    return;
+  }
+  if (gameSeconds - profile.lastSettlementGameSeconds < SETTLEMENT_INTERVAL_HOURS * 3600) return;
+  profile.lastSettlementGameSeconds = gameSeconds;
+  if (!profile.hiredTrucks.length) return;
+
+  let totalTake = 0;
+  for (const entry of profile.hiredTrucks) {
+    const t = trucks.find((x) => x.id === entry.id);
+    if (!t) continue; // hired trucks are never removed from the live fleet, but never let a stale record throw
+    const gross = t.earnings - (entry.lastSettledEarnings ?? 0);
+    entry.lastSettledEarnings = t.earnings;
+    if (gross <= 0) continue; // a rough week (tows/fines already came straight out of t.earnings - see pumpFuel/dry-tank) - nothing to collect, and nothing to claw back either
+    totalTake += gross * (1 - SETTLEMENT_OVERHEAD_PCT);
+  }
+  if (totalTake > 0) {
+    profile.cash += totalTake;
+    profile.stats.fleetEarningsCollected = (profile.stats.fleetEarningsCollected ?? 0) + totalTake;
+    pushLog(`Weekly settlement: collected $${Math.round(totalTake).toLocaleString()} from your company, net of overhead.`);
+  }
+}
+
 // Wraps fastForwardHours with tickNeeds wired through onSubstep - the
 // ONE path DINER/SHOWERS/SLEEPER all use to actually let time (and the
 // rest of the fleet) pass while the player eats/showers/sleeps. See the
@@ -599,6 +638,7 @@ export function advanceTime(graph, trucks, weatherCells, truck, gameSeconds, hou
     ...opts,
     onSubstep: (gs, stepHours) => {
       tickNeeds(truck, stepHours, gs, opts.rnd);
+      checkSettlement(gs, trucks);
       if (opts.onSubstep) opts.onSubstep(gs, stepHours);
     },
   });
@@ -758,7 +798,7 @@ export function confirmHire(driver) {
   profile.cash -= HIRE_COST;
   profile.stats.totalSpent += HIRE_COST;
   const id = `H-${profile.nextHiredId++}`;
-  profile.hiredTrucks.push({ id, hiredAtGameSeconds: null });
+  profile.hiredTrucks.push({ id, hiredAtGameSeconds: null, lastSettledEarnings: 0 });
   pushLog(`Hired a new driver for $${HIRE_COST.toLocaleString()} - dispatched as ${id}.`);
   return { ok: true, id, driver };
 }

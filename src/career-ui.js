@@ -552,11 +552,18 @@ export function renderCareerTab(profile, truck, truckById) {
     const t = truckById?.get(h.id);
     if (!t) return `<div class="row-sub" style="padding:3px 0;">${h.id} - no longer in the fleet.</div>`;
     const status = t.parkedAt ? `parked at ${t.parkedAt}` : t.disabledHoursLeft > 0 ? "disabled roadside" : "hauling";
-    return `<div class="row-sub" style="padding:3px 0;">${t.name} (${h.id}) - ${status} - $${Math.round(t.earnings).toLocaleString()} lifetime, ${t.contractsCompleted} loads</div>`;
+    const pending = Math.max(0, t.earnings - (h.lastSettledEarnings ?? 0));
+    return `<div class="row-sub" style="padding:3px 0;">${t.name} (${h.id}) - ${status} - $${Math.round(t.earnings).toLocaleString()} lifetime, ${t.contractsCompleted} loads - $${Math.round(pending).toLocaleString()} pending payout</div>`;
   }).join("");
+  // Settlement clock: profile.lastSettlementGameSeconds is null for one
+  // frame right after career start/load (checkSettlement hasn't ticked
+  // yet) - fall back to "now" so the countdown reads as a full interval
+  // rather than a stale/negative number for that one frame.
+  const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (currentGameSeconds - (profile.lastSettlementGameSeconds ?? currentGameSeconds)));
   const companySection = !profile.hiredTrucks.length ? "" : `
     <div class="section-label">Your Company &mdash; ${profile.hiredTrucks.length} driver${profile.hiredTrucks.length === 1 ? "" : "s"}</div>
-    ${companyRows}`;
+    ${companyRows}
+    <div class="row-sub" style="padding:3px 0;">Next settlement in ~${Math.ceil(settlementIn / 3600)}h - pending payouts collect automatically, minus overhead.</div>`;
   careerEl.tabCareer.innerHTML = `
     <div class="metric-grid" style="margin-bottom:12px;">
       <div class="metric-card good"><div class="metric-title">Cash</div><div class="metric-value">$${Math.round(profile.cash).toLocaleString()}</div></div>
@@ -565,6 +572,7 @@ export function renderCareerTab(profile, truck, truckById) {
       <div class="metric-card"><div class="metric-title">Rescues</div><div class="metric-value">${s.rescues}</div></div>
       <div class="metric-card"><div class="metric-title">Total Earned</div><div class="metric-value">$${Math.round(totalEarned).toLocaleString()}</div></div>
       <div class="metric-card"><div class="metric-title">Total Spent</div><div class="metric-value">$${Math.round(s.totalSpent).toLocaleString()}</div></div>
+      ${profile.hiredTrucks.length ? `<div class="metric-card good"><div class="metric-title">Fleet Collected</div><div class="metric-value">$${Math.round(s.fleetEarningsCollected ?? 0).toLocaleString()}</div></div>` : ""}
     </div>
     <div class="section-label">Driver &amp; Rig</div>
     ${statBar("Hunger", profile.hunger / 100, "var(--go)")}

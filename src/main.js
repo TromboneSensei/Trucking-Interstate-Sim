@@ -891,6 +891,7 @@ function frame(now) {
         const ct = getCareerTruck();
         if (ct) {
           career.tickNeeds(ct, gameHours, state.gameSeconds);
+          career.checkSettlement(state.gameSeconds, trucks);
           if (ct.parkedAt && ct.stopReason === "PLAYER" && !isTruckStopOpen()) {
             openTruckStop(ct, graph, trucks, weather);
           }
