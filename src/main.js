@@ -710,7 +710,7 @@ function frame(now) {
           // just grabbing offer[0], so an unattended truck still behaves in
           // character.
           const t = state.contractTruck;
-          resolveContract(chooseOffer(t.pendingOffers, t.driver) || t.pendingOffers[0]);
+          resolveContract(chooseOffer(t.pendingOffers, t, graph) || t.pendingOffers[0]);
         }
       } else {
         state.decisionTimer -= dt;

@@ -181,20 +181,41 @@ export function generateContractOffers(graph, originName, count = 3, rnd = Math.
     return offers;
 }
 
+// Hometown Backhauler: chooseOffer also biases toward whichever offer
+// moves the truck closer to `truck.homeCity`, scaled by the driver's own
+// homeAttachment (driver.js) and a homesickness curve that strengthens
+// the longer the truck has been away - mild right after a home visit,
+// growing toward a hard preference past HOMESICK_FULL_MILES. This is what
+// naturally clusters trucks around their home regions over time and
+// creates rolling regional shortages/gluts, without ever hard-filtering
+// which loads a driver will take.
+const HOMESICK_FULL_MILES = 6000; // miles away at which the homesickness curve maxes out
+const HOMESICK_MAX_MULT = 1.5; // additional multiplier on homeAttachment at full homesickness
+
 // Which offer an AI driver takes. This is where driver personality finally
 // reaches a decision that matters: a hustler chases rate-per-mile, an
 // aggressive driver reaches for the long haul, a cautious one takes the
 // short local run. The random term keeps two identical drivers at the same
 // city from always making identical choices.
-export function chooseOffer(offers, driver, rnd = Math.random) {
+export function chooseOffer(offers, truck, graph, rnd = Math.random) {
     if (!offers.length) return null;
+    const driver = truck.driver;
+    const homeNode = graph.nodes[truck.homeCity];
     let best = offers[0], bestScore = -Infinity;
     for (const o of offers) {
         const ratePerMile = o.payout / Math.max(1, o.optimalMiles);
         const lengthPref = (o.optimalMiles / 1500) * (driver.aggression - 0.45);
-        const score = ratePerMile * (0.55 + driver.hustle * 0.9)
+        let score = ratePerMile * (0.55 + driver.hustle * 0.9)
             + lengthPref * 1.1
             + rnd() * 0.18;
+
+        if (homeNode) {
+            const originDist = haversineMiles(graph.nodes[o.origin], homeNode);
+            const destDist = haversineMiles(graph.nodes[o.destination], homeNode);
+            const homesickMult = 1 + Math.min(truck.milesSinceHome / HOMESICK_FULL_MILES, 1) * HOMESICK_MAX_MULT;
+            score += ((originDist - destDist) / 500) * driver.homeAttachment * homesickMult;
+        }
+
         if (score > bestScore) { bestScore = score; best = o; }
     }
     return best;

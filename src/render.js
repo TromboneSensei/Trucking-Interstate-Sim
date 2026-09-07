@@ -1147,11 +1147,30 @@ function edgeRightVector(edge) {
 // has no shoulder room to spare (HIGHWAY_LANE_OFFSET + TRUCK_DOT_RADIUS
 // already reaches HWY_BAND_HALF), so there the hazard color alone (see
 // DISABLED_TRUCK_COLOR) has to carry it.
+// Fatigue past this point (White Line Fever) draws the truck visibly
+// weaving across the lane markings, purely as a render-layer wobble -
+// truck.s/lane/laneT are never touched, so fleet.js's gap/anti-overlap
+// physics never sees it. Amplitude is deliberately less than half the
+// lane's own width (see RIGHT_LANE_OFFSET/LEFT_LANE_OFFSET), enough to
+// read as dangerous drifting without ever visually crossing into the
+// shoulder or the oncoming median. `truck.id` phases each truck's
+// oscillation so a cluster of exhausted trucks doesn't drift in unison.
+const FATIGUE_JITTER_THRESHOLD = 85;
+const FATIGUE_JITTER_AMPLITUDE = 2.0;
+let _renderGameSeconds = 0; // stashed once per drawFrame call (see below) so this can read a time value without threading gameSeconds through every truckWorldPos call site
+
 function laneOffsetFor(edge, truck) {
-  if (truck.disabledHoursLeft > 0) return edge.kind === "interstate" ? RIGHT_LANE_OFFSET + SHOULDER_W : HIGHWAY_LANE_OFFSET;
-  return edge.kind === "interstate"
+  // Shoulder Rider (mid-jam cheat) uses the exact same shoulder offset a
+  // disabled truck does - both are "off in the shoulder, not the travel
+  // lane" as far as rendering is concerned.
+  if (truck.onShoulder || truck.disabledHoursLeft > 0) return edge.kind === "interstate" ? RIGHT_LANE_OFFSET + SHOULDER_W : HIGHWAY_LANE_OFFSET;
+  let off = edge.kind === "interstate"
     ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT
     : HIGHWAY_LANE_OFFSET;
+  if (truck.fatigue > FATIGUE_JITTER_THRESHOLD) {
+    off += Math.sin(_renderGameSeconds * 0.5 + truck.id) * FATIGUE_JITTER_AMPLITUDE;
+  }
+  return off;
 }
 
 // --- junction corner-rounding ------------------------------------------
@@ -1265,7 +1284,10 @@ export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }) {
   const t = edge.miles > 0 ? Math.max(0, Math.min(1, truck.s / edge.miles)) : 0;
   const blend = Math.min(JUNCTION_BLEND_WORLD_UNITS, worldLen * JUNCTION_BLEND_MAX_FRACTION);
   const blendT = worldLen > 0 ? blend / worldLen : 0;
-  const disabled = truck.disabledHoursLeft > 0;
+  // A shoulder-riding truck, like a disabled one, doesn't smoothly curve
+  // through the junction geometry - it's cutting the corner off on the
+  // shoulder, so it uses the same straight-line truckWorldPos path below.
+  const disabled = truck.disabledHoursLeft > 0 || truck.onShoulder;
 
   if (!disabled && blendT > 0) {
     const nextEdge = truck.remainingPath[0];
@@ -1410,6 +1432,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // entirely at high noon" fast path.
   const dayNightOn = renderOpts.showDayNight !== false;
   const gameSeconds = renderOpts.gameSeconds || 0;
+  _renderGameSeconds = gameSeconds; // White Line Fever's fatigue jitter reads this from laneOffsetFor
   const timeScale = renderOpts.timeScale ?? 1;
   const visMinX = nav ? cullCx - cullRadius : cullMinX;
   const visMaxX = nav ? cullCx + cullRadius : cullMaxX;

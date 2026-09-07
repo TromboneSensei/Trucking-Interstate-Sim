@@ -55,6 +55,17 @@ const FOLLOW_TRIGGER_MULT = 1.15; // start capping speed at this multiple of the
 const EMERGENCY_BRAKE_MULT = 1.05; // hard speed clamp once the gap shrinks inside this multiple of the floor
 const PASS_CONSIDER_MULT = 3; // decide to change lanes this much earlier than the speed cap, so the visual lane-blend has room to complete
 const MAX_DEPARTURE_WAIT_REAL_S = 3; // defensive timeout so a truck can never stall forever
+
+// --- Convoy Drafter -----------------------------------------------------
+const DRAFT_MIN_LEADER_MPH = 55; // only worth tucking in at real highway speed
+const DRAFT_ENGAGE_SAFE_MULT = 5; // engage within this multiple of the anti-overlap floor
+
+// --- Shoulder Rider -------------------------------------------------------
+const SHOULDER_JAM_MPH = 25; // leader speed below this counts as "severely congested"
+const SHOULDER_TRIGGER_CHANCE = 0.004; // per-tick chance an eligible Outlaw actually takes the shoulder
+const SHOULDER_MIN_MILES = 0.4;
+const SHOULDER_MAX_MILES = 1.4;
+const SHOULDER_RIDE_MPH = 48; // flying-past-the-jam pace - well under a real open-road cruise speed
 const LANE_CHANGE_EASE = 2.0; // dt-multiplier for the visual lane-blend, same shape as speed easing
 const ARRIVAL_DECEL_BASE_MI = 0.5; // physically-plausible braking distance, unrelated to dot size
 const ARRIVAL_DECEL_PER_MPH = 0.06; // decel zone scales with the edge's speed limit
@@ -72,12 +83,21 @@ const ARRIVAL_MIN_MPH = 12;
 const DWELL_MIN_HOURS = 2;
 const DWELL_MAX_HOURS = 12;
 const DWELL_JITTER_HOURS = 1.5;
+// Lot Loiterer: a low-hustle driver (and, per driver.js's isOutlaw/hustle
+// split, never an Outlaw - an Outlaw's whole point is not sitting still)
+// stretches the layover ceiling from a normal 12h out to a real 24-36h
+// truck-stop hang, keeping the map's parked-badge tally visibly busy at
+// major stops without needing more trucks.
+const DWELL_LOITERER_MAX_HOURS = 36;
+const LOITERER_HUSTLE_THRESHOLD = 0.2;
 
 export function rollDwellHours(driver, rnd = Math.random) {
-  const span = DWELL_MAX_HOURS - DWELL_MIN_HOURS;
-  const base = DWELL_MAX_HOURS - span * driver.hustle;
+  const isLoiterer = driver.hustle < LOITERER_HUSTLE_THRESHOLD && !driver.isOutlaw;
+  const maxHours = isLoiterer ? DWELL_LOITERER_MAX_HOURS : DWELL_MAX_HOURS;
+  const span = maxHours - DWELL_MIN_HOURS;
+  const base = maxHours - span * driver.hustle;
   const jitter = (rnd() - 0.5) * 2 * DWELL_JITTER_HOURS;
-  return Math.max(DWELL_MIN_HOURS, Math.min(DWELL_MAX_HOURS, base + jitter));
+  return Math.max(DWELL_MIN_HOURS, Math.min(maxHours, base + jitter));
 }
 
 // --- fuel -----------------------------------------------------------------
@@ -421,6 +441,30 @@ export class Truck {
     // back onto), and later reused for junction corner-blending.
     this.prevEdge = null;
 
+    // Hometown Backhauler: the city this driver considers home - simply
+    // wherever they spawned, same as a real owner-operator's domicile.
+    // economy.js's chooseOffer reads this (with driver.homeAttachment) to
+    // bias load selection back toward it. milesSinceHome feeds the
+    // homesickness curve there and only resets when a delivery actually
+    // lands the truck back at homeCity (see _arriveAtDestination).
+    this.homeCity = spawnCityName;
+    this.milesSinceHome = 0;
+
+    // Convoy Drafter: set fresh every tick by applyFollowAndPassing,
+    // consumed the same tick by burnPerMile's fuel discount - never
+    // sticky state, so a draft's fuel savings only apply while a
+    // qualifying leader is actually being tucked in behind.
+    this.isDrafting = false;
+
+    // Shoulder Rider: a mid-jam shoulder cheat, Outlaws only (see
+    // applyFollowAndPassing). Distinct from `lane`/`laneT` - like a
+    // disabled truck, a shoulder-riding truck is excluded from the normal
+    // lane-group anti-overlap/follow physics entirely (buildLaneGroups),
+    // which is what actually lets it clear the jam instead of inheriting
+    // the blocked leader's speed cap.
+    this.onShoulder = false;
+    this.shoulderMilesLeft = 0;
+
     this._assignContract(graph, rnd);
   }
 
@@ -484,6 +528,7 @@ export class Truck {
     this.contractsCompleted++;
     this.dayDeliveries++;
     this.currentNode = this.contract.destination;
+    if (this.currentNode === this.homeCity) this.milesSinceHome = 0; // Hometown Backhauler: made it home, homesickness curve resets
     this.edge = null;
     this.pendingEdge = null;
     this.speed = 0;
@@ -610,6 +655,7 @@ function buildLaneGroups(trucks, disabledByEdge) {
   const groups = new Map();
   for (const truck of trucks) {
     if (!truck.edge) continue;
+    if (truck.onShoulder) continue; // Shoulder Rider: excluded from normal lane physics for the same reason a disabled truck is (see applyFollowAndPassing) - other trucks drive straight through its shoulder position
     const key = edgeId(truck.edge);
     if (truck.disabledHoursLeft > 0) {
       let arr = disabledByEdge.get(key);
@@ -724,8 +770,15 @@ function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
 // systematically different simulation, not just an occasional tie.
 // Preserving the exact original iteration order was necessary for a
 // true behavior-preserving optimization here.
-function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTargetSpeed) {
+function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTargetSpeed, rnd) {
   if (truck.edge.kind !== "interstate") return Infinity;
+
+  // Shoulder Rider, already engaged: buildLaneGroups excluded this truck
+  // from `laneGroups` for the whole tick (see its comment), so there's no
+  // leader/group to read here at all - just hold the flat "flying past
+  // the jam" pace until Phase 2's mileage countdown ends the ride.
+  if (truck.onShoulder) return SHOULDER_RIDE_MPH;
+
   const group = laneGroups.get(edgeId(truck.edge));
   if (!group) return Infinity;
   const leader = leaderMap.get(truck) || null;
@@ -733,6 +786,33 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTarget
   const safeMi = minSafeMiles(graph, truck.edge);
   const gapToLeader = leader ? leader.s - truck.s : Infinity;
   const timeGap = (truck.speed * FOLLOW_TIME_GAP_S) / 3600;
+
+  // Shoulder Rider ENGAGE check - this is the one tick that still sees a
+  // real leader (before exclusion kicks in next tick). Outlaws only, and
+  // only in a genuinely dead jam - a small per-tick chance rather than an
+  // instant reaction, so it reads as a driver deciding to risk it rather
+  // than a deterministic rule.
+  if (truck.driver.isOutlaw && truck.lane === 0 && leader && leader.speed < SHOULDER_JAM_MPH && rnd() < SHOULDER_TRIGGER_CHANCE) {
+    truck.onShoulder = true;
+    truck.shoulderMilesLeft = SHOULDER_MIN_MILES + rnd() * (SHOULDER_MAX_MILES - SHOULDER_MIN_MILES);
+    return SHOULDER_RIDE_MPH;
+  }
+
+  // Convoy Drafter: a same-lane leader running at real highway speed and
+  // close enough to tuck in behind. Locks the follow speed to exactly
+  // the leader's (not merely capped by it) so the pair actually travels
+  // together instead of the follower drifting back to its own cruise
+  // target the moment the gap opens a little - that persistence is what
+  // turns a chance encounter into a visible multi-truck convoy. Purely
+  // reactive (recomputed fresh every tick, never sticky): a driver only
+  // opts in while an actual qualifying leader is right there, and drops
+  // out the instant that stops being true - never considers a pass while
+  // drafting (see the `isDrafting` guard below skipping that block).
+  truck.isDrafting = !!(truck.driver.isDrafter && truck.lane === 0 && leader
+    && leader.speed >= DRAFT_MIN_LEADER_MPH
+    && gapToLeader < safeMi * DRAFT_ENGAGE_SAFE_MULT);
+  if (truck.isDrafting) return leader.speed;
+
   const blocked = gapToLeader < safeMi * FOLLOW_TRIGGER_MULT + timeGap;
   const followCap = blocked ? Math.min(cruiseTargetSpeed, leader.speed) : Infinity;
 
@@ -765,7 +845,7 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTarget
       truck.lane = 1;
       truck.passingLeaderId = leader.id;
     }
-  } else if (truck.lane === 1 && truck.passingLeaderId != null) {
+  } else if (truck.lane === 1 && truck.passingLeaderId != null && !truck.driver.isLaneCamper) {
     // Merge back once clear of the truck being passed (or it's gone -
     // arrived, took a different edge, whatever) and lane 0 is clear alongside.
     const passed = group.lane0.find((t) => t.id === truck.passingLeaderId);
@@ -775,6 +855,9 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTarget
       if (lane0Clear) { truck.lane = 0; truck.passingLeaderId = null; }
     }
   }
+  // Left-Lane Camper: isLaneCamper drivers hit the guard above and simply
+  // never merge back - a rolling roadblock in the passing lane until
+  // something else resets `lane` (arrival, a fresh contract leg, etc.).
 
   return followCap;
 }
@@ -966,7 +1049,8 @@ function clampOverlaps(graph, laneGroups) {
 // FUEL_DRAG_SPEED_MPH (an aggressive driver cruising fast pays for it).
 function burnPerMile(truck) {
   const drag = 1.0 + Math.pow(Math.max(0, truck.speed / FUEL_DRAG_SPEED_MPH - 1.0), 2);
-  return FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * drag;
+  const draftDiscount = truck.isDrafting ? 0.7 : 1.0; // Convoy Drafter: -30% burn while actually tucked in behind a leader
+  return FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * drag * draftDiscount;
 }
 
 // Rough remaining range in miles at this truck's current fuel level, for
@@ -1098,6 +1182,8 @@ function disableTruck(truck, reason, hours) {
   truck.speed = 0;
   truck.disabledHoursLeft = hours;
   truck.disabledReason = reason;
+  truck.onShoulder = false; // a breakdown/dry-tank mid shoulder-ride ends the ride; it resumes in the normal lane once repaired
+  truck.shoulderMilesLeft = 0;
 }
 
 // Speed multiplier from "rubbernecking" a disabled truck ahead on the
@@ -1207,7 +1293,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const preArrivalSpeed = targetSpeed;
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
     truck.arrivalBraking = targetSpeed < preArrivalSpeed;
-    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed));
+    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed, rnd));
 
     const rate = targetSpeed >= truck.speed ? truck.driver.accelRate : truck.driver.decelRate;
     truck.speed += (targetSpeed - truck.speed) * Math.min(1, dt * rate);
@@ -1223,6 +1309,11 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     truck.totalMilesDriven += miles;
     truck.dayMiles += miles;
     truck.milesSinceStop += miles;
+    truck.milesSinceHome += miles; // Hometown Backhauler's homesickness curve (economy.js's chooseOffer)
+    if (truck.onShoulder) {
+      truck.shoulderMilesLeft -= miles;
+      if (truck.shoulderMilesLeft <= 0) truck.onShoulder = false; // cleared the jam (or ran out the ride) - back to the normal travel lane next tick
+    }
     truck.fatigue = Math.min(FATIGUE_MAX, truck.fatigue + gameHours * FATIGUE_PER_HOUR);
     truck.fuel = Math.max(0, truck.fuel - miles * burnPerMile(truck));
 
@@ -1309,7 +1400,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         truck.awaitingContract = true;
         return truck;
       }
-      truck._takeContract(graph, chooseOffer(offers, truck.driver, rnd), laneGroups);
+      truck._takeContract(graph, chooseOffer(offers, truck, graph, rnd), laneGroups);
       continue;
     }
 
