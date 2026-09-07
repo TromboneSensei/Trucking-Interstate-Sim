@@ -1347,6 +1347,19 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // Phase 4: disabled trucks, layovers, rest/fuel stops, arrivals,
   // junction decisions, and departures, using the final (clamped)
   // positions.
+  //
+  // Only `controlledTruck` can ever need player input (awaitingDecision/
+  // awaitingContract are set nowhere else), so at most one truck per tick
+  // can produce a result here - but it must not `return` the INSTANT that
+  // happens. `trucks` is a flat array with no ordering guarantee relative
+  // to who's currently controlled, so an early return used to silently
+  // skip Phase 4 - arrivals, departures, dwell decrement, everything -
+  // for every truck later in the array that same tick, a real (if minor)
+  // bias toward trucks earlier in spawn order. Collect the awaiting
+  // result instead and let the loop finish so every truck gets its
+  // Phase 4 turn every tick regardless of where the controlled truck
+  // happens to sit in the array.
+  let awaitingResult = null;
   for (const truck of trucks) {
     if (truck.awaitingDecision || truck.awaitingContract) continue;
 
@@ -1384,7 +1397,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         truck.parkedAt = null;
         truck.milesSinceStop = 0;
         const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, true);
-        if (waiting) return waiting;
+        if (waiting) awaitingResult = waiting;
         continue;
       }
 
@@ -1398,7 +1411,8 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
       if (truck === controlledTruck) {
         truck.pendingOffers = offers;
         truck.awaitingContract = true;
-        return truck;
+        awaitingResult = truck;
+        continue;
       }
       truck._takeContract(graph, chooseOffer(offers, truck, graph, rnd), laneGroups);
       continue;
@@ -1426,7 +1440,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     }
 
     const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, false);
-    if (waiting) return waiting;
+    if (waiting) awaitingResult = waiting;
   }
-  return null;
+  return awaitingResult;
 }
