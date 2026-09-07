@@ -56,6 +56,14 @@ const EMERGENCY_BRAKE_MULT = 1.05; // hard speed clamp once the gap shrinks insi
 const PASS_CONSIDER_MULT = 3; // decide to change lanes this much earlier than the speed cap, so the visual lane-blend has room to complete
 const MAX_DEPARTURE_WAIT_REAL_S = 3; // defensive timeout so a truck can never stall forever
 
+// HAMMER intimidation aura (career mode): a career truck running HAMMER
+// closing on an ordinary AI truck holding the passing lane reads as
+// tailgating a semi at 18% over cruise - a real driver in that spot
+// backs off. Only low-aggression AI yields; an Outlaw/Super-Speeder is
+// exactly the driver who wouldn't.
+const INTIMIDATION_AGGRESSION_THRESHOLD = 0.8;
+const INTIMIDATION_TRIGGER_MULT = 2.5; // multiples of minSafeMiles - starts yielding before it'd actually be tailgating
+
 // --- Convoy Drafter -----------------------------------------------------
 const DRAFT_MIN_LEADER_MPH = 55; // only worth tucking in at real highway speed
 const DRAFT_ENGAGE_SAFE_MULT = 5; // engage within this multiple of the anti-overlap floor
@@ -811,7 +819,7 @@ function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
 // systematically different simulation, not just an occasional tie.
 // Preserving the exact original iteration order was necessary for a
 // true behavior-preserving optimization here.
-function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTargetSpeed, rnd) {
+function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, followerMap, cruiseTargetSpeed, rnd) {
   if (truck.edge.kind !== "interstate") return Infinity;
 
   // Shoulder Rider, already engaged: buildLaneGroups excluded this truck
@@ -899,6 +907,20 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, cruiseTarget
   // Left-Lane Camper: isLaneCamper drivers hit the guard above and simply
   // never merge back - a rolling roadblock in the passing lane until
   // something else resets `lane` (arrival, a fresh contract leg, etc.).
+
+  // HAMMER intimidation aura (career mode): checked independently of the
+  // pass/merge-back branch above, and independent of isLaneCamper - a
+  // closing player at 18% over cruise is a different force than that
+  // driver's own choice not to merge back, so it overrides the camper's
+  // stickiness too. High-aggression AI (Outlaws, Super-Speeders) hold
+  // their ground; intimidating them would be backwards.
+  if (truck.lane === 1 && truck.driver.aggression < INTIMIDATION_AGGRESSION_THRESHOLD) {
+    const follower = followerMap.get(truck);
+    if (follower?.agent?.hammering && truck.s - follower.s < safeMi * INTIMIDATION_TRIGGER_MULT) {
+      truck.lane = 0;
+      truck.passingLeaderId = null;
+    }
+  }
 
   return followCap;
 }
@@ -1349,9 +1371,18 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   // Phase 1's own iteration order over `trucks` doesn't change (see the
   // long comment on applyFollowAndPassing for why that order matters).
   const leaderMap = new Map();
+  // followerMap is the mirror of leaderMap (truck -> the truck directly
+  // behind it in the same lane) - built in the same pass since it's the
+  // same sorted-by-s arrays, purely so applyFollowAndPassing's HAMMER
+  // intimidation check can ask "is a career truck closing on ME from
+  // behind" in O(1) instead of rescanning the lane.
+  const followerMap = new Map();
   for (const group of laneGroups.values()) {
     for (const lane of [group.lane0, group.lane1]) {
-      for (let i = 0; i < lane.length - 1; i++) leaderMap.set(lane[i], lane[i + 1]);
+      for (let i = 0; i < lane.length - 1; i++) {
+        leaderMap.set(lane[i], lane[i + 1]);
+        followerMap.set(lane[i + 1], lane[i]);
+      }
     }
   }
 
@@ -1389,7 +1420,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     const preArrivalSpeed = targetSpeed;
     targetSpeed = Math.min(targetSpeed, arrivalSpeedCap(graph, truck, targetSpeed));
     truck.arrivalBraking = targetSpeed < preArrivalSpeed;
-    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, targetSpeed, rnd));
+    targetSpeed = Math.min(targetSpeed, applyFollowAndPassing(graph, truck, laneGroups, leaderMap, followerMap, targetSpeed, rnd));
 
     const rate = targetSpeed >= truck.speed ? truck.driver.accelRate : truck.driver.decelRate;
     truck.speed += (targetSpeed - truck.speed) * Math.min(1, dt * rate);

@@ -17,6 +17,7 @@ const careerEl = {
   careerHudCash: document.getElementById("career-hud-cash"),
   careerHudFuel: document.getElementById("career-hud-fuel"),
   btnPullIn: document.getElementById("btn-pull-in"),
+  throttleGroup: document.getElementById("throttle-group"),
   overlay: document.getElementById("truckstop-overlay"),
   city: document.getElementById("truckstop-city"),
   clock: document.getElementById("truckstop-clock"),
@@ -56,6 +57,15 @@ export function initCareerUI(callbacks) {
     if (!stopCtx) return;
     const t = stopCtx.truck;
     if (t.agent) t.agent.pullInRequested = true;
+  });
+  careerEl.throttleGroup.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-throttle]");
+    if (!btn) return;
+    const p = career.getProfile();
+    if (!p.active) return;
+    p.throttle = btn.dataset.throttle;
+    for (const c of careerEl.throttleGroup.children) c.classList.toggle("active", c === btn);
+    if (lastHudTruck && lastHudTruck.agent) lastHudTruck.agent.recompute();
   });
   careerEl.btnClose.addEventListener("click", closeTruckStop);
   careerEl.btnRollOut.addEventListener("click", handleRollOut);
@@ -391,7 +401,10 @@ function handleRollOut() {
 
 // --- HUD -------------------------------------------------------------
 
+let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which only updates while the Career tab itself is rendered) - the throttle group lives in the always-visible top HUD, so it needs a reference that's never stale regardless of which tab is open
+
 export function updateCareerHud(profile, truck) {
+  lastHudTruck = truck;
   const active = profile.active;
   careerEl.btnCareer.classList.toggle("active", active);
   careerEl.btnCareer.textContent = active ? "\u{1F69B} " + (truck ? truck.name : "CAREER") : "\u{1F69B} CAREER";
@@ -404,6 +417,10 @@ export function updateCareerHud(profile, truck) {
   const fuelPct = Math.round(truck.fuel);
   careerEl.careerHudFuel.textContent = `FUEL ${fuelPct}%`;
   careerEl.careerHudFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
+  // Keeps the highlighted chip in sync with profile.throttle even when it
+  // changed by some path other than clicking here - a fresh startCareer/
+  // reattachTruck, or a loaded save restoring a different value.
+  for (const c of careerEl.throttleGroup.children) c.classList.toggle("active", c.dataset.throttle === profile.throttle);
 }
 
 // --- Career tab (bottom sheet) ---------------------------------------

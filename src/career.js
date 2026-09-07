@@ -136,6 +136,9 @@ const CRITICAL_FUEL_PCT = 8; // hard safety floor - the player truck can never a
 const HUNGER_DECAY_PER_HOUR = 1.6; // ~2.6 days between meals before it bites
 const LOW_HUNGER_THRESHOLD = 20;
 const HEAT_COOLDOWN_PER_HOUR = 0.8; // law attention fades on its own, slowly, if you keep clean for a while
+const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat at 100
+const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
+const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
 
 function clamp01to100(v) { return Math.max(0, Math.min(100, v)); }
 
@@ -224,10 +227,17 @@ export function createAgent(truck, profile) {
   const agent = {
     speedMult: 1, wearMult: 1, burnMult: 1, fatigueMult: 1, restMult: 1,
     pullInRequested: false,
+    hammering: false, // read by fleet.js's HAMMER intimidation aura (applyFollowAndPassing) - kept as a plain flag rather than exposing profile.throttle itself, so fleet.js never has to know career's throttle naming
 
     recompute() {
       let speedMult = THROTTLE_MULT[profile.throttle] ?? 1;
-      let wearMult = 1, burnMult = 1, fatigueMult = 1, restMult = 1;
+      // HAMMER's extra speed doesn't come free: burns hotter and wears the
+      // rig faster (on top of the ticket-heat risk tickNeeds rolls
+      // separately). CONSERVE is the mirror image - a genuine fuel/wear
+      // saving for the patience.
+      let wearMult = profile.throttle === "HAMMER" ? 1.25 : profile.throttle === "CONSERVE" ? 0.9 : 1;
+      let burnMult = profile.throttle === "HAMMER" ? 1.15 : profile.throttle === "CONSERVE" ? 0.9 : 1;
+      let fatigueMult = 1, restMult = 1;
       // Upgrades (Phase 10 content - table is empty/no-op until upgrades exist)
       const up = profile.upgrades;
       if (up.engine >= 1) speedMult *= 1 + up.engine * 0.02;
@@ -249,6 +259,7 @@ export function createAgent(truck, profile) {
       this.burnMult = burnMult;
       this.fatigueMult = fatigueMult;
       this.restMult = restMult;
+      this.hammering = profile.throttle === "HAMMER";
     },
 
     // Pure (no mutation) - see fleet.js's nodeStopReason/arrivalSpeedCap,
@@ -411,11 +422,35 @@ function applyImmediate(effects, truck) {
 // truck-stop wait/sleep - the one place profile needs (hunger decay, heat
 // cooldown, buff expiry, multiplier recompute) actually advance with the
 // clock, regardless of whether time is passing live or fast-forwarded.
-export function tickNeeds(truck, gameHours, gameSeconds) {
+export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
   profile.hunger = clamp01to100(profile.hunger - gameHours * HUNGER_DECAY_PER_HOUR);
   if (profile.hunger < LOW_HUNGER_THRESHOLD) profile.morale = clamp01to100(profile.morale - gameHours * 2);
   profile.heat = clamp01to100(profile.heat - gameHours * HEAT_COOLDOWN_PER_HOUR);
-  profile.wear = clamp01to100(profile.wear + gameHours * 0.15 * (truck?.agent ? 1 / Math.max(0.2, truck.agent.wearMult) : 1));
+  // wearMult means "wears faster" everywhere else it's used (fleet.js
+  // multiplies it straight into the breakdown-probability roll) - it must
+  // be multiplied here too, not divided. HAMMER (wearMult 1.25) should
+  // accelerate wear, not slow it down.
+  profile.wear = clamp01to100(profile.wear + gameHours * 0.15 * (truck?.agent?.wearMult ?? 1));
+  // Ticket heat: HAMMER attracts attention while actually driving (not
+  // parked, not idling at a stop - `truck.edge` is only set while
+  // underway). It cools on its own the rest of the time via the line
+  // above. High sustained heat carries a real, escalating chance per hour
+  // of getting pulled over - the fine scales with how hot you were, and
+  // getting caught resets most of the heat (you've paid for it).
+  if (truck?.agent && truck.edge && profile.throttle === "HAMMER") {
+    profile.heat = clamp01to100(profile.heat + gameHours * HEAT_BUILD_PER_HOUR_HAMMER);
+  }
+  if (truck?.agent && truck.edge && profile.heat > 40) {
+    const chancePerHour = Math.pow(profile.heat / 100, 2) * TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT;
+    if (rnd() < chancePerHour * gameHours) {
+      const fine = TICKET_FINE_BASE + Math.round(profile.heat * 4);
+      profile.cash -= fine;
+      profile.stats.totalSpent += fine;
+      profile.stats.ticketsReceived++;
+      profile.heat = clamp01to100(profile.heat - 55);
+      pushLog(`Pulled over doing ${Math.round(truck.speed)} mph - $${fine.toLocaleString()} ticket.`);
+    }
+  }
   expireBuffs(gameSeconds, truck);
   // Delivery payout -> spendable cash. truck.earnings (gross, fleet-wide)
   // is already credited by fleet.js's _arriveAtDestination; this is the
@@ -446,7 +481,7 @@ export function advanceTime(graph, trucks, weatherCells, truck, gameSeconds, hou
   return fastForwardHours(graph, trucks, weatherCells, gameSeconds, hours, {
     ...opts,
     onSubstep: (gs, stepHours) => {
-      tickNeeds(truck, stepHours, gs);
+      tickNeeds(truck, stepHours, gs, opts.rnd);
       if (opts.onSubstep) opts.onSubstep(gs, stepHours);
     },
   });
