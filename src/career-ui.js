@@ -521,8 +521,9 @@ function renderMechanic() {
     const upgradeCost = def.costs[tier];
     const levelReq = def.levelReq[tier];
     const locked = p.level < levelReq;
-    const disabled = locked || p.cash < upgradeCost;
-    const reason = locked ? `Requires level ${levelReq} (you're ${p.level}).` : p.cash < upgradeCost ? `Can't afford it. ($${upgradeCost.toLocaleString()})` : "";
+    const missingPrereq = def.requires && !p.upgrades[def.requires];
+    const disabled = locked || missingPrereq || p.cash < upgradeCost;
+    const reason = missingPrereq ? `Requires ${def.requiresLabel} first.` : locked ? `Requires level ${levelReq} (you're ${p.level}).` : p.cash < upgradeCost ? `Can't afford it. ($${upgradeCost.toLocaleString()})` : "";
     const effect = UPGRADE_EFFECT[key](p);
     return `
       <button class="vendor-item${disabled ? " disabled" : ""}" data-action="upgrade" data-arg="${key}"${disabled && reason ? ` data-reason="${escAttr(reason)}"` : ""}>
@@ -556,7 +557,12 @@ const UPGRADE_EFFECT = {
   SLEEPER: () => "+25% rest recovery per tier",
   AERO: () => "−10% fuel burn",
   TANK: () => `+${career.TANK_UPGRADE_CAPACITY_BONUS}% fuel capacity`,
-  RADAR: () => `−${Math.round((1 - career.RADAR_TICKET_MULT) * 100)}% ticket risk, −${Math.round((1 - career.RADAR_DUI_MULT) * 100)}% DUI risk`,
+  APU: () => "+15% rest recovery (stacks with Sleeper Bunk)",
+  // Tier 2 - strictly better than (and requires) the Store's own $180
+  // Radar Detector, which stays at its own -45%/-50% (see the Store's
+  // GEAR category). Buying both is a real upgrade path, not the same
+  // flag bought twice.
+  RADAR: () => `−${Math.round((1 - career.RADAR_TIER2_TICKET_MULT) * 100)}% ticket risk, −${Math.round((1 - career.RADAR_TIER2_DUI_MULT) * 100)}% DUI risk (supersedes the Store's Radar Detector)`,
 };
 
 // Shared by FLEET's own render below - hiring is about the company as a
@@ -645,10 +651,8 @@ function handleAction(action, arg) {
   } else if (action === "sleep") {
     advanceAndRefresh(parseFloat(arg));
   } else if (action === "motel") {
-    const p = career.getProfile();
-    if (p.cash < 60) return;
-    p.cash -= 60; p.stats.totalSpent += 60;
-    advanceAndRefresh(8);
+    const res = career.stayAtMotel(truck);
+    if (res.ok) advanceAndRefresh(res.hours);
   } else if (action === "repair") {
     career.repairAtMechanic(truck);
     renderVendor(); renderStatus();
@@ -873,6 +877,10 @@ export function renderRigTab(profile, truck, gameSeconds) {
     if (profile.upgrades.tank) upgradeChips.push("Big Tank");
     if (profile.upgrades.apu) upgradeChips.push("APU");
     if (profile.upgrades.radar) upgradeChips.push("Radar Detector");
+    if (profile.upgrades.radarTier2) upgradeChips.push("Scanner Suite");
+    if (profile.upgrades.atlas) upgradeChips.push("Road Atlas");
+    if (profile.upgrades.audiobook) upgradeChips.push("Audiobook");
+    if (profile.upgrades.cbAntenna) upgradeChips.push("CB Antenna");
     const chipsHtml = upgradeChips.length
       ? upgradeChips.map((c) => `<span class="chip active" style="cursor:default;">${c}</span>`).join("")
       : `<span class="row-sub">No upgrades yet - visit the Mechanic.</span>`;

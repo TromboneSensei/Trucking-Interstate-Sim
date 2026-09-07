@@ -79,6 +79,10 @@ export const CB_TUNING = {
   // --- queue
   queueCap: 12, // pending lines never queue deeper than this
   highQueueCap: 6, // …of which at most this many may be ALERT or above, so banter always has room
+  // --- CB Antenna upgrade (career.js profile.upgrades.cbAntenna)
+  antennaQueueBonus: 4, // added to queueCap while the antenna is owned - more messages survive culling
+  antennaHighQueueBonus: 2, // added to highQueueCap
+  antennaViewportPadFrac: 0.35, // widens the box cbIngestEvent gates BREAKDOWN/DRY_TANK events on, as a fraction of the current viewport's own width/height each side - events from further away
   // A queued line older than this is thrown away rather than shown. The
   // feed reports on what is happening NOW; a jam line that only just
   // reached the front after sitting eight seconds behind a backlog is
@@ -270,14 +274,19 @@ const CB_CITY_FLAVOR = {
 // disabled rig on the speaker's own edge, ahead of it, within
 // CB_TUNING.breakdownAheadMiles.
 const CB_EVENT_LINES = {
+  // Rescue missions don't exist (out of scope by design), so these can't
+  // read as distress calls promising help that never comes - the truck's
+  // own driver is reporting a status, not asking the channel for aid.
+  // Matches BREAKDOWN_AHEAD's tone below (a bystander noting a hazard),
+  // just from the disabled rig's own seat instead of a passer-by's.
   BREAKDOWN: [
-    "Mayday, I'm dead in the water on {route} {dir} short of {ahead}. Something let go.",
+    "Broke down hard on {route} {dir} short of {ahead}. Something let go - sitting tight for a tow.",
     "Well, that's the end of that. Broke down on {route} {dir}.",
     "Got smoke and no power on {route}. Sitting on the shoulder.",
     "She quit on me on {route} coming into {ahead}. Rolling nowhere.",
   ],
   DRY_TANK: [
-    "Ran her dry on {route} short of {ahead}. Don't laugh, just send fuel.",
+    "Ran her dry on {route} short of {ahead}. Sitting tight till the fuel truck gets here.",
     "Out of go-juice on {route} {dir}. Rookie mistake.",
     "Sitting on empty on {route}. This one's on me.",
     "Tank's dry on {route} {dir} before {ahead}. Waiting on the fuel truck.",
@@ -311,6 +320,13 @@ let cbBadgeEl = null; // unread-alert count on the tab button
 let cbOnSelectTruck = null; // tapping a line hands the truck back to main.js
 let cbIsFeedVisible = null; // () => is the CB tab the one on screen?
 let cbQueue = []; // pending lines, highest priority first (see cbEnqueue)
+// CB Antenna upgrade (career.js STORE_ITEMS.CB_ANTENNA, profile.upgrades.
+// cbAntenna) - previously set a flag nothing read. Set each updateCB call
+// from cbCtx.antenna; cbEnqueue reads these instead of CB_TUNING's own
+// caps directly so "more messages survive culling" is real without
+// mutating CB_TUNING itself (which stays the honest baseline/default).
+let cbActiveQueueCap = CB_TUNING.queueCap;
+let cbActiveHighQueueCap = CB_TUNING.highQueueCap;
 let cbLastEmitMs = 0;
 let cbLastHighMs = 0; // last ALERT-or-above line
 let cbHighStreak = 0; // consecutive ALERT-or-above lines
@@ -669,7 +685,7 @@ function cbEnqueue(msg, nowMs) {
       highs++;
       if (oldest < 0 || cbQueue[i].queuedAt < cbQueue[oldest].queuedAt) oldest = i;
     }
-    if (highs >= CB_TUNING.highQueueCap && oldest >= 0) cbQueue.splice(oldest, 1);
+    if (highs >= cbActiveHighQueueCap && oldest >= 0) cbQueue.splice(oldest, 1);
   }
 
   let i = cbQueue.length;
@@ -679,7 +695,7 @@ function cbEnqueue(msg, nowMs) {
   // Over budget: drop the OLDEST of the lowest-priority band, not simply
   // the tail. The tail is the newest banter, and throwing that away means
   // the feed shows only lines that have already gone stale.
-  if (cbQueue.length > CB_TUNING.queueCap) {
+  if (cbQueue.length > cbActiveQueueCap) {
     const lowest = cbQueue[cbQueue.length - 1].priority;
     let j = cbQueue.length - 1;
     while (j > 0 && cbQueue[j - 1].priority === lowest) j--;
@@ -851,6 +867,22 @@ export function updateCB(nowMs, cbCtx) {
     cbSyncBadge();
   }
 
+  // CB Antenna: bump the queue caps for this call, and widen the box
+  // BREAKDOWN/DRY_TANK events are gated on so events just off the literal
+  // screen edge still get heard - see CB_TUNING's antenna* entries.
+  const antennaOn = !!cbCtx.antenna;
+  cbActiveQueueCap = antennaOn ? CB_TUNING.queueCap + CB_TUNING.antennaQueueBonus : CB_TUNING.queueCap;
+  cbActiveHighQueueCap = antennaOn ? CB_TUNING.highQueueCap + CB_TUNING.antennaHighQueueBonus : CB_TUNING.highQueueCap;
+  let eventViewport = cbCtx.viewport;
+  if (antennaOn && eventViewport) {
+    const padX = (eventViewport.maxX - eventViewport.minX) * CB_TUNING.antennaViewportPadFrac;
+    const padY = (eventViewport.maxY - eventViewport.minY) * CB_TUNING.antennaViewportPadFrac;
+    eventViewport = {
+      minX: eventViewport.minX - padX, maxX: eventViewport.maxX + padX,
+      minY: eventViewport.minY - padY, maxY: eventViewport.maxY + padY,
+    };
+  }
+
   const t = cbZoomT(cbCtx.camera);
   const flavorInterval = cbLerp(CB_TUNING.flavorIntervalMsOut, CB_TUNING.flavorIntervalMsIn, t);
   // The on-screen pool cbFindSpeaker/cbFindJam sample from - render.js's own
@@ -862,7 +894,7 @@ export function updateCB(nowMs, cbCtx) {
 
   // 1. Real events first - they're the reason this thing exists.
   if (cbCtx.events) {
-    for (const evt of cbCtx.events) cbIngestEvent(cbCtx.graph, evt, cbCtx.viewport, nowMs);
+    for (const evt of cbCtx.events) cbIngestEvent(cbCtx.graph, evt, eventViewport, nowMs);
   }
 
   // 2. Traffic watch: a visible truck crawling well under its own

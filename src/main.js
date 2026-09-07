@@ -1,6 +1,6 @@
 // main.js - boot + the single game loop. Ties the graph, fleet
 // simulation, camera, renderer, and dashboard together.
-import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
+import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel, findPath, optimalRouteHours, WORST_CASE_SPEED_MULT } from "./geo.js";
 import { spawnFleet, updateFleet, drainFleetEvents, BASE_TIME_SCALE, Truck, isCompanyTruck } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos, truckPose } from "./render.js";
@@ -506,6 +506,13 @@ function showDecisionPanel(truck) {
   // else re-routes, and resolveDecision recomputes the rest of the trip
   // from wherever the player sends it.
   const plannedEdge = truck.remainingPath[0];
+  // Road Atlas upgrade (career.js STORE_ITEMS.ROAD_ATLAS, profile.upgrades.
+  // atlas) - previously set a flag nothing read. Now it adds a worst-case
+  // ETA next to each option's plain A* distance, so a Hotshot deadline can
+  // be judged against a real bound rather than best-case miles alone. Only
+  // for the player's own truck - it's a personal accessory, not fleet-wide
+  // intel available to every AI decision.
+  const showAtlas = career.isActive() && truck === getCareerTruck() && career.getProfile().upgrades.atlas && !!truck.contract;
   truck.pendingOptions.forEach((opt, idx) => {
     const btn = document.createElement("button");
     btn.className = "decision-btn";
@@ -513,10 +520,18 @@ function showDecisionPanel(truck) {
     if (isPlanned) btn.classList.add("planned");
     const isInterstate = opt.route.startsWith("I-");
     const label = shieldLabel(opt.route);
+    let atlasHtml = "";
+    if (showAtlas) {
+      const rest = opt.to === truck.contract.destination ? [] : (findPath(graph, opt.to, truck.contract.destination) || []);
+      const optimalHours = optimalRouteHours([opt, ...rest]);
+      const worstHours = optimalHours / WORST_CASE_SPEED_MULT;
+      atlasHtml = `<span class="datlas">\u{1F4D6} ${formatDriveHours(optimalHours)} best &bull; ${formatDriveHours(worstHours)} worst-case</span>`;
+    }
     btn.innerHTML = `<div class="shield${isInterstate ? "" : " hwy"}"><span class="shield-num">${label.replace(/^I-/, "")}</span></div>
       <span class="droute">${routeWithDirection(opt)}</span>
       <span class="dcity">${isPlanned ? "Continue to " : "Re-route to "}${opt.control}</span>
       <span class="ddist">${Math.round(opt.miles)} mi to ${opt.to}</span>
+      ${atlasHtml}
       <span class="dkey">[${idx + 1}]</span>`;
     btn.addEventListener("click", () => resolveDecision(opt));
     el.decisionOptions.appendChild(btn);
@@ -1025,6 +1040,9 @@ function frame(now) {
       trucks,
       visibleTrucks: frameStats.visibleTrucks,
       viewport: frameStats.viewport,
+      // CB Antenna upgrade (career.js profile.upgrades.cbAntenna) - widens
+      // cb.js's own event-visibility box and raises its queue caps.
+      antenna: career.isActive() && career.getProfile().upgrades.cbAntenna,
       camera,
       gameSeconds: state.gameSeconds,
       weather,

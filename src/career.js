@@ -140,6 +140,27 @@ const HEAT_COOLDOWN_PER_HOUR = 0.8; // law attention fades on its own, slowly, i
 const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat at 100
 const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
 const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
+const LONG_HAUL_BOREDOM_MILES = 400; // legs shorter than this don't grind on morale at all
+const LONG_HAUL_MORALE_DECAY_PER_HOUR = 0.6; // ~a full night's rest worth of morale over one long haul, halved+ by the Audiobook upgrade
+
+// Reputation (profile.reputation) previously had exactly one reader
+// (STORE_ITEMS.TRUCKERS_CHOICE's repMin gate) and zero sources - it could
+// never move off 0, which made that gate permanently closed. These are its
+// sources: delivering earns it, getting caught (a ticket, a DUI) or
+// blowing a Hotshot deadline spends it.
+const REP_GAIN_DELIVERY = 1;
+const REP_GAIN_HOTSHOT_ON_TIME = 3;
+const REP_LOSS_HOTSHOT_MISSED = 3;
+const REP_LOSS_TICKET = 2;
+const REP_LOSS_DUI = 3;
+
+// Health (profile.health) previously only ever went DOWN (Trucker's
+// Choice, Cigarettes) with nothing reading it beyond the RIG vitals
+// display. Below this threshold it makes fatigue worse AND puts a real
+// ceiling on morale (see recompute()'s fatigueMult and tickNeeds' cap
+// below) - so letting it slide has a cost beyond a sad number in a bar.
+const LOW_HEALTH_THRESHOLD = 50;
+const LOW_HEALTH_FATIGUE_MULT = 1.2;
 export const SETTLEMENT_INTERVAL_HOURS = 168; // 1 game-week, elapsed GAME time - same convention as every other career.js timer, not real/wall-clock time
 const SETTLEMENT_OVERHEAD_PCT = 0.15; // insurance/permits/truck payment - the ongoing cost of OWNING a rig you don't personally drive, taken off the top before it reaches profile.cash
 
@@ -197,20 +218,33 @@ function levelForXp(xp) {
 // floor), and RADAR, which career.js's own ticket-risk roll in tickNeeds
 // reads directly. `costs`/`levelReq` are indexed by CURRENT tier (0-based),
 // i.e. costs[0] is the price to go from tier 0 to tier 1.
+//
+// RADAR is a tier 2, not a duplicate of the STORE's own Radar Detector -
+// this used to set the exact same profile.upgrades.radar flag as the $180
+// store item, so buying the $2,200 mechanic version did nothing the $180
+// one hadn't already done. Now it's a separate field gated on the basic
+// one already being owned (`requires`), and its own, stronger multipliers
+// (RADAR_TIER2_TICKET_MULT/RADAR_TIER2_DUI_MULT below) - a real second
+// purchase with a real second effect, not the same flag twice.
 export const UPGRADES = {
   ENGINE: { label: "Engine", field: "engine", maxTier: 3, costs: [1500, 3000, 5000], levelReq: [1, 3, 6] },
   TIRES: { label: "Tires", field: "tires", maxTier: 3, costs: [700, 1500, 2500], levelReq: [1, 2, 4] },
   SLEEPER: { label: "Sleeper Bunk", field: "sleeper", maxTier: 3, costs: [1000, 2000, 3200], levelReq: [1, 3, 5] },
   AERO: { label: "Aero Kit", field: "aero", maxTier: 1, costs: [1800], levelReq: [2] },
   TANK: { label: "Big Tank", field: "tank", maxTier: 1, costs: [2000], levelReq: [2] },
-  RADAR: { label: "Radar Detector", field: "radar", maxTier: 1, costs: [2200], levelReq: [3] },
+  APU: { label: "Auxiliary Power Unit", field: "apu", maxTier: 1, costs: [2400], levelReq: [3] },
+  RADAR: { label: "Scanner Suite", field: "radarTier2", maxTier: 1, costs: [2200], levelReq: [3], requires: "radar", requiresLabel: "the Radar Detector (Store)" },
 };
 export const TANK_UPGRADE_CAPACITY_BONUS = 40; // +40% over the stock 100-unit tank
-// Radar detector: shared by the STORE item and the MECHANIC upgrade (both
-// set the same profile.upgrades.radar flag - see career-ui.js's mechanic
-// panel for why that duplication is called out rather than hidden).
+// Radar Detector (Store, $180 - profile.upgrades.radar) is the basic tier.
+// Scanner Suite (Mechanic, $2,200 - profile.upgrades.radarTier2, requires
+// the basic one already owned) is strictly better and supersedes it -
+// tickNeeds/buyStoreItem below check radarTier2 first, falling back to the
+// basic mult only when it isn't owned.
 export const RADAR_TICKET_MULT = 0.55;
 export const RADAR_DUI_MULT = 0.5;
+export const RADAR_TIER2_TICKET_MULT = 0.25;
+export const RADAR_TIER2_DUI_MULT = 0.3;
 
 function upgradeTier(def) {
   const v = profile.upgrades[def.field];
@@ -226,6 +260,7 @@ export function buyUpgrade(truck, key) {
   if (!def) return { ok: false, reason: "Unknown upgrade." };
   const tier = upgradeTier(def);
   if (tier >= def.maxTier) return { ok: false, reason: "Already maxed out." };
+  if (def.requires && !profile.upgrades[def.requires]) return { ok: false, reason: `Requires ${def.requiresLabel} first.` };
   if (profile.level < def.levelReq[tier]) return { ok: false, reason: `Requires level ${def.levelReq[tier]}.` };
   const cost = def.costs[tier];
   if (profile.cash < cost) return { ok: false, reason: "Can't afford it." };
@@ -303,6 +338,15 @@ export function regionalSpecialFor(cityNode) {
 
 const SHOWER_PRICE = 14, SHOWER_HOURS = 0.5;
 const SHOWER_FREE_FUEL_UNITS = 40; // fill this much or more at the same stop and the shower's free, same as a real truck stop loyalty perk
+// A real bed genuinely beats the bunk - previously the $60 motel just
+// called the same advanceTime(8) a free 8h nap would, with nothing to
+// show for the money. Now it clears fatigue completely (a nap only ever
+// projects down toward 0, never guaranteed to reach it - see career-ui.js's
+// REST tab preview) and tops up morale/hunger well past what a nap alone
+// touches at all.
+const MOTEL_PRICE = 60, MOTEL_HOURS = 8;
+const MOTEL_MORALE_BONUS = 30;
+const MOTEL_HUNGER_BONUS = 25;
 
 // Repair: cheap to keep clean, punishing to neglect - mirrors the real
 // tradeoff (preventive maintenance vs. gambling on a roadside breakdown).
@@ -344,6 +388,7 @@ export function createAgent(truck, profile) {
       if (up.aero) burnMult *= 0.9;
       if (up.tires >= 1) wearMult *= 1 - up.tires * 0.15;
       if (up.sleeper >= 1) restMult *= 1 + up.sleeper * 0.25;
+      if (up.apu) restMult *= 1.15; // Auxiliary Power Unit - idle-free climate control, better sleep quality
       // Active buffs
       for (const b of profile.buffs) {
         const e = b.effects || {};
@@ -354,6 +399,7 @@ export function createAgent(truck, profile) {
       // Low morale makes for a tired, sloppy driver.
       if (profile.morale < 30) fatigueMult *= 1.15;
       if (profile.hunger < LOW_HUNGER_THRESHOLD) fatigueMult *= 1.1;
+      if (profile.health < LOW_HEALTH_THRESHOLD) fatigueMult *= LOW_HEALTH_FATIGUE_MULT;
       this.speedMult = speedMult;
       this.wearMult = Math.max(0.1, wearMult);
       this.burnMult = burnMult;
@@ -424,7 +470,7 @@ function newProfile() {
     health: 100,
     wear: 0,
     throttle: "LEGAL",
-    upgrades: { engine: 0, aero: false, tires: 0, sleeper: 0, tank: 0, apu: false, radar: false, atlas: false, audiobook: false, cbAntenna: false },
+    upgrades: { engine: 0, aero: false, tires: 0, sleeper: 0, tank: 0, apu: false, radar: false, radarTier2: false, atlas: false, audiobook: false, cbAntenna: false },
     buffs: [], // [{ id, kind, label, expiresAtGameSeconds, effects }]
     endorsements: { hazmat: false, oversize: false, tanker: false, doubles: false },
     // Deliveries/earnings/miles for the truck CURRENTLY being driven live
@@ -540,6 +586,25 @@ function applyImmediate(effects, truck) {
 export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
   profile.hunger = clamp01to100(profile.hunger - gameHours * HUNGER_DECAY_PER_HOUR);
   if (profile.hunger < LOW_HUNGER_THRESHOLD) profile.morale = clamp01to100(profile.morale - gameHours * 2);
+  // Long-haul boredom: a leg over LONG_HAUL_BOREDOM_MILES grinds on morale
+  // while actually underway (truck.edge - not while parked at a stop on
+  // the same contract). Audiobook upgrade (STORE_ITEMS.AUDIOBOOK,
+  // profile.upgrades.audiobook) previously set a flag nothing read; it
+  // now cuts this decay rather than eliminating it outright ("slows",
+  // per the design note on making dead content real).
+  if (truck?.edge && truck.contract && truck.contract.optimalMiles > LONG_HAUL_BOREDOM_MILES) {
+    const audiobookMult = profile.upgrades.audiobook ? 0.4 : 1;
+    profile.morale = clamp01to100(profile.morale - gameHours * LONG_HAUL_MORALE_DECAY_PER_HOUR * audiobookMult);
+  }
+  // Poor health puts a real ceiling on morale - a purchase can still push
+  // morale up (a six-pack, a good meal), but it can't buy past what a
+  // battered body allows. Re-applied every tick rather than at the point
+  // of each individual gain, so it also catches health dropping BELOW an
+  // already-high morale (the ceiling closes in on it, not just holds it back).
+  if (profile.health < LOW_HEALTH_THRESHOLD) {
+    const moraleCap = 50 + profile.health;
+    if (profile.morale > moraleCap) profile.morale = moraleCap;
+  }
   profile.heat = clamp01to100(profile.heat - gameHours * HEAT_COOLDOWN_PER_HOUR);
   // wearMult means "wears faster" everywhere else it's used (fleet.js
   // multiplies it straight into the breakdown-probability roll) - it must
@@ -556,10 +621,11 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
     profile.heat = clamp01to100(profile.heat + gameHours * HEAT_BUILD_PER_HOUR_HAMMER);
   }
   if (truck?.agent && truck.edge && profile.heat > 40) {
-    // Radar detector (Phase 10 upgrade): -45% ticket risk, applied here
-    // rather than as an agent multiplier since it affects a probability
-    // roll, not a physical quantity fleet.js reads.
-    const radarMult = profile.upgrades.radar ? RADAR_TICKET_MULT : 1;
+    // Radar detector (Phase 10 upgrade): -45% ticket risk (basic, Store),
+    // or -75% with the Scanner Suite (Mechanic, requires the basic one) -
+    // applied here rather than as an agent multiplier since it affects a
+    // probability roll, not a physical quantity fleet.js reads.
+    const radarMult = profile.upgrades.radarTier2 ? RADAR_TIER2_TICKET_MULT : profile.upgrades.radar ? RADAR_TICKET_MULT : 1;
     const chancePerHour = Math.pow(profile.heat / 100, 2) * TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT * radarMult;
     if (rnd() < chancePerHour * gameHours) {
       const fine = TICKET_FINE_BASE + Math.round(profile.heat * 4);
@@ -567,6 +633,7 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
       profile.stats.totalSpent += fine;
       profile.stats.ticketsReceived++;
       profile.heat = clamp01to100(profile.heat - 55);
+      profile.reputation = clamp01to100(profile.reputation - REP_LOSS_TICKET);
       pushLog(`Pulled over doing ${Math.round(truck.speed)} mph - $${fine.toLocaleString()} ticket.`);
     }
   }
@@ -593,11 +660,14 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
         profile.cash += c.bonusPayout;
         profile.stats.onTimeDeliveries++;
         profile.stats.hotshotBonusEarned += c.bonusPayout;
+        profile.reputation = clamp01to100(profile.reputation + REP_GAIN_HOTSHOT_ON_TIME);
         pushLog(`HOTSHOT delivered on time — collected $${Math.round(c.payout).toLocaleString()} + $${c.bonusPayout.toLocaleString()} bonus.`);
       } else {
+        profile.reputation = clamp01to100(profile.reputation - REP_LOSS_HOTSHOT_MISSED);
         pushLog(`HOTSHOT missed its deadline — still collected the base $${Math.round(c.payout).toLocaleString()}, no bonus.`);
       }
     } else {
+      profile.reputation = clamp01to100(profile.reputation + REP_GAIN_DELIVERY);
       pushLog(`Delivered ${c.cargo} — collected $${Math.round(c.payout).toLocaleString()}.`);
     }
     // XP only from what was actually earned (base + any on-time Hotshot
@@ -697,9 +767,11 @@ export function buyStoreItem(truck, itemKind) {
       effects: item.effects || {},
     });
   }
-  if (item.dui && Math.random() < item.dui * (profile.upgrades.radar ? RADAR_DUI_MULT : 1)) {
+  const duiMult = profile.upgrades.radarTier2 ? RADAR_TIER2_DUI_MULT : profile.upgrades.radar ? RADAR_DUI_MULT : 1;
+  if (item.dui && Math.random() < item.dui * duiMult) {
     profile.stats.duiCount++;
     profile.heat = clamp01to100(profile.heat + 35);
+    profile.reputation = clamp01to100(profile.reputation - REP_LOSS_DUI);
     pushLog(`Cutting it close with the bottle tonight - heat's up.`);
   }
   if (truck.agent) truck.agent.recompute();
@@ -737,6 +809,17 @@ export function takeShower(fuelUnitsThisStop) {
   profile.morale = clamp01to100(profile.morale + 15);
   pushLog(free ? "Free shower - filled up enough for it." : `Showered for $${SHOWER_PRICE}.`);
   return { ok: true, hours: SHOWER_HOURS, free };
+}
+
+export function stayAtMotel(truck) {
+  if (profile.cash < MOTEL_PRICE) return { ok: false, reason: "Can't afford it." };
+  profile.cash -= MOTEL_PRICE;
+  profile.stats.totalSpent += MOTEL_PRICE;
+  if (truck) truck.fatigue = 0;
+  profile.morale = clamp01to100(profile.morale + MOTEL_MORALE_BONUS);
+  profile.hunger = clamp01to100(profile.hunger + MOTEL_HUNGER_BONUS);
+  pushLog(`Got a real bed at the motel for $${MOTEL_PRICE} - woke up fully rested.`);
+  return { ok: true, hours: MOTEL_HOURS };
 }
 
 export function repairAtMechanic(truck) {

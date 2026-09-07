@@ -337,6 +337,27 @@ export function findPath(graph, startName, goalName) {
     return null;
 }
 
+// The optimal (A*-cost) hours to drive a sequence of edges - the same per-
+// edge formula findPath's own gScore uses, exposed standalone so a caller
+// holding a path (not walking it) can get its time cost without re-running
+// the search. Used by the Road Atlas upgrade's worst-case ETA below.
+export function optimalRouteHours(edges) {
+    let hours = 0;
+    for (const e of edges) hours += (e.miles / e.speedLimit) * (e.kind === "highway" ? HIGHWAY_ROUTE_PENALTY : 1);
+    return hours;
+}
+
+// Worst-case multiplier on optimalRouteHours: the single deepest snowstorm
+// speed penalty (weather.js's SNOW_WORST) stacked with the single worst
+// moment of rush-hour crawl through a major metro (fleet.js's RUSH_WORST),
+// both at full intensity for the entire route. Not a prediction - weather
+// can't be known this far ahead - it's an honest upper bound: "if every
+// mile of this route hit the worst conditions the sim can produce, here's
+// how long it'd take." The Road Atlas upgrade shows this alongside the
+// optimal estimate so a Hotshot deadline can be judged against a real
+// worst case, not just best-case A* miles.
+export const WORST_CASE_SPEED_MULT = 0.68 * 0.62;
+
 // ---------------------------------------------------------------------
 // World time-of-day. Lives here rather than in render.js because it's
 // pure geography/time math with no drawing in it, and BOTH the simulation
