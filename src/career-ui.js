@@ -17,6 +17,7 @@ const careerEl = {
   careerHudCash: document.getElementById("career-hud-cash"),
   careerHudFuel: document.getElementById("career-hud-fuel"),
   btnPullIn: document.getElementById("btn-pull-in"),
+  hotshotHud: document.getElementById("career-hud-hotshot"),
   throttleGroup: document.getElementById("throttle-group"),
   overlay: document.getElementById("truckstop-overlay"),
   city: document.getElementById("truckstop-city"),
@@ -342,12 +343,17 @@ function renderBoard() {
   }
   const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
   if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>`;
+  career.decorateHotshot(offers);
   const rows = offers.map((o, i) => {
     const rpm = o.payout / Math.max(1, o.optimalMiles);
+    const hotshotBadge = o.hotshot
+      ? `<span class="v-desc" style="color:var(--stop);font-weight:600;">HOTSHOT &bull; ${o.deadlineHours.toFixed(1)}h deadline &bull; +$${o.bonusPayout.toLocaleString()} on time</span>`
+      : "";
     return `
       <button class="vendor-item" data-action="take-load" data-arg="${i}" style="--cargo:${o.truckType.color}">
         <span class="v-name">${o.cargo}</span>
         <span class="v-desc">&rarr; ${o.destination} &bull; ${Math.round(o.optimalMiles).toLocaleString()} mi &bull; $${rpm.toFixed(2)}/mi</span>
+        ${hotshotBadge}
         <span class="v-meta"><span>${o.truckType.label}</span><span class="v-price">$${o.payout.toLocaleString()}</span></span>
       </button>`;
   }).join("");
@@ -385,7 +391,7 @@ function handleAction(action, arg) {
   } else if (action === "take-load") {
     const offer = careerEl._lastOffers && careerEl._lastOffers[parseInt(arg, 10)];
     if (!offer) return;
-    career.takeOffer(graph, truck, offer);
+    career.takeOffer(graph, truck, offer, currentGameSeconds);
     closeTruckStop();
     if (onRollOut) onRollOut(null); // no junction pending - a fresh contract always starts clean
   }
@@ -403,7 +409,7 @@ function handleRollOut() {
 
 let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which only updates while the Career tab itself is rendered) - the throttle group lives in the always-visible top HUD, so it needs a reference that's never stale regardless of which tab is open
 
-export function updateCareerHud(profile, truck) {
+export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
   const active = profile.active;
   careerEl.btnCareer.classList.toggle("active", active);
@@ -417,6 +423,12 @@ export function updateCareerHud(profile, truck) {
   const fuelPct = Math.round(truck.fuel);
   careerEl.careerHudFuel.textContent = `FUEL ${fuelPct}%`;
   careerEl.careerHudFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
+  const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
+  careerEl.hotshotHud.classList.toggle("hidden", !hotshot);
+  if (hotshot) {
+    const hoursLeft = (truck.contract.deadlineGameSeconds - gameSeconds) / 3600;
+    careerEl.hotshotHud.textContent = hoursLeft > 0 ? `HOTSHOT ${hoursLeft.toFixed(1)}h left` : "HOTSHOT LATE";
+  }
   // Keeps the highlighted chip in sync with profile.throttle even when it
   // changed by some path other than clicking here - a fresh startCareer/
   // reattachTruck, or a loaded save restoring a different value.

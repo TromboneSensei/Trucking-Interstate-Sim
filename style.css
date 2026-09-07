@@ -972,6 +972,7 @@ html, body {
 }
 #career-hud-cash { color: var(--go); }
 #career-hud-fuel { color: var(--ink); }
+#career-hud-hotshot { color: var(--stop); font-weight: 700; }
 /* Throttle: CONSERVE trades speed for fuel/wear (safe green), LEGAL is
    cruise-speed baseline (neutral), HAMMER trades fuel/wear/ticket-heat for
    speed (risk red) - same semantic colors as everywhere else in the app,

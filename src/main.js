@@ -870,7 +870,7 @@ function frame(now) {
     }
 
     if (isTruckStopOpen()) refreshTruckStop(state.gameSeconds);
-    updateCareerHud(career.getProfile(), getCareerTruck());
+    updateCareerHud(career.getProfile(), getCareerTruck(), state.gameSeconds);
 
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";

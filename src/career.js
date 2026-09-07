@@ -140,6 +140,32 @@ const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat
 const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
 const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
 
+// --- Hotshot missions ------------------------------------------------------
+//
+// The simplest mission type in the plan's table: any load, a hard deadline,
+// 1.8x pay. Deliberately does NOT inflate `contract.payout` itself - that
+// field is also what fleet.js adds to truck.earnings (gross revenue, feeds
+// fleet-wide rankings/the digest for the other 9999 autopilot trucks), so
+// baking the bonus into it would leak career-only pay into numbers that are
+// supposed to mean the same thing for every truck. The bonus lives
+// separately (`bonusPayout`) and is only ever added to `profile.cash`, on
+// time, by the delivery-credit block in tickNeeds below.
+const HOTSHOT_CHANCE = 0.35; // roughly 1 in 3 load-board refreshes offers one
+const HOTSHOT_PAYOUT_MULT = 1.8;
+const HOTSHOT_DEADLINE_SLACK_MULT = 1.35; // multiple of the route's own optimalHours - tight, but doable without reckless driving
+
+// Marks at most one of a freshly generated set of load offers as a Hotshot
+// - called by career-ui.js right after fetching offers from
+// generateContractOffers, before rendering the board. Mutates in place
+// (the offers are freshly generated objects nothing else references yet).
+export function decorateHotshot(offers, rnd = Math.random) {
+  if (!offers.length || rnd() > HOTSHOT_CHANCE) return;
+  const o = offers[Math.floor(rnd() * offers.length)];
+  o.hotshot = true;
+  o.bonusPayout = Math.round(o.payout * (HOTSHOT_PAYOUT_MULT - 1));
+  o.deadlineHours = Math.max(1, o.optimalHours * HOTSHOT_DEADLINE_SLACK_MULT);
+}
+
 function clamp01to100(v) { return Math.max(0, Math.min(100, v)); }
 
 // --- store / diner content ----------------------------------------------
@@ -323,7 +349,7 @@ function newProfile() {
     // career (a fresh truck after a breakdown/upgrade doesn't reset
     // them), and onTimeDeliveries/fuelUnitsBought exist for Phase 9/10
     // missions and progression, which don't exist yet.
-    stats: { onTimeDeliveries: 0, rescues: 0, ticketsReceived: 0, duiCount: 0, totalSpent: 0, fuelUnitsBought: 0 },
+    stats: { onTimeDeliveries: 0, rescues: 0, ticketsReceived: 0, duiCount: 0, totalSpent: 0, fuelUnitsBought: 0, hotshotBonusEarned: 0 },
     missions: [],
     completedMissionIds: [],
     nextHiredId: 1, // Phase 11: hired trucks get string ids "H-1", "H-2", ... from THIS counter, never fleet.js's own numeric nextId - see the plan's "Hired Fleet ID Namespace" note
@@ -466,8 +492,21 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
   // firing every frame/substep while parked at that stop.
   if (truck && truck.stopVendor === "BOARD" && truck.contract && truck.contract !== lastCreditedContract) {
     lastCreditedContract = truck.contract;
-    profile.cash += truck.contract.payout;
-    pushLog(`Delivered ${truck.contract.cargo} — collected $${Math.round(truck.contract.payout).toLocaleString()}.`);
+    const c = truck.contract;
+    profile.cash += c.payout;
+    if (c.hotshot) {
+      const onTime = c.deadlineGameSeconds != null && gameSeconds <= c.deadlineGameSeconds;
+      if (onTime) {
+        profile.cash += c.bonusPayout;
+        profile.stats.onTimeDeliveries++;
+        profile.stats.hotshotBonusEarned += c.bonusPayout;
+        pushLog(`HOTSHOT delivered on time — collected $${Math.round(c.payout).toLocaleString()} + $${c.bonusPayout.toLocaleString()} bonus.`);
+      } else {
+        pushLog(`HOTSHOT missed its deadline — still collected the base $${Math.round(c.payout).toLocaleString()}, no bonus.`);
+      }
+    } else {
+      pushLog(`Delivered ${c.cargo} — collected $${Math.round(c.payout).toLocaleString()}.`);
+    }
   }
   if (truck?.agent) truck.agent.recompute();
 }
@@ -588,11 +627,18 @@ export function rollOut(graph, truck) {
 // BOARD vendor. Mirrors main.js's existing resolveContract exactly
 // (truck._takeContract(graph, offer, null) from a synchronous UI
 // handler, laneGroups=null for the same reason documented on
-// resumeFromPlayerStop).
-export function takeOffer(graph, truck, offer) {
+// resumeFromPlayerStop). `gameSeconds` is only used to stamp a Hotshot's
+// absolute deadline - an ordinary load doesn't need it and callers that
+// omit it just never produce a hotshot deadline (still take the load fine).
+export function takeOffer(graph, truck, offer, gameSeconds) {
   truck.stopVendor = null;
   truck._takeContract(graph, offer, null);
-  pushLog(`Took on ${offer.cargo} bound for ${offer.destination}.`);
+  if (offer.hotshot && gameSeconds != null) {
+    offer.deadlineGameSeconds = gameSeconds + offer.deadlineHours * 3600;
+    pushLog(`Took on HOTSHOT ${offer.cargo} bound for ${offer.destination} - ${offer.deadlineHours.toFixed(1)}h to deliver for the $${offer.bonusPayout.toLocaleString()} bonus.`);
+  } else {
+    pushLog(`Took on ${offer.cargo} bound for ${offer.destination}.`);
+  }
 }
 
 // --- save / load ---------------------------------------------------------
