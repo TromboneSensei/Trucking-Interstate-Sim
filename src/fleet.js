@@ -128,7 +128,7 @@ const FATIGUE_MAX = 100; // hard ceiling, so a driver who skipped rest can't rea
 // 100-point gauge) instead of clawing back a quarter of it. At the old
 // symmetric 6/hour a truck could never sleep its way out of fatigue
 // inside one night's window.
-const FATIGUE_RECOVERY_PER_HOUR = 25.0;
+export const FATIGUE_RECOVERY_PER_HOUR = 25.0;
 const FATIGUE_REST_THRESHOLD = 50;
 const REST_MIN_HOURS = 4.0;
 const REST_MAX_HOURS = 6.0;

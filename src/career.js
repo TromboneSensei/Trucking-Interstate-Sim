@@ -205,7 +205,12 @@ export const UPGRADES = {
   TANK: { label: "Big Tank", field: "tank", maxTier: 1, costs: [2000], levelReq: [2] },
   RADAR: { label: "Radar Detector", field: "radar", maxTier: 1, costs: [2200], levelReq: [3] },
 };
-const TANK_UPGRADE_CAPACITY_BONUS = 40; // +40% over the stock 100-unit tank
+export const TANK_UPGRADE_CAPACITY_BONUS = 40; // +40% over the stock 100-unit tank
+// Radar detector: shared by the STORE item and the MECHANIC upgrade (both
+// set the same profile.upgrades.radar flag - see career-ui.js's mechanic
+// panel for why that duplication is called out rather than hidden).
+export const RADAR_TICKET_MULT = 0.55;
+export const RADAR_DUI_MULT = 0.5;
 
 function upgradeTier(def) {
   const v = profile.upgrades[def.field];
@@ -241,34 +246,37 @@ export function buyUpgrade(truck, key) {
 // for its duration, then - if `crash` is set - a second immediate effect
 // fires once on expiry). Buffs are looked up by `kind` at tick time rather
 // than carrying closures, so a buff is plain, save-able data.
+// `cat` groups the store shelf for display (career-ui.js's SUPPLIES vendor):
+// CAFFEINE / FOOD / BOOZE / GEAR - a flat 15-item grid otherwise makes the
+// player scroll past everything to find one thing.
 export const STORE_ITEMS = {
-  COFFEE: { label: "Coffee", price: 3, immediate: { fatigue: -18 }, buffHours: 3, effects: {} },
-  BOTTOMLESS_CUP: { label: "Bottomless Cup", price: 5, immediate: { fatigue: -30 }, buffHours: 4, effects: {} },
+  COFFEE: { label: "Coffee", price: 3, cat: "CAFFEINE", immediate: { fatigue: -18 }, buffHours: 3, effects: {} },
+  BOTTOMLESS_CUP: { label: "Bottomless Cup", price: 5, cat: "CAFFEINE", immediate: { fatigue: -30 }, buffHours: 4, effects: {} },
   ENERGY_DRINK: {
-    label: "Energy Drink", price: 6, immediate: { fatigue: -35 }, buffHours: 4,
+    label: "Energy Drink", price: 6, cat: "CAFFEINE", immediate: { fatigue: -35 }, buffHours: 4,
     effects: { speedMult: 1.06 }, crash: { fatigue: 20 },
   },
   TRUCKERS_CHOICE: {
-    label: "Trucker's Choice", price: 40, repMin: 10, immediate: { fatigue: -70, health: -4, heat: 8 }, buffHours: 9,
+    label: "Trucker's Choice", price: 40, cat: "CAFFEINE", repMin: 10, immediate: { fatigue: -70, health: -4, heat: 8 }, buffHours: 9,
     effects: {}, crash: { fatigue: 45 },
   },
-  JERKY: { label: "Beef Jerky", price: 5, immediate: { hunger: 22, morale: 3 } },
-  SUNFLOWER_SEEDS: { label: "Sunflower Seeds", price: 3, immediate: { hunger: 8, morale: 6 } },
-  CANDY: { label: "Candy Bar", price: 4, immediate: { hunger: 10, morale: 4 } },
+  JERKY: { label: "Beef Jerky", price: 5, cat: "FOOD", immediate: { hunger: 22, morale: 3 } },
+  SUNFLOWER_SEEDS: { label: "Sunflower Seeds", price: 3, cat: "FOOD", immediate: { hunger: 8, morale: 6 } },
+  CANDY: { label: "Candy Bar", price: 4, cat: "FOOD", immediate: { hunger: 10, morale: 4 } },
   SIX_PACK: {
-    label: "Six-Pack", price: 12, parkedOnly: true, immediate: { morale: 25 }, buffHours: 6,
+    label: "Six-Pack", price: 12, cat: "BOOZE", parkedOnly: true, immediate: { morale: 25 }, buffHours: 6,
     effects: { fatigueMult: 0.9 }, dui: 0.35,
   },
   WHISKEY_PINT: {
-    label: "Whiskey Pint", price: 22, parkedOnly: true, immediate: { morale: 40 }, buffHours: 10,
+    label: "Whiskey Pint", price: 22, cat: "BOOZE", parkedOnly: true, immediate: { morale: 40 }, buffHours: 10,
     effects: { fatigueMult: 0.75 }, dui: 0.7,
   },
-  CIGARETTES: { label: "Cigarettes", price: 9, immediate: { morale: 8, health: -2 } },
-  RADAR_DETECTOR: { label: "Radar Detector", price: 180, permanent: "radar", immediate: {} },
-  ROAD_ATLAS: { label: "Road Atlas", price: 25, permanent: "atlas", immediate: {} },
-  AUDIOBOOK: { label: "Audiobook", price: 15, permanent: "audiobook", immediate: { morale: 5 } },
-  SLEEP_AID: { label: "Sleep Aid", price: 12, immediate: {}, buffHours: 10, effects: { restMult: 1.3 } },
-  CB_ANTENNA: { label: "CB Antenna", price: 90, permanent: "cbAntenna", immediate: {} },
+  CIGARETTES: { label: "Cigarettes", price: 9, cat: "BOOZE", immediate: { morale: 8, health: -2 } },
+  RADAR_DETECTOR: { label: "Radar Detector", price: 180, cat: "GEAR", permanent: "radar", immediate: {} },
+  ROAD_ATLAS: { label: "Road Atlas", price: 25, cat: "GEAR", permanent: "atlas", immediate: {} },
+  AUDIOBOOK: { label: "Audiobook", price: 15, cat: "GEAR", permanent: "audiobook", immediate: { morale: 5 } },
+  SLEEP_AID: { label: "Sleep Aid", price: 12, cat: "GEAR", immediate: {}, buffHours: 10, effects: { restMult: 1.3 } },
+  CB_ANTENNA: { label: "CB Antenna", price: 90, cat: "GEAR", permanent: "cbAntenna", immediate: {} },
 };
 
 // DINER: three tiers, plus a regional headline pulled from whatever the
@@ -551,7 +559,7 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
     // Radar detector (Phase 10 upgrade): -45% ticket risk, applied here
     // rather than as an agent multiplier since it affects a probability
     // roll, not a physical quantity fleet.js reads.
-    const radarMult = profile.upgrades.radar ? 0.55 : 1;
+    const radarMult = profile.upgrades.radar ? RADAR_TICKET_MULT : 1;
     const chancePerHour = Math.pow(profile.heat / 100, 2) * TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT * radarMult;
     if (rnd() < chancePerHour * gameHours) {
       const fine = TICKET_FINE_BASE + Math.round(profile.heat * 4);
@@ -689,7 +697,7 @@ export function buyStoreItem(truck, itemKind) {
       effects: item.effects || {},
     });
   }
-  if (item.dui && Math.random() < item.dui * (profile.upgrades.radar ? 0.5 : 1)) {
+  if (item.dui && Math.random() < item.dui * (profile.upgrades.radar ? RADAR_DUI_MULT : 1)) {
     profile.stats.duiCount++;
     profile.heat = clamp01to100(profile.heat + 35);
     pushLog(`Cutting it close with the bottle tonight - heat's up.`);

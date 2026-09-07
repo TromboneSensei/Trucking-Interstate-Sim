@@ -9,7 +9,7 @@
 "use strict";
 
 import * as career from "./career.js";
-import { pumpFuel, estimatedRangeMiles } from "./fleet.js";
+import { pumpFuel, estimatedRangeMiles, FATIGUE_RECOVERY_PER_HOUR } from "./fleet.js";
 import { generateContractOffers } from "./economy.js";
 import { traitSummary } from "./driver.js";
 import { openTab, preserveScroll } from "./ui.js";
@@ -47,8 +47,12 @@ const careerEl = {
   tabCbHome: document.getElementById("tab-cb"),
 };
 
-const VENDORS = ["PUMPS", "STORE", "DINER", "SHOWERS", "SLEEPER", "MECHANIC", "BOARD"];
-const VENDOR_LABEL = { PUMPS: "Pumps", STORE: "Store", DINER: "Diner", SHOWERS: "Showers", SLEEPER: "Sleeper", MECHANIC: "Mechanic", BOARD: "Board" };
+// Down from 7 to 5: REST folds Showers+Sleeper (both are "recover" actions),
+// SUPPLIES folds Store+Diner (both are "buy consumables" actions) - a phone
+// width can't show 7 tabs without one scrolled off, and the two merges are
+// natural (see the plan's truck-stop rework section).
+const VENDORS = ["FUEL", "REST", "SUPPLIES", "SHOP", "LOADS"];
+const VENDOR_LABEL = { FUEL: "Fuel", REST: "Rest", SUPPLIES: "Supplies", SHOP: "Shop", LOADS: "Loads" };
 
 let onStartCareer = null; // () => void - main.js decides which truck becomes the career truck
 let onTimeAdvanced = null; // (newGameSeconds) => void - keeps main.js's state.gameSeconds in sync
@@ -57,7 +61,7 @@ let onCareerEnded = null; // () => void - reserved, not fired yet
 let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is the only place that can actually construct a Truck and push it into the live fleet (career.js never touches `trucks`)
 
 let open = false;
-let activeVendor = "PUMPS";
+let activeVendor = "FUEL";
 let stopCtx = null; // { truck, graph, trucks, weather, boardOffers }
 let fuelUnitsThisStop = 0; // tracked for the shower's "free with a big fill" perk
 let hireCandidate = null; // the currently-rolled DriverDNA shown in FLEET's hiring section, re-rolled each time it renders fresh
@@ -97,11 +101,21 @@ export function initCareerUI(callbacks) {
   });
 
   // Delegated click for every vendor item grid - each button carries
-  // data-action/data-arg so one listener covers PUMPS/STORE/DINER/
-  // SHOWERS/SLEEPER/MECHANIC/BOARD without seven separate handlers.
+  // data-action/data-arg so one listener covers FUEL/REST/SUPPLIES/SHOP/
+  // LOADS without five separate handlers. A "logically disabled" item
+  // (can't afford it, wrong requirements) keeps its data-action and a
+  // .disabled class instead of the native disabled attribute, plus a
+  // data-reason - so clicking it still fires here and can toast WHY,
+  // rather than silently doing nothing (native :disabled never dispatches
+  // a click at all). An item with no data-action (MECHANIC's "Maxed out"
+  // card) is simply inert, same as before.
   careerEl.content.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
-    if (!btn || btn.disabled) return;
+    if (!btn) return;
+    if (btn.classList.contains("disabled")) {
+      if (btn.dataset.reason) toastNow(btn.dataset.reason);
+      return;
+    }
     handleAction(btn.dataset.action, btn.dataset.arg);
   });
 
@@ -181,12 +195,16 @@ export function isTruckStopOpen() { return open; }
 // delivery-credit check (tickNeeds) and the Roll Out gate below both key
 // off that same field meaning "a load hasn't been taken yet."
 function pickDefaultVendor(truck) {
-  if (truck.stopVendor !== "BOARD") return truck.stopVendor || "PUMPS";
+  // truck.stopVendor is fleet.js/career.js's own field for WHY the truck
+  // stopped ("BOARD" = arrived for a delivery, "PUMPS" = a fuel-critical
+  // pull-in, null otherwise) - unrelated to and untouched by this UI's own
+  // (renamed) vendor-tab keys below.
+  if (truck.stopVendor !== "BOARD") return "FUEL";
   const p = career.getProfile();
-  if (Math.round(truck.fuel) <= 15) return "PUMPS";
-  if (truck.fatigue > 70) return "SLEEPER";
-  if (p.hunger < 20) return "DINER";
-  return "BOARD";
+  if (Math.round(truck.fuel) <= 15) return "FUEL";
+  if (truck.fatigue > 70) return "REST";
+  if (p.hunger < 20) return "SUPPLIES";
+  return "LOADS";
 }
 
 export function openTruckStop(truck, graph, trucks, weather) {
@@ -237,11 +255,11 @@ function renderTabs() {
   careerEl.tabs.innerHTML = VENDORS.map((v) =>
     `<button class="vendor-tab-btn${v === activeVendor ? " active" : ""}" data-vendor="${v}">${VENDOR_LABEL[v]}</button>`
   ).join("");
-  // The row scrolls horizontally (7 vendors don't fit a phone width) - a
-  // stop that opens straight onto a tab near the end (BOARD, on a
-  // delivery arrival) would otherwise render with its own active tab
-  // scrolled off-screen, no visual cue which vendor you're even looking
-  // at. block:"nearest" only scrolls if it's actually out of view.
+  // All 5 fit a phone width now (down from 7), but this still guards a
+  // stop that opens straight onto a tab near the end (LOADS, on a delivery
+  // arrival) rendering with its own active tab scrolled off-screen, no
+  // visual cue which vendor you're even looking at. block:"nearest" only
+  // scrolls if it's actually out of view.
   const activeBtn = careerEl.tabs.querySelector(".vendor-tab-btn.active");
   if (activeBtn) activeBtn.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
@@ -306,6 +324,13 @@ function statChip(label, value, color) {
   return `<div class="stat-chip"><span class="stat-label">${label}</span><span style="color:${color || "var(--ink)"}">${value}</span></div>`;
 }
 
+// Attribute-safe escaping for the disabled-reason strings baked into
+// data-reason (they can contain a live dollar amount or a reputation
+// number, never raw user input, but the quote still has to be escaped).
+function escAttr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
 function renderStatus() {
   if (!stopCtx) return;
   const { truck } = stopCtx;
@@ -332,9 +357,16 @@ function renderStatus() {
 }
 
 function renderVendor() {
-  const fn = { PUMPS: renderPumps, STORE: renderStore, DINER: renderDiner, SHOWERS: renderShowers, SLEEPER: renderSleeper, MECHANIC: renderMechanic, BOARD: renderBoard }[activeVendor];
+  const fn = { FUEL: renderPumps, REST: renderRest, SUPPLIES: renderSupplies, SHOP: renderMechanic, LOADS: renderBoard }[activeVendor];
   careerEl.content.innerHTML = fn ? fn() : "";
 }
+
+// Every vendor-item button below follows the same pattern for a "logically
+// disabled" item: keep data-action/data-arg (so the delegated click
+// listener above still sees it), add the .disabled class instead of the
+// native disabled attribute, and set data-reason to whatever {ok:false,
+// reason} string the matching career.js call would have returned - so a
+// tap on a greyed-out item explains itself instead of doing nothing.
 
 const FUEL_PRICE_BASE = 3.5;
 function renderPumps() {
@@ -346,6 +378,9 @@ function renderPumps() {
   const price = Math.round((FUEL_PRICE_BASE + ((h % 60) / 100 - 0.3)) * 100) / 100;
   const range = Math.round(estimatedRangeMiles(truck));
   const maxAffordable = career.maxAffordableFuelUnits(truck, price);
+  const tankFull = truck.fuelCapacity - truck.fuel < 0.1;
+  const brokeForFuel = !tankFull && maxAffordable < 0.1;
+  const fillReason = tankFull ? "Tank's already full." : brokeForFuel ? "Can't afford any fuel." : "";
   const fillLevels = [
     { label: "Top 25%", units: Math.min(maxAffordable, truck.fuelCapacity * 0.25) },
     { label: "Top 50%", units: Math.min(maxAffordable, truck.fuelCapacity * 0.5) },
@@ -354,33 +389,61 @@ function renderPumps() {
   return `
     <div class="vendor-section-title">Diesel &mdash; $${price.toFixed(2)}/gal &bull; tank ${Math.round(truck.fuel)}% &bull; ~${range.toLocaleString()} mi range</div>
     <div class="vendor-grid">
-      ${fillLevels.map((f) => `
-        <button class="vendor-item" data-action="fuel" data-arg="${f.units.toFixed(2)}|${price}" ${f.units < 0.1 ? "disabled" : ""}>
+      ${fillLevels.map((f) => {
+        const disabled = f.units < 0.1;
+        return `<button class="vendor-item${disabled ? " disabled" : ""}" data-action="fuel" data-arg="${f.units.toFixed(2)}|${price}"${disabled && fillReason ? ` data-reason="${escAttr(fillReason)}"` : ""}>
           <span class="v-name">${f.label}</span>
           <span class="v-desc">+${Math.round(f.units)} gal</span>
           <span class="v-meta"><span></span><span class="v-price expense">$${Math.round(f.units * price).toLocaleString()}</span></span>
-        </button>`).join("")}
+        </button>`;
+      }).join("")}
     </div>
     <div class="vendor-section-title" style="margin-top:4px;">Cash on hand: $${Math.round(p.cash).toLocaleString()}</div>
   `;
 }
 
-function renderStore() {
+// REST = Showers + Sleeper - both are "recover" actions, and a phone-width
+// vendor row can't show all 7 of the old vendors without one scrolling off.
+const NAP_LENGTHS = [2, 4, 6, 8, 10];
+function renderRest() {
   const { truck } = stopCtx;
   const p = career.getProfile();
-  const rows = Object.entries(career.STORE_ITEMS).map(([kind, item]) => {
-    const locked = (item.parkedOnly && truck.edge) || (item.repMin != null && p.reputation < item.repMin);
-    const owned = item.permanent && p.upgrades[item.permanent];
-    const disabled = locked || owned || p.cash < item.price;
-    const desc = item.permanent ? "Permanent upgrade" : summarizeEffects(item);
+  const free = fuelUnitsThisStop >= 40; // mirrors career.js's own (unexported) SHOWER_FREE_FUEL_UNITS
+  const showerDisabled = !free && p.cash < 14;
+  // Sleeper preview: current fatigue -> projected fatigue for each nap
+  // length, using the truck's own live restMult (folds in the Sleeper Bunk
+  // upgrade and any active buff like Sleep Aid) - the actual number that
+  // hour of sleep will produce, not a flat/generic estimate.
+  const restMult = truck.agent ? truck.agent.restMult : 1;
+  const napRows = NAP_LENGTHS.map((hrs) => {
+    const projected = Math.max(0, truck.fatigue - hrs * FATIGUE_RECOVERY_PER_HOUR * restMult);
     return `
-      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="store" data-arg="${kind}" ${disabled ? "disabled" : ""}>
-        <span class="v-name">${item.label}${owned ? " &#10003;" : ""}</span>
-        <span class="v-desc">${owned ? "Already own this" : desc}</span>
-        <span class="v-meta"><span></span><span class="v-price expense">$${item.price}</span></span>
+      <button class="vendor-item" data-action="sleep" data-arg="${hrs}">
+        <span class="v-name">${hrs}h Nap</span>
+        <span class="v-desc">Fatigue ${Math.round(truck.fatigue)}% &rarr; ${Math.round(projected)}%</span>
+        <span class="v-meta"><span>${hrs}h</span><span class="v-price">FREE</span></span>
       </button>`;
   }).join("");
-  return `<div class="vendor-section-title">Truck Stop Store</div><div class="vendor-grid">${rows}</div>`;
+  const motelDisabled = p.cash < 60;
+  return `
+    <div class="vendor-section-title">Showers</div>
+    <div class="vendor-grid">
+      <button class="vendor-item${showerDisabled ? " disabled" : ""}" data-action="shower" data-arg=""${showerDisabled ? ` data-reason="${escAttr("Can't afford it. ($14)")}"` : ""}>
+        <span class="v-name">Hot Shower</span>
+        <span class="v-desc">${free ? "Free - you filled up enough this stop" : "+15 morale"}</span>
+        <span class="v-meta"><span>0.5h</span><span class="v-price ${free ? "" : "expense"}">${free ? "FREE" : "$14"}</span></span>
+      </button>
+    </div>
+    <div class="vendor-section-title">Sleeper Cab &mdash; pick a nap length</div>
+    <div class="vendor-grid">${napRows}</div>
+    <div class="vendor-section-title">Motel</div>
+    <div class="vendor-grid">
+      <button class="vendor-item${motelDisabled ? " disabled" : ""}" data-action="motel" data-arg=""${motelDisabled ? ` data-reason="${escAttr("Can't afford it. ($60)")}"` : ""}>
+        <span class="v-name">Motel Room</span>
+        <span class="v-desc">Full fatigue clear, bigger morale/hunger top-up - real function beats a free nap</span>
+        <span class="v-meta"><span>8h</span><span class="v-price expense">$60</span></span>
+      </button>
+    </div>`;
 }
 
 function summarizeEffects(item) {
@@ -395,52 +458,61 @@ function summarizeEffects(item) {
   return bits.join(" &bull; ") || "&nbsp;";
 }
 
-function renderDiner() {
+const STORE_CATEGORIES = [
+  { key: "CAFFEINE", label: "Caffeine & Stimulants" },
+  { key: "FOOD", label: "Snacks" },
+  { key: "BOOZE", label: "Vices" },
+  { key: "GEAR", label: "Gear" },
+];
+
+// SUPPLIES = Store + Diner - both are "buy a consumable" actions. The
+// store's own 15 items are grouped by career.js's STORE_ITEMS[].cat rather
+// than one long flat grid.
+function renderSupplies() {
   const { truck, graph } = stopCtx;
+  const p = career.getProfile();
   const node = graph.nodes[truck.parkedAt];
   const special = career.regionalSpecialFor(node);
-  const rows = Object.entries(career.DINER_MENU).map(([tier, item]) => `
-    <button class="vendor-item" data-action="diner" data-arg="${tier}" ${career.getProfile().cash < item.price ? "disabled" : ""}>
-      <span class="v-name">${item.label}</span>
-      <span class="v-desc">${tier === "SITDOWN" ? "Today's special: " + special : `+${item.immediate.hunger} hunger &bull; ${item.hours}h`}</span>
-      <span class="v-meta"><span>${item.hours}h</span><span class="v-price expense">$${item.price}</span></span>
-    </button>`).join("");
-  return `<div class="vendor-section-title">Diner</div><div class="vendor-grid">${rows}</div>`;
-}
+  const dinerRows = Object.entries(career.DINER_MENU).map(([tier, item]) => {
+    const disabled = p.cash < item.price;
+    return `
+      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="diner" data-arg="${tier}"${disabled ? ` data-reason="${escAttr(`Can't afford it. ($${item.price})`)}"` : ""}>
+        <span class="v-name">${item.label}</span>
+        <span class="v-desc">${tier === "SITDOWN" ? "Today's special: " + special : `+${item.immediate.hunger} hunger &bull; ${item.hours}h`}</span>
+        <span class="v-meta"><span>${item.hours}h</span><span class="v-price expense">$${item.price}</span></span>
+      </button>`;
+  }).join("");
 
-function renderShowers() {
-  const free = fuelUnitsThisStop >= 40;
-  return `
-    <div class="vendor-section-title">Showers</div>
-    <div class="vendor-grid">
-      <button class="vendor-item" data-action="shower" data-arg="">
-        <span class="v-name">Hot Shower</span>
-        <span class="v-desc">${free ? "Free - you filled up enough this stop" : "+15 morale"}</span>
-        <span class="v-meta"><span>0.5h</span><span class="v-price ${free ? "" : "expense"}">${free ? "FREE" : "$14"}</span></span>
-      </button>
-    </div>`;
-}
+  const catSections = STORE_CATEGORIES.map((cat) => {
+    const rows = Object.entries(career.STORE_ITEMS).filter(([, item]) => item.cat === cat.key).map(([kind, item]) => {
+      const parkedBlock = item.parkedOnly && truck.edge;
+      const repBlock = item.repMin != null && p.reputation < item.repMin;
+      const owned = item.permanent && p.upgrades[item.permanent];
+      const cashBlock = p.cash < item.price;
+      const disabled = parkedBlock || repBlock || owned || cashBlock;
+      const reason = parkedBlock ? "Parked only - pull over first."
+        : repBlock ? `Requires reputation ${item.repMin}+ (you're ${Math.round(p.reputation)}).`
+        : cashBlock ? `Can't afford it. ($${item.price})`
+        : "";
+      const desc = owned ? "Already own this" : item.permanent ? "Permanent upgrade" : summarizeEffects(item);
+      return `
+        <button class="vendor-item${disabled ? " disabled" : ""}" data-action="store" data-arg="${kind}"${disabled && reason ? ` data-reason="${escAttr(reason)}"` : ""}>
+          <span class="v-name">${item.label}${owned ? " &#10003;" : ""}</span>
+          <span class="v-desc">${desc}</span>
+          <span class="v-meta"><span></span><span class="v-price expense">$${item.price}</span></span>
+        </button>`;
+    }).join("");
+    return rows ? `<div class="vendor-section-title">${cat.label}</div><div class="vendor-grid">${rows}</div>` : "";
+  }).join("");
 
-const NAP_LENGTHS = [2, 4, 6, 8, 10];
-function renderSleeper() {
-  return `
-    <div class="vendor-section-title">Sleeper Cab &mdash; pick a nap length</div>
-    <div class="chip-row">
-      ${NAP_LENGTHS.map((h) => `<button class="chip" data-action="sleep" data-arg="${h}">${h}h</button>`).join("")}
-    </div>
-    <div class="vendor-grid">
-      <button class="vendor-item" data-action="motel" data-arg="">
-        <span class="v-name">Motel Room</span>
-        <span class="v-desc">Real bed - better recovery than the bunk</span>
-        <span class="v-meta"><span>8h</span><span class="v-price expense">$60</span></span>
-      </button>
-    </div>`;
+  return `<div class="vendor-section-title">Diner</div><div class="vendor-grid">${dinerRows}</div>${catSections}`;
 }
 
 function renderMechanic() {
   const p = career.getProfile();
   const cost = career.repairCost(p.wear);
-  const disabled = p.wear < 1 || p.cash < cost;
+  const repairDisabled = p.wear < 1 || p.cash < cost;
+  const repairReason = p.wear >= 1 && p.cash < cost ? `Can't afford it. ($${cost})` : "";
   const upgradeRows = Object.entries(career.UPGRADES).map(([key, def]) => {
     const tier = typeof p.upgrades[def.field] === "boolean" ? (p.upgrades[def.field] ? 1 : 0) : p.upgrades[def.field];
     if (tier >= def.maxTier) {
@@ -449,18 +521,20 @@ function renderMechanic() {
     const upgradeCost = def.costs[tier];
     const levelReq = def.levelReq[tier];
     const locked = p.level < levelReq;
-    const upgradeDisabled = locked || p.cash < upgradeCost;
+    const disabled = locked || p.cash < upgradeCost;
+    const reason = locked ? `Requires level ${levelReq} (you're ${p.level}).` : p.cash < upgradeCost ? `Can't afford it. ($${upgradeCost.toLocaleString()})` : "";
+    const effect = UPGRADE_EFFECT[key](p);
     return `
-      <button class="vendor-item${upgradeDisabled ? " disabled" : ""}" data-action="upgrade" data-arg="${key}" ${upgradeDisabled ? "disabled" : ""}>
+      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="upgrade" data-arg="${key}"${disabled && reason ? ` data-reason="${escAttr(reason)}"` : ""}>
         <span class="v-name">${def.label}${def.maxTier > 1 ? ` (Tier ${tier + 1}/${def.maxTier})` : ""}</span>
-        <span class="v-desc">${locked ? `Requires level ${levelReq} (you're ${p.level})` : "Installed permanently"}</span>
+        <span class="v-desc">${effect}</span>
         <span class="v-meta"><span></span><span class="v-price expense">$${upgradeCost.toLocaleString()}</span></span>
       </button>`;
   }).join("");
   return `
     <div class="vendor-section-title">Mechanic &mdash; rig condition: ${Math.round(100 - p.wear)}%</div>
     <div class="vendor-grid">
-      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="repair" data-arg="" ${disabled ? "disabled" : ""}>
+      <button class="vendor-item${repairDisabled ? " disabled" : ""}" data-action="repair" data-arg=""${repairDisabled && repairReason ? ` data-reason="${escAttr(repairReason)}"` : ""}>
         <span class="v-name">Full Once-Over</span>
         <span class="v-desc">${p.wear < 1 ? "Nothing needs fixing right now" : "Resets wear to 0"}</span>
         <span class="v-meta"><span></span><span class="v-price expense">$${cost}</span></span>
@@ -469,6 +543,21 @@ function renderMechanic() {
     <div class="vendor-section-title">Upgrades &mdash; Level ${p.level} (${p.xp.toLocaleString()} XP)</div>
     <div class="vendor-grid">${upgradeRows}</div>`;
 }
+
+// What buying the NEXT tier of each upgrade actually does, in plain terms -
+// previously the mechanic panel showed only "Installed permanently" with no
+// hint of the effect. TANK/RADAR read their real magnitudes off career.js's
+// exported constants rather than duplicating the numbers here, so this
+// can't drift out of sync with what buyUpgrade/tickNeeds/buyStoreItem
+// actually do.
+const UPGRADE_EFFECT = {
+  ENGINE: () => "+2% cruise speed per tier",
+  TIRES: () => "−15% wear buildup per tier",
+  SLEEPER: () => "+25% rest recovery per tier",
+  AERO: () => "−10% fuel burn",
+  TANK: () => `+${career.TANK_UPGRADE_CAPACITY_BONUS}% fuel capacity`,
+  RADAR: () => `−${Math.round((1 - career.RADAR_TICKET_MULT) * 100)}% ticket risk, −${Math.round((1 - career.RADAR_DUI_MULT) * 100)}% DUI risk`,
+};
 
 // Shared by FLEET's own render below - hiring is about the company as a
 // whole, not any one stop, so it no longer lives on the load board.
@@ -480,14 +569,15 @@ function renderHiringSection() {
     `<span class="chip active" style="cursor:default;background:${t.color};border-color:${t.color};">${t.label}</span>`
   ).join("") || `<span class="row-sub">No standout traits - a steady, ordinary driver.</span>`;
   const locked = p.level < career.HIRE_MIN_LEVEL;
-  const disabled = locked || p.cash < career.HIRE_COST;
+  const cantAfford = !locked && p.cash < career.HIRE_COST;
+  const disabled = locked || cantAfford;
   return `
     <div class="section-label">Hire a Driver &mdash; ${p.hiredTrucks.length} on payroll</div>
     <div class="vendor-grid">
       <div class="vendor-item" style="cursor:default;">
         <span class="v-name">Candidate</span>
         <div class="chip-row" style="margin:4px 0;">${traits}</div>
-        <span class="v-desc">${locked ? `Requires level ${career.HIRE_MIN_LEVEL}` : "Spawns as a new truck, hauling on its own from wherever you are now"}</span>
+        <span class="v-desc">${locked ? `Requires level ${career.HIRE_MIN_LEVEL} (you're ${p.level})` : cantAfford ? `Can't afford it. ($${career.HIRE_COST.toLocaleString()})` : "Spawns as a new truck, hauling on its own from wherever you are now"}</span>
       </div>
       <button class="vendor-item${disabled ? " disabled" : ""}" data-action="hire" data-arg="" ${disabled ? "disabled" : ""}>
         <span class="v-name">Hire This Driver</span>
@@ -619,6 +709,15 @@ function showNextToast() {
   careerEl.toast.textContent = next.text;
   careerEl.toast.classList.remove("hidden");
   toastTimer = setTimeout(showNextToast, TOAST_DURATION_MS);
+}
+
+// Immediate, UI-only toast (a disabled vendor item's reason) - distinct
+// from checkToasts' feed of career.js's persistent, save-able log. Shares
+// the same queue/timer so a reason toast never overlaps or cuts off one
+// that's already showing.
+function toastNow(text) {
+  toastQueue.push({ text });
+  if (!toastTimer) showNextToast();
 }
 
 // --- Status bar + tab-set swap -----------------------------------------
