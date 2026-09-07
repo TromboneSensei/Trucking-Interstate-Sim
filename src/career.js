@@ -360,6 +360,21 @@ export function startCareer(truck, graph) {
   pushLog(`Signed on as an owner-operator out of ${truck.currentNode}.`);
 }
 
+// Re-attaches an already-restored profile (via load()) to a freshly spawned
+// truck. Unlike startCareer, this must NOT touch cash/stats/homeCity/
+// truckName - those came back from the save and are exactly what makes it
+// a continuation rather than a new career. The truck itself never
+// survives a reload (see load()'s doc comment), so the caller picks
+// whichever fresh Truck instance stands in for "you" this session; its
+// own position/contract are unrelated to wherever the save last left off.
+export function reattachTruck(truck) {
+  truck.agent = createAgent(truck, profile);
+  profile.active = true;
+  profile.truckId = truck.id;
+  lastCreditedContract = null;
+  pushLog(`Back behind the wheel out of ${truck.currentNode}.`);
+}
+
 // Detaches career control from a truck without discarding the profile
 // (cash/upgrades/stats persist - see save()) - used when a save is
 // restored onto a fresh fleet and the original truck instance is gone.
@@ -568,6 +583,10 @@ export function hasSave() {
 // with fresh ids - see the plan's id-collision note). The caller
 // (main.js) is responsible for spawning/attaching a fresh Truck and
 // calling startCareer-equivalent wiring against the restored profile.
+// Precondition: only call this while !isActive() - like deleteSave, this
+// reassigns the module-level `profile` binding wholesale, which would
+// orphan any truck.agent already closed over the previous object (see
+// deleteSave's doc comment for the full failure mode).
 export function load() {
   let raw;
   try { raw = localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
@@ -581,7 +600,16 @@ export function load() {
   return true;
 }
 
+// Wipes the persisted snapshot only - it must NOT reassign the live
+// `profile` binding while a career is active. createAgent(truck, profile)
+// closes over the exact object passed to it, not the module-level `let
+// profile` slot, so a truck's agent already in play would otherwise keep
+// billing an orphaned object forever while every other career.js function
+// (tickNeeds, buyStoreItem, ...) moved on to the new one - purchases would
+// silently stop reaching the ledger the Career tab actually displays. If
+// no career is currently running, there's nothing live to protect, and
+// resetting profile here doubles as "start clean" for the next one.
 export function deleteSave() {
   try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ }
-  profile = newProfile();
+  if (!profile.active) profile = newProfile();
 }

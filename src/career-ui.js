@@ -74,7 +74,27 @@ export function initCareerUI(callbacks) {
     if (!btn || btn.disabled) return;
     handleAction(btn.dataset.action, btn.dataset.arg);
   });
+
+  // Career tab's own save/delete controls - separate listener since the
+  // tab is visible any time (not just while a truck stop is open, unlike
+  // careerEl.content above), so it can't rely on stopCtx being set.
+  careerEl.tabCareer.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    if (btn.dataset.action === "save-career") {
+      const ok = career.save();
+      lastSaveOk = ok;
+      renderCareerTab(career.getProfile(), lastCareerTruck);
+    } else if (btn.dataset.action === "delete-save") {
+      if (!confirm("Delete your saved career? This can't be undone.")) return;
+      career.deleteSave();
+      renderCareerTab(career.getProfile(), lastCareerTruck);
+    }
+  });
 }
+
+let lastCareerTruck = null; // stashed so the save/delete handlers above can re-render without main.js in the loop
+let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
 
@@ -389,6 +409,7 @@ export function updateCareerHud(profile, truck) {
 // --- Career tab (bottom sheet) ---------------------------------------
 
 export function renderCareerTab(profile, truck) {
+  lastCareerTruck = truck;
   if (!profile.active) {
     careerEl.tabCareer.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
@@ -425,5 +446,11 @@ export function renderCareerTab(profile, truck) {
     ${statBar("Heat", profile.heat / 100, "var(--stop)")}
     <div class="section-label">Recent Activity</div>
     ${logRows}
+    <div class="section-label">Save</div>
+    <div class="vendor-grid">
+      <button class="vendor-item" data-action="save-career"><span class="v-name">Save Career</span><span class="v-desc">Keeps cash, stats and upgrades if you close the tab</span></button>
+      <button class="vendor-item" data-action="delete-save"><span class="v-name">Delete Save</span><span class="v-desc">Wipes the saved profile - your current run keeps going</span></button>
+    </div>
+    ${lastSaveOk != null ? `<div class="row-sub" style="padding:4px 0;">${lastSaveOk ? "Saved." : "Save failed (storage full or unavailable)."}</div>` : ""}
   `;
 }

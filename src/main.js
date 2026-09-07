@@ -384,11 +384,26 @@ function frameAndHighlightHighway(rec) {
 // career/disabled - picks a random eligible AI truck instead. Either way
 // followTruck() immediately afterward gives the usual tap-a-truck UX
 // (camera locks on, detail panel opens) for free.
+//
+// A saved profile from a previous session gets offered first - continuing
+// re-attaches that profile's cash/stats/upgrades to a freshly spawned
+// truck (see career.reattachTruck's doc comment for why it can't restore
+// the old truck's exact position/contract, only the profile). Declining
+// (or having no save) falls through to the ordinary fresh-start path.
 function handleStartCareer() {
+  const eligible = trucks.filter((t) => !t.agent && !t.disabledHoursLeft);
+  if (career.hasSave() && confirm("Continue your saved career?")) {
+    const truck = eligible[Math.floor(Math.random() * eligible.length)];
+    if (truck && career.load()) {
+      career.reattachTruck(truck);
+      followTruck(truck);
+      return;
+    }
+    // Corrupt/rejected save, or no eligible truck - fall through to fresh.
+  }
   let truck = getFollowedTruck();
   if (!truck || truck.agent || truck.disabledHoursLeft > 0) {
-    const candidates = trucks.filter((t) => !t.agent && !t.disabledHoursLeft);
-    truck = candidates[Math.floor(Math.random() * candidates.length)];
+    truck = eligible[Math.floor(Math.random() * eligible.length)];
   }
   if (!truck) return;
   career.startCareer(truck, graph);
@@ -748,6 +763,11 @@ initCareerUI({
   // the exact same decision panel rather than inventing a second one.
   onRollOut: (waiting) => { if (waiting && waiting.awaitingDecision) showDecisionPanel(waiting); },
 });
+// Autosave on the way out - a career the player forgot to save manually
+// (closing the tab, navigating away) shouldn't just vanish. save() is a
+// no-op-safe best-effort write (quota/private-mode failures are swallowed
+// inside it), so there's nothing to check the result of here.
+window.addEventListener("beforeunload", () => { if (career.isActive()) career.save(); });
 bootSim(DEFAULT_SETTINGS);
 
 let lastTime = performance.now();
