@@ -830,7 +830,15 @@ function renderTruckDetails(truck, isControlled) {
   const roadDetail = currentRoadDetail(truck);
   const status = truckStatusLine(truck);
 
-  const controlBlock = isControlled
+  // A career truck (truck.agent) manages its own control state through
+  // the truck-stop takeover and HUD, not this old spectator toggle - the
+  // old button would otherwise show "Controlling" (correctly, per
+  // main.js's getControlledTruck) but do nothing useful on click, since
+  // toggleControl() itself no-ops while a career is active. A plain
+  // static badge instead of a dead button.
+  const controlBlock = truck.agent
+    ? `<div class="pill-btn" style="background:var(--go);width:100%;margin-bottom:12px;text-align:center;cursor:default;">&#128666; Your Rig — Owner-Operator</div>`
+    : isControlled
     ? `<button class="pill-btn" data-control-toggle style="background:var(--go);width:100%;margin-bottom:12px;">&#9881; Controlling — Release Control</button>`
     : `<button class="pill-btn" data-control-toggle style="background:var(--caution);color:var(--caution-ink);width:100%;margin-bottom:12px;">Take Control</button>`;
 

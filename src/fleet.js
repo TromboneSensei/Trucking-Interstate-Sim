@@ -465,6 +465,23 @@ export class Truck {
     this.onShoulder = false;
     this.shoulderMilesLeft = 0;
 
+    // Owner-Operator career mode (career.js). `agent` is null for every
+    // ordinary AI truck, forever - it's the ONE seam career mode uses to
+    // divert a truck's decisions from autopilot to the player, and every
+    // read of it below is a `?? 1`/null-check no-op when it's absent. See
+    // career.js's createAgent() for the object shape (speedMult/wearMult/
+    // burnMult/fatigueMult/restMult multipliers + stopReasonAt(node)).
+    // `fuelCapacity` generalizes the old hardcoded-100 tank size so a
+    // career "bigger tank" upgrade has something real to change; every AI
+    // truck still just gets the same 100 it always had. `stopVendor` is a
+    // pure UI hint (which truck-stop tab to default to) - fleet.js sets it
+    // when it parks a career truck for a reason ONLY it knows (a genuine
+    // delivery vs. a fuel-safety stop vs. a voluntary pull-in), and never
+    // reads it back.
+    this.agent = null;
+    this.fuelCapacity = 100;
+    this.stopVendor = null;
+
     this._assignContract(graph, rnd);
   }
 
@@ -536,13 +553,28 @@ export class Truck {
     this.laneT = 0;
     this.passingLeaderId = null;
     this.parkedAt = this.currentNode;
-    this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
-    this.stopReason = "LAYOVER";
     this.milesSinceStop = 0; // a delivery + layover counts as a real stop for breakdown wear
-    // Top off while the trailer is being unloaded - a truck rolling out on
-    // a fresh contract leaves with a full tank, the same as a real yard
-    // turnaround, instead of starting the next haul on whatever was left.
-    beginRefuel(this, Math.min(this.dwellHoursLeft, FUEL_STOP_HOURS));
+    if (this.agent) {
+      // Career mode: a delivery is never auto-resolved. dwellHoursLeft
+      // stays at 0 and stopReason "PLAYER" makes Phase 4's parked branch
+      // skip the whole auto-dwell/auto-contract pipeline entirely (see
+      // updateFleet) - the player ends this stop explicitly through the
+      // truck stop's BOARD vendor, same load-board data
+      // (generateContractOffers/chooseOffer) just player-driven instead
+      // of autopilot. No auto-refuel either - buying fuel is a real,
+      // billed player action now (see the PUMPS vendor / pumpFuel).
+      this.dwellHoursLeft = 0;
+      this.stopReason = "PLAYER";
+      this.stopVendor = "BOARD";
+    } else {
+      this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
+      this.stopReason = "LAYOVER";
+      // Top off while the trailer is being unloaded - a truck rolling out
+      // on a fresh contract leaves with a full tank, the same as a real
+      // yard turnaround, instead of starting the next haul on whatever
+      // was left.
+      beginRefuel(this, Math.min(this.dwellHoursLeft, FUEL_STOP_HOURS));
+    }
   }
 
   // Accept a specific contract (chosen by the driver, or by the player for
@@ -744,9 +776,18 @@ function weatherOnlyMult(graph, truck, env) {
 // outside the decel zone. Only the truck's genuine final leg slows down;
 // everything else carries straight through at cruise speed.
 function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
-  if (truck.remainingPath.length > 0) return Infinity;
   const toNode = graph.nodes[truck.edge.to];
-  if (toNode.t === 0) return Infinity;
+  if (toNode.t === 0) return Infinity; // tier-0 junction filler is never a real stop, agent or not
+  // A career truck decelerates for ANY node it's actually going to stop
+  // at, not just its final contract destination - otherwise a mid-route
+  // fuel/pull-in stop blows through at full cruise and snaps straight to
+  // 0 inside parkForStop the instant it arrives. `stopReasonAt` is pure
+  // (no mutation), so calling it here speculatively - before the stop
+  // has "really" happened - is safe; nodeStopReason (Phase 4) makes the
+  // same call for real once the truck actually reaches the node.
+  if (truck.remainingPath.length > 0) {
+    if (!truck.agent || !truck.agent.stopReasonAt(toNode.name)) return Infinity;
+  }
   const zone = ARRIVAL_DECEL_BASE_MI + truck.edge.speedLimit * ARRIVAL_DECEL_PER_MPH;
   const remaining = truck.edge.miles - truck.s;
   if (remaining >= zone) return Infinity;
@@ -1050,7 +1091,7 @@ function clampOverlaps(graph, laneGroups) {
 function burnPerMile(truck) {
   const drag = 1.0 + Math.pow(Math.max(0, truck.speed / FUEL_DRAG_SPEED_MPH - 1.0), 2);
   const draftDiscount = truck.isDrafting ? 0.7 : 1.0; // Convoy Drafter: -30% burn while actually tucked in behind a leader
-  return FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * drag * draftDiscount;
+  return FUEL_BURN_PER_MILE * truck.driver.fuelBurnMult * drag * draftDiscount * (truck.agent?.burnMult ?? 1);
 }
 
 // Rough remaining range in miles at this truck's current fuel level, for
@@ -1078,18 +1119,31 @@ function refuelAmountNeeded(truck) {
   if (truck.edge) remainingMiles = truck.edge.miles - truck.s;
   else if (truck.remainingPath[0]) remainingMiles = truck.remainingPath[0].miles;
   const minFuel = remainingMiles > 0 ? fuelNeededFor(truck, remainingMiles) : 0;
-  return Math.max(100, minFuel);
+  return Math.max(truck.fuelCapacity, minFuel);
 }
 
-// Pumps `units` of diesel into the tank and bills for it. The single
-// place fuel is ever added, so every purchase - gradual pump stop,
-// roadside tow-and-fill - lands in the same lifetime/daily spend totals.
-function pumpFuel(truck, units) {
+// Pumps `units` of diesel into the tank and bills for it - clamped to
+// fuelCapacity, since a career player choosing an arbitrary fill amount
+// (unlike the AI's own always-exact `need`) can actually ask for more
+// than the tank holds. The single place fuel is ever added, so every
+// purchase - gradual AI pump stop, roadside tow-and-fill, a player's
+// PUMPS purchase - lands in the same totals. A career truck's bill goes
+// to its agent (career.js's own cash ledger - see career.js's "Money"
+// design note on why that's deliberately NOT truck.earnings) instead of
+// the ordinary earnings/fuelSpend fields, which stay meaningful for
+// fleet-wide rankings/digest only when every truck in them is autopilot.
+export function pumpFuel(truck, units, pricePerUnit = FUEL_PRICE_PER_UNIT) {
   if (units <= 0) return;
-  const cost = units * FUEL_PRICE_PER_UNIT;
-  truck.earnings -= cost;
-  truck.fuelSpend += cost;
-  truck.dayFuelSpend += cost;
+  units = Math.min(units, truck.fuelCapacity - truck.fuel);
+  if (units <= 0) return;
+  const cost = units * pricePerUnit;
+  if (truck.agent) {
+    truck.agent.onFuelPurchased(cost, units);
+  } else {
+    truck.earnings -= cost;
+    truck.fuelSpend += cost;
+    truck.dayFuelSpend += cost;
+  }
   truck.fuel += units;
 }
 
@@ -1140,6 +1194,22 @@ function isInWindow(m, start, end) {
 // clock to read local time from), so rest simply never fires there -
 // fuel and breakdowns are both deterministic and still fully exercised.
 function nodeStopReason(graph, truck, node, env) {
+  // Career mode: the player's own stop logic entirely replaces the AI's
+  // (a career player decides when to fuel/rest themselves - see
+  // career.js's createAgent). stopReasonAt is pure/side-effect-free, so
+  // arrivalSpeedCap below can also call it speculatively to know whether
+  // to decelerate for a stop that isn't the truck's contract destination.
+  // A non-destination "PLAYER" stop always opens on PUMPS - the truck
+  // stop is a full multi-tab takeover (career-ui.js), not a single-
+  // purpose panel, so which tab is merely a UX default, not a functional
+  // choice (a delivery arrival, handled entirely in _arriveAtDestination
+  // rather than here, opens on BOARD instead).
+  if (truck.agent) {
+    const reason = truck.agent.stopReasonAt(node);
+    if (reason) truck.stopVendor = "PUMPS";
+    return reason;
+  }
+
   const nextEdge = truck.remainingPath[0];
   if (truck.fuel <= FUEL_LOW_THRESHOLD || (nextEdge && truck.fuel < fuelNeededFor(truck, nextEdge.miles))) {
     return "FUEL";
@@ -1168,8 +1238,11 @@ function parkForStop(truck, node, reason, rnd) {
   truck.passingLeaderId = null;
   truck.parkedAt = node;
   truck.stopReason = reason;
-  truck.dwellHoursLeft = reason === "FUEL"
-    ? FUEL_STOP_HOURS
+  // PLAYER: no dwell to roll (Phase 4's parked branch never counts it
+  // down for a "PLAYER" stop anyway - see updateFleet) and no auto-fill
+  // (buying fuel is now a real, billed player action - see pumpFuel).
+  truck.dwellHoursLeft = reason === "PLAYER" ? 0
+    : reason === "FUEL" ? FUEL_STOP_HOURS
     : REST_MIN_HOURS + rnd() * (REST_MAX_HOURS - REST_MIN_HOURS);
   // Fuel goes in over the whole pump stop (see beginRefuel). A REST stop
   // is not at a pump, so it fills nothing.
@@ -1231,6 +1304,29 @@ function departFromNode(graph, truck, laneGroups, controlledTruck, reverseOfEdge
   return null;
 }
 
+// Ends a career "PLAYER" stop and resumes the truck's existing route -
+// the player-driven equivalent of the automatic REST/FUEL wake path
+// above, but callable directly from OUTSIDE a tick (career-ui.js's ROLL
+// OUT button), the same way main.js's existing resolveContract/
+// resolveDecision already call Truck methods directly from a synchronous
+// UI handler rather than through updateFleet. `laneGroups=null` is safe
+// here for the same reason it's safe there: departFromNode's only use of
+// it is `_advanceToNextEdge`'s `placeOnEdge` branch, which never runs for
+// a `fromFullStop` departure from a real city (see `_advanceToNextEdge`'s
+// own comment) - it always takes the `pendingEdge` branch instead, which
+// the next real updateFleet tick picks up with its own freshly-built
+// laneGroups. Returns the truck if a junction choice is now pending
+// (mirrors updateFleet's own return contract - the caller should show
+// the decision panel, exactly as it would for any other controlled
+// truck), or null if the truck just departed cleanly.
+export function resumeFromPlayerStop(graph, truck) {
+  truck.stopReason = null;
+  truck.parkedAt = null;
+  truck.stopVendor = null;
+  truck.milesSinceStop = 0;
+  return departFromNode(graph, truck, null, truck, truck.prevEdge, true);
+}
+
 // Advances every truck by `dt` real seconds at the given time-scale
 // multiplier. Returns the truck awaiting a junction decision, if any
 // (only possible for `controlledTruck` - the one truck the player has
@@ -1265,7 +1361,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
   for (const truck of trucks) {
     if (truck.awaitingDecision || truck.awaitingContract || truck.pendingEdge || !truck.edge || truck.disabledHoursLeft > 0) continue;
 
-    let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult;
+    let targetSpeed = truck.edge.speedLimit * truck.driver.cruiseMult * (truck.agent?.speedMult ?? 1);
     // Environmental slowdowns are applied to the CRUISE target rather than
     // as a hard cap, so car-following and the arrival decel below still
     // compose on top normally - a truck crawling through a blizzard still
@@ -1314,7 +1410,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
       truck.shoulderMilesLeft -= miles;
       if (truck.shoulderMilesLeft <= 0) truck.onShoulder = false; // cleared the jam (or ran out the ride) - back to the normal travel lane next tick
     }
-    truck.fatigue = Math.min(FATIGUE_MAX, truck.fatigue + gameHours * FATIGUE_PER_HOUR);
+    truck.fatigue = Math.min(FATIGUE_MAX, truck.fatigue + gameHours * FATIGUE_PER_HOUR * (truck.agent?.fatigueMult ?? 1));
     truck.fuel = Math.max(0, truck.fuel - miles * burnPerMile(truck));
 
     // An arrival this tick is handled entirely by Phase 4 (refuel/rest at
@@ -1324,15 +1420,18 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
     if (truck.s >= truck.edge.miles) continue;
 
     if (truck.fuel <= 0) {
-      truck.earnings -= FUEL_TOW_COST;
-      truck.dayFuelSpend += FUEL_TOW_COST; // roadside assistance is part of the day's fuel bill
+      if (truck.agent) truck.agent.onDryTank(FUEL_TOW_COST);
+      else {
+        truck.earnings -= FUEL_TOW_COST;
+        truck.dayFuelSpend += FUEL_TOW_COST; // roadside assistance is part of the day's fuel bill
+      }
       truck.dayBreakdowns++;
       emitFleetEvent("DRY_TANK", truck);
       disableTruck(truck, "FUEL", FUEL_DISABLED_SERVICE_MIN_HOURS + rnd() * (FUEL_DISABLED_SERVICE_MAX_HOURS - FUEL_DISABLED_SERVICE_MIN_HOURS));
       continue;
     }
 
-    const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles;
+    const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles * (truck.agent?.wearMult ?? 1);
     if (rnd() < p) {
       truck.dayBreakdowns++;
       emitFleetEvent("BREAKDOWN", truck);
@@ -1377,14 +1476,24 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
       continue;
     }
 
-    // Parked - between loads (LAYOVER), or mid-route sleeping/refueling
-    // (REST/FUEL). Burn down the dwell timer; layovers/rests also recover
-    // fatigue while parked, not just on wake, so a truck woken early by a
-    // future feature wouldn't read a stale high number.
+    // Parked - between loads (LAYOVER), mid-route sleeping/refueling
+    // (REST/FUEL), or a career player's own stop (PLAYER). Burn down the
+    // dwell timer; layovers/rests also recover fatigue while parked, not
+    // just on wake, so a truck woken early by a future feature wouldn't
+    // read a stale high number.
     if (truck.parkedAt) {
-      truck.dwellHoursLeft -= gameHours;
-      truck.fatigue = Math.max(0, truck.fatigue - gameHours * FATIGUE_RECOVERY_PER_HOUR);
+      // PLAYER stops never auto-resolve - dwellHoursLeft simply never
+      // counts down (there's deliberately no dwell to burn: the player,
+      // or career.js's fastForwardHours during a sleep/wait action, ends
+      // the stop explicitly). Fatigue still recovers and any in-progress
+      // refuel still ticks in every Phase-4 pass either way, exactly like
+      // any other parked truck - only the auto-resume/auto-contract tail
+      // below is skipped.
+      truck.fatigue = Math.max(0, truck.fatigue - gameHours * FATIGUE_RECOVERY_PER_HOUR * (truck.agent?.restMult ?? 1));
       tickRefuel(truck, gameHours);
+      if (truck.stopReason === "PLAYER") continue;
+
+      truck.dwellHoursLeft -= gameHours;
       if (truck.dwellHoursLeft > 0) continue;
       truck.dwellHoursLeft = 0;
       finishRefuel(truck);

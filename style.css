@@ -947,3 +947,179 @@ html, body {
   box-shadow: inset 0 0 0 1px rgba(53, 201, 107, 0.25);
 }
 .decision-btn.planned .dcity { color: var(--go); }
+
+/* ---------------------------------------------------------------------
+   Owner-Operator career mode.
+   --------------------------------------------------------------------- */
+
+/* HUD: the cash/fuel readout that sits beside the nav-view toggle while a
+   career is active, plus the always-visible CAREER pill that starts one
+   (and turns green/active once it has). */
+#btn-career.active { background: var(--go); color: #fff; }
+#career-hud {
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--go);
+  border-radius: 3px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+#career-hud-cash { color: var(--go); }
+#career-hud-fuel { color: var(--ink); }
+
+/* ---------------------------------------------------------------------
+   Truck stop - full-screen takeover (map AND dashboard both), the one
+   place in the whole app that goes further than a floating overlay. On a
+   phone, where the bottom sheet already owns ~45% of the screen, a
+   multi-vendor menu needs the room; it also reads as "you've arrived
+   somewhere" rather than another panel stacked on the map.
+   --------------------------------------------------------------------- */
+#truckstop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  background: var(--asphalt);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#truckstop-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: max(14px, env(safe-area-inset-top)) 16px 12px;
+  background: var(--panel);
+  border-bottom: 2px solid var(--caution);
+}
+#truckstop-city {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--caution);
+}
+#truckstop-clock {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--dim);
+  margin-top: 2px;
+}
+#truckstop-tabs {
+  flex-shrink: 0;
+  display: flex;
+  overflow-x: auto;
+  gap: 2px;
+  padding: 8px 10px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+#truckstop-tabs::-webkit-scrollbar { display: none; }
+.vendor-tab-btn {
+  flex: 0 0 auto;
+  padding: 9px 14px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vendor-tab-btn.active { color: var(--caution); border-bottom-color: var(--caution); }
+#truckstop-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+#truckstop-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 2px solid var(--line);
+}
+#truckstop-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+#truckstop-status .stat-chip { display: flex; align-items: baseline; gap: 4px; }
+#truckstop-status .stat-chip .stat-label { color: var(--dim); font-family: var(--font-body); font-weight: 700; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.04em; }
+#btn-roll-out:disabled { opacity: 0.4; cursor: default; }
+
+/* Vendor content: a section headline plus a card grid, reusing the exact
+   same visual language as the load board's .contract-btn (accent stripe
+   via --cargo, cargo/dest/meta/pay line shape) - a store shelf and a load
+   board are the same "pick one of several priced things" interaction. */
+.vendor-section-title {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 10px;
+}
+.vendor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.vendor-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cargo, var(--caution));
+  border-radius: 4px;
+  padding: 10px 11px 9px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+}
+.vendor-item:active, .vendor-item:hover { background: #2a3441; border-color: var(--caution); }
+.vendor-item:disabled, .vendor-item.disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: var(--panel-strong);
+  border-color: var(--line);
+}
+.vendor-item .v-name { font-size: 0.82rem; font-weight: 700; }
+.vendor-item .v-desc { font-size: 0.68rem; color: var(--dim); }
+.vendor-item .v-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 0.7rem; font-family: var(--font-mono); margin-top: 2px;
+}
+.vendor-item .v-price { color: var(--go); font-weight: 700; }
+.vendor-item .v-price.expense { color: var(--caution); }
+
+/* Sleeper's nap-length picker: a horizontal chip row (reuses .chip/.chip-row) */
+#truckstop-content .chip-row { margin-bottom: 14px; }
+
+/* Career tab (Dispatch/Rankings/Economy/CB's sibling in the bottom sheet)
+   reuses .metric-grid/.metric-card/.section-label/.stat-bar wholesale -
+   no new component classes needed there beyond what's already shared. */

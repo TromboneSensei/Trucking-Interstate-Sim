@@ -21,6 +21,13 @@
 
     <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
     <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
+    <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
+    <div id="career-hud" class="hidden">
+      <span id="career-hud-cash">$0</span>
+      <span class="divider">/</span>
+      <span id="career-hud-fuel">FUEL 0%</span>
+      <button id="btn-pull-in" class="pill-btn" style="background:var(--caution);color:var(--caution-ink);padding:6px 10px;font-size:0.68rem;">PULL IN</button>
+    </div>
   </div>
 
   <button id="btn-settings" title="Settings">&#9881;</button>
@@ -119,6 +126,22 @@
     <div id="contract-timer"><div id="contract-timer-fill"></div></div>
   </div>
 
+  <div id="truckstop-overlay" class="hidden">
+    <div id="truckstop-header">
+      <div>
+        <div id="truckstop-city">Truck Stop</div>
+        <div id="truckstop-clock"></div>
+      </div>
+      <button id="btn-truckstop-close" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&times; Leave Cab</button>
+    </div>
+    <div id="truckstop-tabs"></div>
+    <div id="truckstop-content"></div>
+    <div id="truckstop-footer">
+      <div id="truckstop-status"></div>
+      <button id="btn-roll-out" class="pill-btn" style="background:var(--go)">ROLL OUT</button>
+    </div>
+  </div>
+
   <div id="bottom-sheet">
     <div id="sheet-handle"></div>
     <div id="sheet-tabs">
@@ -126,12 +149,14 @@
       <button class="tab-btn" data-tab="rankings">Rankings</button>
       <button class="tab-btn" data-tab="economy">Economy</button>
       <button class="tab-btn" data-tab="cb">CB Feed<span id="cb-unread" class="tab-badge hidden"></span></button>
+      <button class="tab-btn hidden" id="tab-btn-career" data-tab="career">Career</button>
     </div>
     <div class="tab-content">
       <div id="tab-overview" class="content-panel active"></div>
       <div id="tab-rankings" class="content-panel"></div>
       <div id="tab-economy" class="content-panel"></div>
       <div id="tab-cb" class="content-panel"></div>
+      <div id="tab-career" class="content-panel"></div>
       <!-- Not a tab: tapping a truck or a city slides this over whichever
            tab is open, and the back button (or picking any tab) closes it
            again. Inspecting something is a detour from browsing, not a

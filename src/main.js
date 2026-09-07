@@ -8,6 +8,8 @@ import { createWeather, updateWeather } from "./weather.js";
 import { chooseOffer } from "./economy.js";
 import { initCB, resetCB, updateCB } from "./cb.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
+import * as career from "./career.js";
+import { initCareerUI, updateCareerHud, renderCareerTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop } from "./career-ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 // The load board gets longer than a junction call: picking a haul is a
@@ -255,7 +257,20 @@ function getFollowedTruck() {
   return state.followedTruckId == null ? null : truckById.get(state.followedTruckId) || null;
 }
 
+function getCareerTruck() {
+  const id = career.getCareerTruckId();
+  return id == null ? null : truckById.get(id) || null;
+}
+
+// While a career is active, the career truck IS the controlled truck,
+// full stop - state.controlledTruckId is entirely bypassed rather than
+// cleared, which is what lets followTruck() (below) keep its existing
+// "tapping a truck always drops controlledTruckId" behavior unmodified:
+// tapping some OTHER truck while driving a career never actually costs
+// the player anything, because getControlledTruck() never consulted
+// controlledTruckId in the first place once career mode is on.
 function getControlledTruck() {
+  if (career.isActive()) return getCareerTruck();
   return state.controlledTruckId == null ? null : truckById.get(state.controlledTruckId) || null;
 }
 
@@ -364,7 +379,24 @@ function frameAndHighlightHighway(rec) {
   state.spotlightRoute = { indices };
 }
 
+// Starts a career with whatever truck is currently followed, or - if
+// nothing's followed, or the followed truck is already someone else's
+// career/disabled - picks a random eligible AI truck instead. Either way
+// followTruck() immediately afterward gives the usual tap-a-truck UX
+// (camera locks on, detail panel opens) for free.
+function handleStartCareer() {
+  let truck = getFollowedTruck();
+  if (!truck || truck.agent || truck.disabledHoursLeft > 0) {
+    const candidates = trucks.filter((t) => !t.agent && !t.disabledHoursLeft);
+    truck = candidates[Math.floor(Math.random() * candidates.length)];
+  }
+  if (!truck) return;
+  career.startCareer(truck, graph);
+  followTruck(truck);
+}
+
 function toggleControl() {
+  if (career.isActive()) return; // the old spectator Take-Control mechanic is superseded entirely once a career is running
   const followed = getFollowedTruck();
   if (!followed) return;
   state.controlledTruckId = state.controlledTruckId === followed.id ? null : followed.id;
@@ -375,7 +407,11 @@ function handleTap(wx, wy) {
   const tol = TAP_TOLERANCE_PX / camera.zoom;
   let best = null, bestDist = tol;
   for (const t of trucks) {
-    if (t.parkedAt) continue; // parked trucks draw no dot (render.js) - let the tap fall through to the city underneath
+    // Parked trucks draw no dot (render.js) - let the tap fall through to
+    // the city underneath, EXCEPT a career/company truck (t.agent), which
+    // still draws (and must still be tappable) even while parked - see
+    // render.js's matching exemption.
+    if (t.parkedAt && !t.agent) continue;
     const p = truckPose(graph, t); // same corner-blended position the dot is actually drawn at (render.js)
     const d = Math.hypot(p.x - wx, p.y - wy);
     if (d < bestDist) { bestDist = d; best = t; }
@@ -532,7 +568,10 @@ function formatClock(gameSeconds) {
 // whatever was chosen.
 // ---------------------------------------------------------------------
 function openSettings() {
-  if (state.decisionTruck) return; // don't stack over an active junction decision
+  // Don't stack over an active junction/load decision, or the truck-stop
+  // takeover (which is already covering the whole screen anyway, but
+  // this keeps state.settingsOpen from becoming true underneath it).
+  if (state.decisionTruck || state.contractTruck || isTruckStopOpen()) return;
   state.settingsOpen = true;
   el.settingFleetSize.value = settings.fleetSize;
   el.settingStartTime.value = String(settings.startSeconds);
@@ -591,6 +630,20 @@ el.btnSettingsApply.addEventListener("click", () => {
 // the clock/camera/UI state) gets torn down and rebuilt.
 function bootSim(newSettings) {
   settings = newSettings;
+
+  // Apply & Restart respawns the WHOLE fleet with fresh ids (see below) -
+  // the truck a career was driving doesn't survive that, so end the live
+  // driving session cleanly. The profile itself (cash/upgrades/stats) is
+  // untouched - same "the truck doesn't survive a reload, the profile
+  // does" contract as career.js's own load(). If the truck stop happened
+  // to be open, it's covering a fleet that's about to not exist.
+  if (isTruckStopOpen()) closeTruckStop();
+  if (career.isActive()) {
+    const p = career.getProfile();
+    career.detachAgent(getCareerTruck());
+    p.active = false;
+    p.truckId = null;
+  }
 
   bgCanvas = renderStaticBackground(graph, settings);
   glowCanvas = renderCityGlow(graph);
@@ -682,6 +735,19 @@ initUI({
   onSelectCorridor: frameAndHighlightCorridor,
   onSelectHighway: frameAndHighlightHighway,
 });
+initCareerUI({
+  onStartCareer: handleStartCareer,
+  // career-ui.js's truck-stop actions (eat/shower/sleep) advance time
+  // through career.js's own advanceTime, entirely outside this file's
+  // normal per-frame `state.gameSeconds +=` line - this is what keeps
+  // main.js's own clock in sync with however far those calls actually
+  // moved it.
+  onTimeAdvanced: (gs) => { state.gameSeconds = gs; },
+  // Rolling out (or taking a fresh load) can leave a junction decision
+  // pending, exactly like updateFleet's normal return value would - reuse
+  // the exact same decision panel rather than inventing a second one.
+  onRollOut: (waiting) => { if (waiting && waiting.awaitingDecision) showDecisionPanel(waiting); },
+});
 bootSim(DEFAULT_SETTINGS);
 
 let lastTime = performance.now();
@@ -701,8 +767,24 @@ function frame(now) {
   }
 
   try {
-    if (state.paused) {
+    // Freeze precedence, most-exclusive first - exactly one branch below
+    // ever runs per frame. truckStopOpen wins over everything: it's a
+    // full-screen takeover (z-index above the map/sheet/settings, only
+    // #fatal-error sits higher), and its own actions (buy/eat/sleep/roll
+    // out) are what advance time while it's up - see career-ui.js and
+    // career.js's advanceTime. `paused` (junction/load decision) and
+    // `settingsOpen` are unchanged from before career mode existed,
+    // except the decision-timeout branch now also checks whether the
+    // truck waiting is the player's own career truck, which never
+    // auto-times-out (a career player is never resolved against their
+    // will - see the `isCareerDecision` check below).
+    if (isTruckStopOpen()) {
+      // Nothing to do - see the comment above.
+    } else if (state.paused) {
       if (state.contractTruck) {
+        // Can never be the career truck (career mode's own delivery flow
+        // never sets awaitingContract - see fleet.js's _arriveAtDestination
+        // agent branch), so this timeout is unconditionally safe as-is.
         state.contractTimer -= dt;
         el.contractTimerFill.style.width = Math.max(0, state.contractTimer / CONTRACT_TIMEOUT) * 100 + "%";
         if (state.contractTimer <= 0) {
@@ -713,11 +795,16 @@ function frame(now) {
           resolveContract(chooseOffer(t.pendingOffers, t, graph) || t.pendingOffers[0]);
         }
       } else {
-        state.decisionTimer -= dt;
-        const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
-        el.decisionTimerFill.style.width = pct + "%";
-        if (state.decisionTimer <= 0 && state.decisionTruck) {
-          resolveDecision(state.decisionTruck.pendingOptions[0]);
+        const isCareerDecision = career.isActive() && state.decisionTruck === getCareerTruck();
+        if (isCareerDecision) {
+          el.decisionTimerFill.style.width = "100%"; // shown full/inert rather than left stale at whatever it last was
+        } else {
+          state.decisionTimer -= dt;
+          const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
+          el.decisionTimerFill.style.width = pct + "%";
+          if (state.decisionTimer <= 0 && state.decisionTruck) {
+            resolveDecision(state.decisionTruck.pendingOptions[0]);
+          }
         }
       }
     } else if (!state.settingsOpen) {
@@ -743,7 +830,27 @@ function frame(now) {
       else if (waiting) showDecisionPanel(waiting);
       sampleEconomy();
       checkDayRollover();
+
+      // Career mode's own per-frame work: needs (hunger/morale/heat/wear)
+      // decay with real elapsed time exactly like the fleet itself does,
+      // and a fresh "PLAYER" stop (nodeStopReason's agent branch, or the
+      // delivery-arrival branch of _arriveAtDestination - see fleet.js)
+      // is what triggers the truck-stop takeover. Checked AFTER
+      // updateFleet so this tick's own arrival is caught immediately
+      // rather than one frame late.
+      if (career.isActive()) {
+        const ct = getCareerTruck();
+        if (ct) {
+          career.tickNeeds(ct, gameHours, state.gameSeconds);
+          if (ct.parkedAt && ct.stopReason === "PLAYER" && !isTruckStopOpen()) {
+            openTruckStop(ct, graph, trucks, weather);
+          }
+        }
+      }
     }
+
+    if (isTruckStopOpen()) refreshTruckStop(state.gameSeconds);
+    updateCareerHud(career.getProfile(), getCareerTruck());
 
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";
@@ -822,7 +929,11 @@ function frame(now) {
     // frame would be wasted work for numbers no one watches that closely).
     if (state.detailsView && state.detailsView.kind === "truck") {
       const t = truckById.get(state.detailsView.id);
-      if (t) refreshFollowedTruckDetails(t, state.controlledTruckId === t.id);
+      // getControlledTruck() (not the raw controlledTruckId) so the
+      // detail panel correctly shows "Controlling" for the career truck
+      // too - controlledTruckId is bypassed entirely while career mode
+      // is active (see getControlledTruck's own comment).
+      if (t) refreshFollowedTruckDetails(t, getControlledTruck() === t);
     }
 
     if (now - lastUiRefresh > 400) {
@@ -837,6 +948,7 @@ function frame(now) {
       if (tab === "overview") renderDispatchTab(trucks, graph, lastCongestedSegments);
       else if (tab === "rankings") renderRankingsTab(trucks, graph);
       else if (tab === "economy") renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
+      else if (tab === "career") renderCareerTab(career.getProfile(), getCareerTruck());
       if (tab === "details" && state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }

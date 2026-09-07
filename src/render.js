@@ -1636,7 +1636,15 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // the city itself, and with several trucks parked at once, stack a pile
     // of overlapping dots on top of it. The existing amber badge next to
     // the city's label already reports how many are parked; no dot needed.
-    if (truck.parkedAt) continue;
+    // EXCEPT a career/company truck (truck.agent) - there's only ever a
+    // handful of those, they're exactly the trucks a player taps and
+    // watches, and while parked at a truck stop it's the ONE dot on the
+    // whole map that's "you" - it must stay visible and tappable rather
+    // than vanish into the city's badge count. The existing selection
+    // ring below already handles a parked selectedTruck correctly (it
+    // calls truckPose the same way regardless of parkedAt), so this is
+    // the only change needed to make a parked agent truck fully visible.
+    if (truck.parkedAt && !truck.agent) continue;
     truckPose(graph, truck, scratchPos);
     const p = scratchPos;
 
