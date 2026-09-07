@@ -30,6 +30,7 @@ const careerEl = {
   btnRollOut: document.getElementById("btn-roll-out"),
   careerTabBtn: document.getElementById("tab-btn-career"),
   tabCareer: document.getElementById("tab-career"),
+  toast: document.getElementById("toast"),
 };
 
 const VENDORS = ["PUMPS", "STORE", "DINER", "SHOWERS", "SLEEPER", "MECHANIC", "BOARD"];
@@ -488,6 +489,46 @@ function handleRollOut() {
   if (onRollOut) onRollOut(waiting);
 }
 
+// --- toast layer -------------------------------------------------------
+//
+// #toast (index.html/style.css) was fully styled but had no JS owner -
+// career.js's drainRecentLog() was written for exactly this and never
+// actually called. Every buy/ticket/settlement/level-up/hire already
+// pushes through career.js's pushLog; this just surfaces that feed as
+// brief on-screen toasts instead of requiring a trip into the Career
+// tab's Activity log to notice anything happened - the same events, just
+// visible immediately, which is a big part of career mode reading as
+// "you're driving" rather than "spectator mode with an extra tab."
+const TOAST_DURATION_MS = 3200;
+let lastToastedAt = null; // lazy-initialized on the first check (see checkToasts) so a resumed/loaded career doesn't replay its entire history as a toast flood
+let toastQueue = [];
+let toastTimer = null;
+
+function checkToasts() {
+  const log = career.drainRecentLog(); // newest-first, unshift'd by pushLog
+  if (lastToastedAt == null) {
+    lastToastedAt = log.length ? log[0].at : Date.now();
+    return;
+  }
+  if (!log.length || log[0].at <= lastToastedAt) return;
+  const fresh = [];
+  for (const entry of log) {
+    if (entry.at <= lastToastedAt) break;
+    fresh.push(entry);
+  }
+  lastToastedAt = log[0].at;
+  toastQueue.push(...fresh.reverse()); // oldest-of-this-batch first, so they display in the order they happened
+  if (!toastTimer) showNextToast();
+}
+
+function showNextToast() {
+  const next = toastQueue.shift();
+  if (!next) { toastTimer = null; careerEl.toast.classList.add("hidden"); return; }
+  careerEl.toast.textContent = next.text;
+  careerEl.toast.classList.remove("hidden");
+  toastTimer = setTimeout(showNextToast, TOAST_DURATION_MS);
+}
+
 // --- HUD -------------------------------------------------------------
 
 let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which only updates while the Career tab itself is rendered) - the throttle group lives in the always-visible top HUD, so it needs a reference that's never stale regardless of which tab is open
@@ -495,11 +536,21 @@ let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which
 export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
   const active = profile.active;
+  // Stronger mode-shift: career mode was visually just "spectator mode
+  // plus a HUD strip" - #career-hud/#btn-career.active already use --go
+  // as the "you're driving" accent (vs. --caution, the app's ordinary
+  // chrome accent - see #top-bar/#truckstop-header), but nothing else in
+  // the shell picked it up. This class lets the same --go accent spread
+  // to the rest of the top-level chrome (style.css) while a career is
+  // active, instead of introducing a new color.
+  document.body.classList.toggle("career-mode", active);
   careerEl.btnCareer.classList.toggle("active", active);
   careerEl.btnCareer.textContent = active ? "\u{1F69B} " + (truck ? truck.name : "CAREER") : "\u{1F69B} CAREER";
   careerEl.careerHud.classList.toggle("hidden", !active);
   careerEl.careerTabBtn.classList.toggle("hidden", !active);
   careerEl.btnPullIn.classList.toggle("hidden", !truck || !truck.edge || (truck.agent && truck.agent.pullInRequested));
+  if (active) checkToasts();
+  else careerEl.toast.classList.add("hidden");
   if (!active || !truck) return;
   careerEl.careerHudCash.textContent = "$" + Math.round(profile.cash).toLocaleString();
   careerEl.careerHudCash.style.color = profile.cash < 0 ? "var(--stop)" : "var(--go)";

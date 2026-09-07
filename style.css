@@ -983,6 +983,19 @@ html, body {
 #throttle-group .chip[data-throttle="LEGAL"].active { background: var(--caution); border-color: var(--caution); color: var(--caution-ink); }
 #throttle-group .chip[data-throttle="HAMMER"].active { background: var(--stop); border-color: var(--stop); color: #fff; }
 
+/* Career mode-shift: body.career-mode is toggled by career-ui.js's
+   updateCareerHud, on/off with profile.active. Without this, "driving"
+   looked identical to spectating except for the HUD strip - the app's
+   own chrome (top-bar border, truck-stop header) stayed on --caution,
+   the ordinary/spectator accent, right next to #career-hud's --go
+   border. This spreads the SAME --go "you're driving" accent already
+   established there to the rest of the top-level chrome instead of
+   introducing a new color. */
+body.career-mode #top-bar { border-bottom-color: var(--go); }
+body.career-mode #truckstop-header { border-bottom-color: var(--go); }
+body.career-mode #truckstop-city { color: var(--go); }
+body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--go); }
+
 /* ---------------------------------------------------------------------
    Truck stop - full-screen takeover (map AND dashboard both), the one
    place in the whole app that goes further than a floating overlay. On a

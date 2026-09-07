@@ -7,6 +7,7 @@
 import { travelDirectionLabel, baseRouteName } from "./geo.js";
 import { estimatedRangeMiles, isCompanyTruck } from "./fleet.js";
 import { cbLastMessageFor } from "./cb.js";
+import * as career from "./career.js";
 
 const el = {
   sheet: document.getElementById("bottom-sheet"),
@@ -841,8 +842,18 @@ function renderTruckDetails(truck, isControlled) {
   // main.js's getControlledTruck) but do nothing useful on click, since
   // toggleControl() itself no-ops while a career is active. A plain
   // static badge instead of a dead button.
+  //
+  // Same dead-button problem exists for every OTHER truck while a career
+  // is running: main.js's getControlledTruck() returns the career truck
+  // unconditionally whenever career.isActive(), full stop - it never
+  // consults state.controlledTruckId at all in that case. So tapping
+  // "Take Control" on some other AI truck mid-career would still toggle
+  // state.controlledTruckId, but nothing downstream ever reads it back -
+  // a click that looks like it should do something and quietly doesn't.
   const controlBlock = truck.agent
     ? `<div class="pill-btn" style="background:var(--go);width:100%;margin-bottom:12px;text-align:center;cursor:default;">&#128666; Your Rig — Owner-Operator</div>`
+    : career.isActive()
+    ? `<div class="pill-btn" style="background:var(--panel-strong);color:var(--dim);width:100%;margin-bottom:12px;text-align:center;cursor:default;">You're driving a career - can't take control of another rig</div>`
     : isControlled
     ? `<button class="pill-btn" data-control-toggle style="background:var(--go);width:100%;margin-bottom:12px;">&#9881; Controlling — Release Control</button>`
     : `<button class="pill-btn" data-control-toggle style="background:var(--caution);color:var(--caution-ink);width:100%;margin-bottom:12px;">Take Control</button>`;
