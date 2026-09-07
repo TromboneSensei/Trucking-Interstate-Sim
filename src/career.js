@@ -168,6 +168,69 @@ export function decorateHotshot(offers, rnd = Math.random) {
 
 function clamp01to100(v) { return Math.max(0, Math.min(100, v)); }
 
+// --- progression: XP/levels, upgrades --------------------------------------
+//
+// XP is earned only from delivered payouts (base + any Hotshot bonus - see
+// the delivery-credit block in tickNeeds), never from spending or buffs, so
+// it can't be farmed by anything but actually hauling freight. Levels gate
+// the pricier upgrade tiers below rather than doing anything themselves -
+// there's no separate "unlock" system to duplicate.
+const XP_PER_DOLLAR_EARNED = 0.025;
+const LEVEL_XP_THRESHOLDS = [0, 150, 400, 800, 1400, 2200, 3200, 4500, 6000, 8000, 10500];
+
+function levelForXp(xp) {
+  let level = 1;
+  for (let i = 1; i < LEVEL_XP_THRESHOLDS.length; i++) {
+    if (xp >= LEVEL_XP_THRESHOLDS[i]) level = i + 1;
+  }
+  return level;
+}
+
+// Upgrades store (MECHANIC vendor) - each is a multiplier createAgent's
+// recompute() already reads from profile.upgrades (engine/aero/tires/
+// sleeper), except TANK, which is a one-time direct bump to the truck's
+// own fuelCapacity (not a multiplier - see fleet.js's Truck ctor comment on
+// why a bigger tank must never be modeled by editing refuelAmountNeeded's
+// floor), and RADAR, which career.js's own ticket-risk roll in tickNeeds
+// reads directly. `costs`/`levelReq` are indexed by CURRENT tier (0-based),
+// i.e. costs[0] is the price to go from tier 0 to tier 1.
+export const UPGRADES = {
+  ENGINE: { label: "Engine", field: "engine", maxTier: 3, costs: [1500, 3000, 5000], levelReq: [1, 3, 6] },
+  TIRES: { label: "Tires", field: "tires", maxTier: 3, costs: [700, 1500, 2500], levelReq: [1, 2, 4] },
+  SLEEPER: { label: "Sleeper Bunk", field: "sleeper", maxTier: 3, costs: [1000, 2000, 3200], levelReq: [1, 3, 5] },
+  AERO: { label: "Aero Kit", field: "aero", maxTier: 1, costs: [1800], levelReq: [2] },
+  TANK: { label: "Big Tank", field: "tank", maxTier: 1, costs: [2000], levelReq: [2] },
+  RADAR: { label: "Radar Detector", field: "radar", maxTier: 1, costs: [2200], levelReq: [3] },
+};
+const TANK_UPGRADE_CAPACITY_BONUS = 40; // +40% over the stock 100-unit tank
+
+function upgradeTier(def) {
+  const v = profile.upgrades[def.field];
+  return typeof v === "boolean" ? (v ? 1 : 0) : v;
+}
+
+// Buys the NEXT tier of one upgrade for the given truck (needed only for
+// TANK, which bumps the truck's real fuelCapacity rather than a profile
+// multiplier). Returns {ok:false, reason} same shape as the other vendor
+// actions, or {ok:true, cost}.
+export function buyUpgrade(truck, key) {
+  const def = UPGRADES[key];
+  if (!def) return { ok: false, reason: "Unknown upgrade." };
+  const tier = upgradeTier(def);
+  if (tier >= def.maxTier) return { ok: false, reason: "Already maxed out." };
+  if (profile.level < def.levelReq[tier]) return { ok: false, reason: `Requires level ${def.levelReq[tier]}.` };
+  const cost = def.costs[tier];
+  if (profile.cash < cost) return { ok: false, reason: "Can't afford it." };
+  profile.cash -= cost;
+  profile.stats.totalSpent += cost;
+  if (def.maxTier === 1) profile.upgrades[def.field] = true;
+  else profile.upgrades[def.field] = tier + 1;
+  if (key === "TANK" && truck) truck.fuelCapacity += TANK_UPGRADE_CAPACITY_BONUS;
+  if (truck?.agent) truck.agent.recompute();
+  pushLog(`Installed ${def.label}${def.maxTier > 1 ? " Tier " + (tier + 1) : ""} for $${cost.toLocaleString()}.`);
+  return { ok: true, cost };
+}
+
 // --- store / diner content ----------------------------------------------
 //
 // Every consumable has an immediate effect (applied once, at purchase) and
@@ -467,7 +530,11 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
     profile.heat = clamp01to100(profile.heat + gameHours * HEAT_BUILD_PER_HOUR_HAMMER);
   }
   if (truck?.agent && truck.edge && profile.heat > 40) {
-    const chancePerHour = Math.pow(profile.heat / 100, 2) * TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT;
+    // Radar detector (Phase 10 upgrade): -45% ticket risk, applied here
+    // rather than as an agent multiplier since it affects a probability
+    // roll, not a physical quantity fleet.js reads.
+    const radarMult = profile.upgrades.radar ? 0.55 : 1;
+    const chancePerHour = Math.pow(profile.heat / 100, 2) * TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT * radarMult;
     if (rnd() < chancePerHour * gameHours) {
       const fine = TICKET_FINE_BASE + Math.round(profile.heat * 4);
       profile.cash -= fine;
@@ -506,6 +573,16 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
       }
     } else {
       pushLog(`Delivered ${c.cargo} — collected $${Math.round(c.payout).toLocaleString()}.`);
+    }
+    // XP only from what was actually earned (base + any on-time Hotshot
+    // bonus, both already added to cash above) - never from spending, buffs
+    // or tickets, so it can't be farmed by anything but hauling freight.
+    const earnedThisDelivery = c.payout + (c.hotshot && c.deadlineGameSeconds != null && gameSeconds <= c.deadlineGameSeconds ? c.bonusPayout : 0);
+    profile.xp += Math.round(earnedThisDelivery * XP_PER_DOLLAR_EARNED);
+    const newLevel = levelForXp(profile.xp);
+    if (newLevel > profile.level) {
+      profile.level = newLevel;
+      pushLog(`Leveled up to ${newLevel} - new upgrade tiers unlocked at the Mechanic.`);
     }
   }
   if (truck?.agent) truck.agent.recompute();

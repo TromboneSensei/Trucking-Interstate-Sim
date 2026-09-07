@@ -325,6 +325,22 @@ function renderMechanic() {
   const p = career.getProfile();
   const cost = career.repairCost(p.wear);
   const disabled = p.wear < 1 || p.cash < cost;
+  const upgradeRows = Object.entries(career.UPGRADES).map(([key, def]) => {
+    const tier = typeof p.upgrades[def.field] === "boolean" ? (p.upgrades[def.field] ? 1 : 0) : p.upgrades[def.field];
+    if (tier >= def.maxTier) {
+      return `<button class="vendor-item disabled" disabled><span class="v-name">${def.label}</span><span class="v-desc">Maxed out</span></button>`;
+    }
+    const upgradeCost = def.costs[tier];
+    const levelReq = def.levelReq[tier];
+    const locked = p.level < levelReq;
+    const upgradeDisabled = locked || p.cash < upgradeCost;
+    return `
+      <button class="vendor-item${upgradeDisabled ? " disabled" : ""}" data-action="upgrade" data-arg="${key}" ${upgradeDisabled ? "disabled" : ""}>
+        <span class="v-name">${def.label}${def.maxTier > 1 ? ` (Tier ${tier + 1}/${def.maxTier})` : ""}</span>
+        <span class="v-desc">${locked ? `Requires level ${levelReq} (you're ${p.level})` : "Installed permanently"}</span>
+        <span class="v-meta"><span></span><span class="v-price expense">$${upgradeCost.toLocaleString()}</span></span>
+      </button>`;
+  }).join("");
   return `
     <div class="vendor-section-title">Mechanic &mdash; rig condition: ${Math.round(100 - p.wear)}%</div>
     <div class="vendor-grid">
@@ -333,7 +349,9 @@ function renderMechanic() {
         <span class="v-desc">${p.wear < 1 ? "Nothing needs fixing right now" : "Resets wear to 0"}</span>
         <span class="v-meta"><span></span><span class="v-price expense">$${cost}</span></span>
       </button>
-    </div>`;
+    </div>
+    <div class="vendor-section-title">Upgrades &mdash; Level ${p.level} (${p.xp.toLocaleString()} XP)</div>
+    <div class="vendor-grid">${upgradeRows}</div>`;
 }
 
 function renderBoard() {
@@ -387,6 +405,9 @@ function handleAction(action, arg) {
     advanceAndRefresh(8);
   } else if (action === "repair") {
     career.repairAtMechanic(truck);
+    renderVendor(); renderStatus();
+  } else if (action === "upgrade") {
+    career.buyUpgrade(truck, arg);
     renderVendor(); renderStatus();
   } else if (action === "take-load") {
     const offer = careerEl._lastOffers && careerEl._lastOffers[parseInt(arg, 10)];
