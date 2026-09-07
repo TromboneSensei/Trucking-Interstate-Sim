@@ -357,8 +357,22 @@ export function createAgent(truck, profile) {
     // Pure (no mutation) - see fleet.js's nodeStopReason/arrivalSpeedCap,
     // both of which rely on that (arrivalSpeedCap calls this
     // SPECULATIVELY, every tick a career truck approaches ANY real city,
-    // well before it actually arrives).
+    // well before it actually arrives). Takes the actual node OBJECT
+    // (both call sites resolve it before calling in) rather than just its
+    // name, specifically so this can gate on tier: a tier-0 junction
+    // filler node (the vast majority of nodes on any route) is never a
+    // real town, so it can never be a "PLAYER" stop - without this, PULL
+    // IN (and a critical-fuel stop) would park at the next node of ANY
+    // kind, usually some unnamed junction, and arrivalSpeedCap's own
+    // tier-0 bailout (this file's caller) means there's no deceleration
+    // ramp for it either: the truck blows through at cruise and snaps to
+    // 0 the instant it "arrives". Gating both branches on tier means a
+    // truck critically low on fuel with no real town in reach can run
+    // dry mid-edge - that already has a defined, billed outcome
+    // (onDryTank's roadside tow) and is the honest one, not a bug to
+    // route around here.
     stopReasonAt(node) {
+      if (!node || node.t === 0) return null;
       if (truck.fuel <= CRITICAL_FUEL_PCT) return "PLAYER";
       if (this.pullInRequested) return "PLAYER";
       return null;

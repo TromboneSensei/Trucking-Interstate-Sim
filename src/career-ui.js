@@ -56,13 +56,30 @@ export function initCareerUI(callbacks) {
   onCareerEnded = callbacks.onCareerEnded || null;
 
   careerEl.btnCareer.addEventListener("click", () => {
-    if (career.isActive()) return; // already running one - button is purely a starter, not a toggle
+    if (career.isActive()) {
+      // Not a toggle for STARTING a career - but it doubles as the way
+      // back into a truck stop the player dismissed with Leave Cab
+      // (closeTruckStop no longer lets main.js silently re-open it every
+      // frame - see dismissedParkedAt below). stopCtx still holds valid
+      // graph/trucks/weather from the last time this stop legitimately
+      // opened, so re-opening just replays that.
+      if (!open && stopCtx && lastHudTruck && wasStopDismissed(lastHudTruck)) {
+        openTruckStop(stopCtx.truck, stopCtx.graph, stopCtx.trucks, stopCtx.weather);
+      }
+      return;
+    }
     if (onStartCareer) onStartCareer();
   });
   careerEl.btnPullIn.addEventListener("click", () => {
-    if (!stopCtx) return;
-    const t = stopCtx.truck;
-    if (t.agent) t.agent.pullInRequested = true;
+    // lastHudTruck, not stopCtx.truck: stopCtx is only ever written by
+    // openTruckStop, so on a fresh career (no stop has opened yet) or
+    // right after a save reload (stopCtx still points at last session's
+    // now-defunct Truck instance) this used to silently no-op. lastHudTruck
+    // is refreshed every frame by updateCareerHud regardless of whether a
+    // stop has ever opened - the throttle handler two lines below already
+    // gets this right.
+    if (!lastHudTruck || !lastHudTruck.agent) return;
+    lastHudTruck.agent.pullInRequested = true;
   });
   careerEl.throttleGroup.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-throttle]");
@@ -110,6 +127,7 @@ export function initCareerUI(callbacks) {
 }
 
 let lastCareerTruck = null; // stashed so the save/delete handlers above can re-render without main.js in the loop
+let lastTruckById = null; // ditto - without this, the save/delete handlers' 2-arg renderCareerTab call left truckById undefined, so every hired truck rendered as "no longer in the fleet" until the next 400ms tick repaired it
 let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
@@ -135,8 +153,9 @@ function pickDefaultVendor(truck) {
 }
 
 export function openTruckStop(truck, graph, trucks, weather) {
-  stopCtx = { truck, graph, trucks, weather };
+  stopCtx = { truck, graph, trucks, weather, boardOffers: null };
   open = true;
+  dismissedParkedAt = null; // a stop that's actually opening is (by definition) no longer dismissed
   fuelUnitsThisStop = 0;
   activeVendor = pickDefaultVendor(truck);
   careerEl.city.textContent = truck.parkedAt || "Truck Stop";
@@ -146,13 +165,28 @@ export function openTruckStop(truck, graph, trucks, weather) {
   renderStatus();
 }
 
+// The parkedAt of the stop the player last closed with "Leave Cab" rather
+// than ROLL OUT - main.js's per-frame open-check (main.js's career tick)
+// consults wasStopDismissed() before calling openTruckStop again, so
+// closing the overlay actually leaves the cab instead of being reopened
+// the very next frame. Cleared whenever a stop legitimately opens or the
+// truck rolls out to a new one, so it never suppresses a FUTURE stop -
+// only the exact one the player just backed out of.
+let dismissedParkedAt = null;
+
+export function wasStopDismissed(truck) {
+  return dismissedParkedAt != null && truck && truck.parkedAt === dismissedParkedAt;
+}
+
 export function closeTruckStop() {
   // "Leave Cab" without rolling out is just closing the overlay to look
   // at the map/dashboard - the truck is still parked and stopped. There
   // is deliberately no way to leave the truck MOVING without going
   // through ROLL OUT (ending a PLAYER stop always goes through
-  // career.rollOut/takeOffer, never just closing this panel).
+  // career.rollOut/takeOffer, never just closing this panel). Tap the
+  // CAREER button (or, once it ships, the status bar) to get back in.
   open = false;
+  if (stopCtx) dismissedParkedAt = stopCtx.truck.parkedAt;
   careerEl.overlay.classList.add("hidden");
 }
 
@@ -414,9 +448,18 @@ function renderBoard() {
   if (truck.stopVendor !== "BOARD") {
     return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing to pick up here - you're between drops.</div>${hiringSection}`;
   }
-  const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
+  // Generated once per stop and cached on stopCtx (fresh again next stop,
+  // since openTruckStop always makes a new stopCtx) - renderBoard used to
+  // call generateContractOffers on every re-render, so any OTHER action at
+  // this stop (buying fuel, a sandwich) silently re-rolled all three offers
+  // and re-rolled whether any of them was a hotshot.
+  if (!stopCtx.boardOffers) {
+    const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
+    career.decorateHotshot(offers);
+    stopCtx.boardOffers = offers;
+  }
+  const offers = stopCtx.boardOffers;
   if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>${hiringSection}`;
-  career.decorateHotshot(offers);
   const rows = offers.map((o, i) => {
     const rpm = o.payout / Math.max(1, o.optimalMiles);
     const hotshotBadge = o.hotshot
@@ -486,6 +529,7 @@ function handleRollOut() {
   const { graph, truck } = stopCtx;
   const waiting = career.rollOut(graph, truck);
   closeTruckStop();
+  dismissedParkedAt = null; // actually rolling out (not just closing the overlay) - nothing to suppress reopening for anymore
   if (onRollOut) onRollOut(waiting);
 }
 
@@ -532,9 +576,16 @@ function showNextToast() {
 // --- HUD -------------------------------------------------------------
 
 let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which only updates while the Career tab itself is rendered) - the throttle group lives in the always-visible top HUD, so it needs a reference that's never stale regardless of which tab is open
+// updateCareerHud runs every live frame regardless of which tab is open
+// (unlike currentGameSeconds above, which is only ever set while the
+// truck-stop takeover itself is open) - renderCareerTab's settlement
+// countdown falls back to this when it isn't given gameSeconds directly,
+// so it reads correctly even before the player's very first stop.
+let lastKnownGameSeconds = 0;
 
 export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
+  lastKnownGameSeconds = gameSeconds;
   const active = profile.active;
   // Stronger mode-shift: career mode was visually just "spectator mode
   // plus a HUD strip" - #career-hud/#btn-career.active already use --go
@@ -571,8 +622,17 @@ export function updateCareerHud(profile, truck, gameSeconds) {
 
 // --- Career tab (bottom sheet) ---------------------------------------
 
-export function renderCareerTab(profile, truck, truckById) {
+export function renderCareerTab(profile, truck, truckById, gameSeconds) {
   lastCareerTruck = truck;
+  // The save/delete handlers below re-render with only 2 args (they fire
+  // from a click inside the Career tab itself, with no truckById/
+  // gameSeconds on hand) - falling back to the last real values keeps
+  // "Your Company" from reading every hired truck as "no longer in the
+  // fleet" and the settlement countdown from reading 0/negative until
+  // the next 400ms tick repairs it.
+  if (truckById) lastTruckById = truckById;
+  else truckById = lastTruckById;
+  if (gameSeconds == null) gameSeconds = lastKnownGameSeconds;
   if (!profile.active) {
     careerEl.tabCareer.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
@@ -610,7 +670,7 @@ export function renderCareerTab(profile, truck, truckById) {
   // frame right after career start/load (checkSettlement hasn't ticked
   // yet) - fall back to "now" so the countdown reads as a full interval
   // rather than a stale/negative number for that one frame.
-  const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (currentGameSeconds - (profile.lastSettlementGameSeconds ?? currentGameSeconds)));
+  const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (gameSeconds - (profile.lastSettlementGameSeconds ?? gameSeconds)));
   const companySection = !profile.hiredTrucks.length ? "" : `
     <div class="section-label">Your Company &mdash; ${profile.hiredTrucks.length} driver${profile.hiredTrucks.length === 1 ? "" : "s"}</div>
     ${companyRows}

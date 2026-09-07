@@ -806,7 +806,7 @@ function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
   // has "really" happened - is safe; nodeStopReason (Phase 4) makes the
   // same call for real once the truck actually reaches the node.
   if (truck.remainingPath.length > 0) {
-    if (!truck.agent || !truck.agent.stopReasonAt(toNode.name)) return Infinity;
+    if (!truck.agent || !truck.agent.stopReasonAt(toNode)) return Infinity;
   }
   const zone = ARRIVAL_DECEL_BASE_MI + truck.edge.speedLimit * ARRIVAL_DECEL_PER_MPH;
   const remaining = truck.edge.miles - truck.s;
@@ -1239,7 +1239,7 @@ function nodeStopReason(graph, truck, node, env) {
   // choice (a delivery arrival, handled entirely in _arriveAtDestination
   // rather than here, opens on BOARD instead).
   if (truck.agent) {
-    const reason = truck.agent.stopReasonAt(node);
+    const reason = truck.agent.stopReasonAt(graph.nodes[node]);
     if (reason) truck.stopVendor = "PUMPS";
     return reason;
   }

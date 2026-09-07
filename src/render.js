@@ -1106,7 +1106,7 @@ export function truckCenterlinePos(graph, truck, out = { x: 0, y: 0 }) {
 // {x,y} literals per frame at large fleet sizes. Every other call site
 // (main.js, the route-preview line below) omits it and gets today's exact
 // fresh-object behavior for free.
-export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
+export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }, includeJitter = true) {
   if (!truck.edge) return truckCenterlinePos(graph, truck, out);
 
   const edge = truck.edge;
@@ -1124,7 +1124,7 @@ export function truckWorldPos(graph, truck, out = { x: 0, y: 0 }) {
   // frame - at 3000 trucks that was 6000 trig calls a frame purely to
   // recompute constants.
   const [rightX, rightY] = edgeRightVector(edge);
-  const off = laneOffsetFor(edge, truck);
+  const off = laneOffsetFor(edge, truck, includeJitter);
   out.x += rightX * off;
   out.y += rightY * off;
   return out;
@@ -1163,13 +1163,35 @@ function edgeRightVector(edge) {
 // physics never sees it. Amplitude is deliberately less than half the
 // lane's own width (see RIGHT_LANE_OFFSET/LEFT_LANE_OFFSET), enough to
 // read as dangerous drifting without ever visually crossing into the
-// shoulder or the oncoming median. `truck.id` phases each truck's
-// oscillation so a cluster of exhausted trucks doesn't drift in unison.
+// shoulder or the oncoming median.
+//
+// This used to be driven by _renderGameSeconds (the SIM clock, which
+// advances at up to BASE_TIME_SCALE(2400) * timeScale(8) = 19200
+// game-seconds per real second) fed straight into Math.sin() at a fixed
+// 0.5 rad/game-second - at 1x that's already 1200 rad/s (20 rad/frame at
+// 60fps, 6.4x past Nyquist), at 8x nearly 10x worse. What rendered was
+// per-frame noise, not a weave, and because every truck shared the same
+// time term and the same frequency (only the phase differed), their
+// aliased jumps landed on the same frames in a fixed relative pattern
+// that never drifted - phase-locked noise reads as one truck copying
+// another. Driving this from REAL elapsed seconds at a human frequency
+// fixes both: the weave now looks like an actual drunk swerve, and looks
+// identical whether the sim is running at 1x or 8x (a drunk driver's
+// steering doesn't accelerate with the game clock).
 const FATIGUE_JITTER_THRESHOLD = 85;
 const FATIGUE_JITTER_AMPLITUDE = 2.0;
-let _renderGameSeconds = 0; // stashed once per drawFrame call (see below) so this can read a time value without threading gameSeconds through every truckWorldPos call site
+const FATIGUE_JITTER_FREQ_BASE = 2 * Math.PI * 0.4; // ~0.4 Hz - a slow, visible drift, not a buzz
+const FATIGUE_JITTER_FREQ_SPREAD = 2 * Math.PI * 0.25; // + up to ~0.25 Hz more per truck, so a cluster doesn't even share ONE frequency
+let _renderRealSeconds = 0; // wall-clock, NOT game-seconds - stashed once per drawFrame call (see below) so this can read a time value without threading it through every truckWorldPos call site
 
-function laneOffsetFor(edge, truck) {
+// `includeJitter` lets a caller opt OUT of the cosmetic wobble - the
+// follow camera's target pose (main.js) must NOT include it, or the
+// jitter feeds camera.followTarget -> the camera's own lerp -> a genuine
+// screen-space shake that makes the WHOLE WORLD (every other truck on
+// screen, fatigued or not) appear to wobble in sympathy with the player's
+// own tired truck. The drawn dot itself still wobbles; only the thing
+// steering the camera doesn't.
+function laneOffsetFor(edge, truck, includeJitter = true) {
   // Shoulder Rider (mid-jam cheat) uses the exact same shoulder offset a
   // disabled truck does - both are "off in the shoulder, not the travel
   // lane" as far as rendering is concerned.
@@ -1177,14 +1199,22 @@ function laneOffsetFor(edge, truck) {
   let off = edge.kind === "interstate"
     ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT
     : HIGHWAY_LANE_OFFSET;
-  if (truck.fatigue > FATIGUE_JITTER_THRESHOLD) {
+  if (includeJitter && truck.fatigue > FATIGUE_JITTER_THRESHOLD) {
     // truck.id is a plain number for every ordinary AI truck but a string
     // ("H-1", ...) for a hired company truck (see fleet.js's isCompanyTruck) -
     // `+ truck.id` on a string coerces this whole expression to NaN, which
     // then poisons laneOffsetFor's caller and corrupts the canvas path.
-    // hashStr gives a stable per-truck phase either way.
+    // hashStr gives a stable per-truck value either way, used for BOTH
+    // this truck's phase and its own frequency (not phase alone - two
+    // trucks sharing one frequency and differing only by phase still
+    // drift in a fixed, correlated relationship forever).
     const idPhase = typeof truck.id === "string" ? hashStr(truck.id) : truck.id;
-    off += Math.sin(_renderGameSeconds * 0.5 + idPhase) * FATIGUE_JITTER_AMPLITUDE;
+    const freq = FATIGUE_JITTER_FREQ_BASE + ((idPhase % 1000) / 1000) * FATIGUE_JITTER_FREQ_SPREAD;
+    // Ramps in from 0 at the threshold to full amplitude at fatigue 100,
+    // so the weave arrives gradually rather than snapping on the instant
+    // fatigue crosses 85.
+    const amp = FATIGUE_JITTER_AMPLITUDE * Math.min(1, (truck.fatigue - FATIGUE_JITTER_THRESHOLD) / (100 - FATIGUE_JITTER_THRESHOLD));
+    off += Math.sin(_renderRealSeconds * freq + idPhase) * amp;
   }
   return off;
 }
@@ -1282,7 +1312,14 @@ function laneOffsetForKindLaneT(edge, laneT) {
 // (headlights, the nav arrow, the follow camera) should use `.heading`
 // from this instead. Disabled trucks are excluded - a broken-down truck
 // is stationary, so its heading has nothing to ease toward.
-export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }) {
+//
+// `includeJitter` (default true, matches every draw call site) forwards
+// to truckWorldPos/laneOffsetFor - pass false for a pose that's about to
+// drive the CAMERA (main.js's follow-target), never for a pose that's
+// about to be drawn. See laneOffsetFor's own comment for why: the White
+// Line Fever wobble is meant to be a render-layer flourish on the dot,
+// not something that shakes every other truck on screen along with it.
+export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }, includeJitter = true) {
   if (!truck.edge) {
     truckCenterlinePos(graph, truck, out);
     out.heading = 0;
@@ -1315,7 +1352,7 @@ export function truckPose(graph, truck, out = { x: 0, y: 0, heading: 0 }) {
     }
   }
 
-  truckWorldPos(graph, truck, out);
+  truckWorldPos(graph, truck, out, includeJitter);
   out.heading = edge.bearing;
   return out;
 }
@@ -1448,7 +1485,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // entirely at high noon" fast path.
   const dayNightOn = renderOpts.showDayNight !== false;
   const gameSeconds = renderOpts.gameSeconds || 0;
-  _renderGameSeconds = gameSeconds; // White Line Fever's fatigue jitter reads this from laneOffsetFor
+  _renderRealSeconds = performance.now() / 1000; // wall-clock - White Line Fever's fatigue jitter reads this from laneOffsetFor, deliberately NOT gameSeconds (see that constant's own comment)
   const timeScale = renderOpts.timeScale ?? 1;
   const visMinX = nav ? cullCx - cullRadius : cullMinX;
   const visMaxX = nav ? cullCx + cullRadius : cullMaxX;

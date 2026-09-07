@@ -15,8 +15,6 @@
       <span id="clock">DAY 1 &nbsp;6:00 AM</span>
       <span class="divider">/</span>
       <span id="fleet-count">0 UNITS</span>
-      <input type="range" id="time-slider" min="0" max="8" step="0.5" value="1" title="Simulation speed">
-      <span id="time-readout">1.0&times;</span>
     </div>
 
     <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
@@ -37,6 +35,25 @@
   </div>
 
   <button id="btn-settings" title="Settings">&#9881;</button>
+  <!-- Sim-speed control: used to be a slider sharing the centered #top-bar
+       with the clock. Moved to a corner chip (matching #btn-settings'
+       pinning) so the top-center of the map - exactly where a followed
+       truck reads best - isn't permanently occupied by a control most
+       taps never touch. #time-readout/#time-slider keep their ids
+       unchanged - main.js's one `input` listener and two `.value` writes
+       need no change at all. -->
+  <button id="time-readout" title="Simulation speed">1.0&times;</button>
+  <div id="speed-popover" class="hidden">
+    <div id="speed-presets">
+      <button class="chip" data-speed="0">0&times;</button>
+      <button class="chip" data-speed="0.5">0.5&times;</button>
+      <button class="chip active" data-speed="1">1&times;</button>
+      <button class="chip" data-speed="2">2&times;</button>
+      <button class="chip" data-speed="4">4&times;</button>
+      <button class="chip" data-speed="8">8&times;</button>
+    </div>
+    <input type="range" id="time-slider" min="0" max="8" step="0.5" value="1" title="Simulation speed">
+  </div>
   <div id="fps-counter">60 FPS</div>
 
   <div id="settings-overlay" class="hidden">

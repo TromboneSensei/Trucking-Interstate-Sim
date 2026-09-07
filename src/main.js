@@ -9,7 +9,7 @@ import { chooseOffer } from "./economy.js";
 import { initCB, resetCB, updateCB } from "./cb.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 import * as career from "./career.js";
-import { initCareerUI, updateCareerHud, renderCareerTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop } from "./career-ui.js";
+import { initCareerUI, updateCareerHud, renderCareerTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed } from "./career-ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 // The load board gets longer than a junction call: picking a haul is a
@@ -45,6 +45,8 @@ const el = {
   fleetCount: document.getElementById("fleet-count"),
   timeSlider: document.getElementById("time-slider"),
   timeReadout: document.getElementById("time-readout"),
+  speedPopover: document.getElementById("speed-popover"),
+  speedPresets: document.getElementById("speed-presets"),
   btnExitFollow: document.getElementById("btn-exit-follow"),
   btnNavToggle: document.getElementById("btn-nav-toggle"),
   decisionOverlay: document.getElementById("decision-overlay"),
@@ -592,6 +594,32 @@ window.addEventListener("keydown", (ev) => {
 el.timeSlider.addEventListener("input", (e) => {
   state.timeScale = parseFloat(e.target.value);
   el.timeReadout.textContent = state.timeScale.toFixed(1) + "x";
+  syncSpeedPresetHighlight();
+});
+
+// The chip IS #time-readout - tapping it opens/closes the popover holding
+// the presets + the full slider, same corner-pin pattern as #btn-settings.
+el.timeReadout.addEventListener("click", () => {
+  el.speedPopover.classList.toggle("hidden");
+});
+el.speedPresets.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-speed]");
+  if (!btn) return;
+  state.timeScale = parseFloat(btn.dataset.speed);
+  el.timeSlider.value = String(state.timeScale);
+  el.timeReadout.textContent = state.timeScale.toFixed(1) + "x";
+  syncSpeedPresetHighlight();
+  el.speedPopover.classList.add("hidden");
+});
+function syncSpeedPresetHighlight() {
+  for (const c of el.speedPresets.children) c.classList.toggle("active", parseFloat(c.dataset.speed) === state.timeScale);
+}
+// Tapping anywhere outside the chip/popover closes it - it's a transient
+// picker, not a panel with its own dismiss control.
+document.addEventListener("pointerdown", (e) => {
+  if (el.speedPopover.classList.contains("hidden")) return;
+  if (e.target === el.timeReadout || el.speedPopover.contains(e.target)) return;
+  el.speedPopover.classList.add("hidden");
 });
 
 function formatClock(gameSeconds) {
@@ -720,6 +748,7 @@ function bootSim(newSettings) {
 
   el.timeSlider.value = String(settings.defaultTimeScale);
   el.timeReadout.textContent = settings.defaultTimeScale.toFixed(1) + "x";
+  syncSpeedPresetHighlight();
   el.btnExitFollow.classList.add("hidden");
   el.btnNavToggle.classList.add("hidden");
   el.btnNavToggle.classList.remove("active");
@@ -803,6 +832,19 @@ let lastTime = performance.now();
 let lastUiRefresh = 0;
 let lastFpsTime = performance.now();
 let fpsFrameCount = 0;
+
+// One renderer per bottom-sheet tab name, keyed exactly like visibleTab()'s
+// return value - was an if/else chain that a career-mode tab set (RIG/
+// FLEET/BOOKS/WORLD) would otherwise need its own branches threaded into.
+// Each closure reads the enclosing module's live bindings at CALL time
+// (trucks/graph/state/career.js's own module state), not at map-creation
+// time, so this only needs to be built once.
+const TAB_RENDERERS = {
+  overview: () => renderDispatchTab(trucks, graph, lastCongestedSegments),
+  rankings: () => renderRankingsTab(trucks, graph),
+  economy: () => renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo),
+  career: () => renderCareerTab(career.getProfile(), getCareerTruck(), truckById, state.gameSeconds),
+};
 
 function frame(now) {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
@@ -892,7 +934,12 @@ function frame(now) {
         if (ct) {
           career.tickNeeds(ct, gameHours, state.gameSeconds);
           career.checkSettlement(state.gameSeconds, trucks);
-          if (ct.parkedAt && ct.stopReason === "PLAYER" && !isTruckStopOpen()) {
+          // wasStopDismissed: without it, closing the overlay via "Leave
+          // Cab" (rather than ROLL OUT) had no visible effect - this exact
+          // check ran again the very next frame, ct.parkedAt/stopReason
+          // were both still true (nothing about a PLAYER stop auto-clears
+          // them), and openTruckStop got called right back.
+          if (ct.parkedAt && ct.stopReason === "PLAYER" && !isTruckStopOpen() && !wasStopDismissed(ct)) {
             openTruckStop(ct, graph, trucks, weather);
           }
         }
@@ -905,7 +952,14 @@ function frame(now) {
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";
     if (isFollowMode && followed) {
-      const pose = truckPose(graph, followed);
+      // includeJitter=false: White Line Fever's fatigue wobble (render.js)
+      // is a cosmetic render-layer offset on the drawn dot. Feeding it into
+      // the follow camera's own target used to low-pass it into a real
+      // screen-space shake - the whole world (every OTHER truck on screen,
+      // fatigued or not) visibly wobbled in sympathy whenever the player's
+      // own truck crossed the fatigue threshold, which read as every truck
+      // "copying" the player.
+      const pose = truckPose(graph, followed, undefined, false);
       camera.followTarget = pose;
       // Hold the last known heading while the truck is stopped/between
       // edges (edge briefly null) rather than snapping to 0 - avoids a
@@ -995,10 +1049,8 @@ function frame(now) {
       // tab re-renders on the next tick after it's opened, so switching
       // still shows current numbers immediately.
       const tab = visibleTab();
-      if (tab === "overview") renderDispatchTab(trucks, graph, lastCongestedSegments);
-      else if (tab === "rankings") renderRankingsTab(trucks, graph);
-      else if (tab === "economy") renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
-      else if (tab === "career") renderCareerTab(career.getProfile(), getCareerTruck(), truckById);
+      const renderTab = TAB_RENDERERS[tab];
+      if (renderTab) renderTab();
       if (tab === "details" && state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }

@@ -12,7 +12,7 @@ import * as career from "./career.js";
 const el = {
   sheet: document.getElementById("bottom-sheet"),
   handle: document.getElementById("sheet-handle"),
-  tabs: document.querySelectorAll(".tab-btn"),
+  sheetTabs: document.getElementById("sheet-tabs"),
   overview: document.getElementById("tab-overview"),
   rankings: document.getElementById("tab-rankings"),
   economy: document.getElementById("tab-economy"),
@@ -62,8 +62,12 @@ export function initUI(callbacks) {
   });
 
   initSheetDrag();
-  el.tabs.forEach((btn) => {
-    btn.addEventListener("click", () => openTab(btn.dataset.tab));
+  // Delegated (not one listener per button, iterated once at module load)
+  // so a tab button added to the DOM later - career mode swapping in its
+  // own tab set - gets a working click for free, with no re-wiring step.
+  el.sheetTabs.addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab-btn");
+    if (btn) openTab(btn.dataset.tab);
   });
 
   // Delegated: each tab's content is fully rebuilt on every refresh, so
@@ -245,13 +249,18 @@ export function visibleTab() {
   return detailOpen ? "details" : activeTabName;
 }
 
-function openTab(name) {
+// Exported so career mode (and anything else that swaps the tab set) can
+// force a selection - e.g. falling back off a tab that just got hidden -
+// rather than main.js/career-ui.js reaching in to toggle .active by hand.
+// Queries live rather than a cached NodeList, so a tab button added to
+// the DOM after module load (or just hidden/shown) is always seen.
+export function openTab(name) {
   el.sheet.classList.remove("minimized");
   syncSheetVars(); // tapping a tab can un-minimize, so the float anchors have to follow
   closeDetailSheet(); // picking a tab is also how you back out of a unit page
   activeTabName = name;
   if (onVisibleTabChange) onVisibleTabChange();
-  el.tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".content-panel").forEach((p) => p.classList.remove("active"));
   document.getElementById(`tab-${name}`).classList.add("active");
 }
@@ -357,7 +366,7 @@ function shieldLabel(route) {
 // across that rebuild; explicit navigation (tapping into/out of a
 // ranking) still resets scroll afterward via its own click handler,
 // which runs after and overrides this.
-function preserveScroll(container, renderFn) {
+export function preserveScroll(container, renderFn) {
   const scrollTop = container.scrollTop;
   const chipScrollLeft = container.querySelector(".chip-row")?.scrollLeft;
   renderFn();
