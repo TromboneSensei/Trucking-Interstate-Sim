@@ -179,7 +179,7 @@ function clamp01to100(v) { return Math.max(0, Math.min(100, v)); }
 // the pricier upgrade tiers below rather than doing anything themselves -
 // there's no separate "unlock" system to duplicate.
 const XP_PER_DOLLAR_EARNED = 0.025;
-const LEVEL_XP_THRESHOLDS = [0, 150, 400, 800, 1400, 2200, 3200, 4500, 6000, 8000, 10500];
+export const LEVEL_XP_THRESHOLDS = [0, 150, 400, 800, 1400, 2200, 3200, 4500, 6000, 8000, 10500];
 
 function levelForXp(xp) {
   let level = 1;
@@ -313,7 +313,7 @@ export function repairCost(wear) { return Math.round(8 * wear + 0.6 * wear * wea
 // upgrades + active buffs into the multipliers ONCE per change rather
 // than recomputing them from scratch on every fleet.js call (cheap either
 // way at one truck, but there's no reason not to cache).
-const THROTTLE_MULT = { CONSERVE: 0.88, LEGAL: 1.0, HAMMER: 1.18 };
+export const THROTTLE_MULT = { CONSERVE: 0.88, LEGAL: 1.0, HAMMER: 1.18 };
 
 export function createAgent(truck, profile) {
   const agent = {

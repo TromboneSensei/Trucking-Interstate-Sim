@@ -1,25 +1,31 @@
 // career-ui.js - all the DOM for Owner-Operator mode: the full-screen
-// truck-stop takeover, the Career tab in the bottom sheet, and the small
-// always-visible HUD readout. Mirrors cb.js's precedent of a module
-// owning its own panel outright rather than main.js reaching into it.
-// career.js (no DOM) does all the actual state/economy work; this module
-// is purely "read career.js, render it, and turn clicks into career.js
-// calls."
+// truck-stop takeover, the four career bottom-sheet tabs (RIG/FLEET/
+// BOOKS/WORLD, swapped in for the spectator set while a career is
+// active), and the small always-visible status readout. Mirrors cb.js's
+// precedent of a module owning its own panel outright rather than
+// main.js reaching into it. career.js (no DOM) does all the actual
+// state/economy work; this module is purely "read career.js, render it,
+// and turn clicks into career.js calls."
 "use strict";
 
 import * as career from "./career.js";
 import { pumpFuel, estimatedRangeMiles } from "./fleet.js";
 import { generateContractOffers } from "./economy.js";
 import { traitSummary } from "./driver.js";
+import { openTab, preserveScroll } from "./ui.js";
 
 const careerEl = {
   btnCareer: document.getElementById("btn-career"),
-  careerHud: document.getElementById("career-hud"),
-  careerHudCash: document.getElementById("career-hud-cash"),
-  careerHudFuel: document.getElementById("career-hud-fuel"),
-  btnPullIn: document.getElementById("btn-pull-in"),
-  hotshotHud: document.getElementById("career-hud-hotshot"),
-  throttleGroup: document.getElementById("throttle-group"),
+  // Read-only status while driving - no controls live here (throttle/
+  // PULL IN moved into the RIG tab, full-size, where a thumb can
+  // actually hit them). Tapping the bar opens RIG.
+  careerStatus: document.getElementById("career-status"),
+  careerStatusCash: document.getElementById("career-status-cash"),
+  careerStatusFuel: document.getElementById("career-status-fuel"),
+  careerStatusFatigue: document.getElementById("career-status-fatigue"),
+  careerStatusDest: document.getElementById("career-status-dest"),
+  careerStatusHotshot: document.getElementById("career-status-hotshot"),
+  careerStatusHeat: document.getElementById("career-status-heat"),
   overlay: document.getElementById("truckstop-overlay"),
   city: document.getElementById("truckstop-city"),
   clock: document.getElementById("truckstop-clock"),
@@ -28,9 +34,17 @@ const careerEl = {
   status: document.getElementById("truckstop-status"),
   btnClose: document.getElementById("btn-truckstop-close"),
   btnRollOut: document.getElementById("btn-roll-out"),
-  careerTabBtn: document.getElementById("tab-btn-career"),
-  tabCareer: document.getElementById("tab-career"),
   toast: document.getElementById("toast"),
+  tabRig: document.getElementById("tab-rig"),
+  tabFleet: document.getElementById("tab-fleet"),
+  tabBooks: document.getElementById("tab-books"),
+  tabWorld: document.getElementById("tab-world"),
+  // #cb-feed is cb.js's one persistent feed element, captured once here -
+  // renderWorldTab reparents it into World's own slot while a career is
+  // active; updateCareerHud moves it back the moment the career ends
+  // (see prevCareerActive below). Never destroyed, only relocated.
+  cbFeed: document.getElementById("cb-feed"),
+  tabCbHome: document.getElementById("tab-cb"),
 };
 
 const VENDORS = ["PUMPS", "STORE", "DINER", "SHOWERS", "SLEEPER", "MECHANIC", "BOARD"];
@@ -44,9 +58,9 @@ let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is th
 
 let open = false;
 let activeVendor = "PUMPS";
-let stopCtx = null; // { truck, graph, trucks, weather }
+let stopCtx = null; // { truck, graph, trucks, weather, boardOffers }
 let fuelUnitsThisStop = 0; // tracked for the shower's "free with a big fill" perk
-let hireCandidate = null; // the currently-rolled DriverDNA shown on BOARD's hiring section, re-rolled each time the board renders fresh
+let hireCandidate = null; // the currently-rolled DriverDNA shown in FLEET's hiring section, re-rolled each time it renders fresh
 
 export function initCareerUI(callbacks) {
   onStartCareer = callbacks.onStartCareer;
@@ -70,25 +84,8 @@ export function initCareerUI(callbacks) {
     }
     if (onStartCareer) onStartCareer();
   });
-  careerEl.btnPullIn.addEventListener("click", () => {
-    // lastHudTruck, not stopCtx.truck: stopCtx is only ever written by
-    // openTruckStop, so on a fresh career (no stop has opened yet) or
-    // right after a save reload (stopCtx still points at last session's
-    // now-defunct Truck instance) this used to silently no-op. lastHudTruck
-    // is refreshed every frame by updateCareerHud regardless of whether a
-    // stop has ever opened - the throttle handler two lines below already
-    // gets this right.
-    if (!lastHudTruck || !lastHudTruck.agent) return;
-    lastHudTruck.agent.pullInRequested = true;
-  });
-  careerEl.throttleGroup.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-throttle]");
-    if (!btn) return;
-    const p = career.getProfile();
-    if (!p.active) return;
-    p.throttle = btn.dataset.throttle;
-    for (const c of careerEl.throttleGroup.children) c.classList.toggle("active", c === btn);
-    if (lastHudTruck && lastHudTruck.agent) lastHudTruck.agent.recompute();
+  careerEl.careerStatus.addEventListener("click", () => {
+    if (career.isActive()) openTab("rig");
   });
   careerEl.btnClose.addEventListener("click", closeTruckStop);
   careerEl.btnRollOut.addEventListener("click", handleRollOut);
@@ -108,26 +105,66 @@ export function initCareerUI(callbacks) {
     handleAction(btn.dataset.action, btn.dataset.arg);
   });
 
-  // Career tab's own save/delete controls - separate listener since the
-  // tab is visible any time (not just while a truck stop is open, unlike
-  // careerEl.content above), so it can't rely on stopCtx being set.
-  careerEl.tabCareer.addEventListener("click", (e) => {
+  // RIG's own delegated listener - throttle (3 buttons, real numbers) and
+  // PULL IN both live here now instead of static always-visible HUD
+  // buttons, so both need to re-render RIG itself after acting.
+  careerEl.tabRig.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn || btn.disabled) return;
+    const p = career.getProfile();
+    if (btn.dataset.action === "throttle") {
+      if (!p.active) return;
+      p.throttle = btn.dataset.arg;
+      if (lastHudTruck && lastHudTruck.agent) lastHudTruck.agent.recompute();
+      renderRigTab(p, lastHudTruck, lastKnownGameSeconds);
+    } else if (btn.dataset.action === "pull-in") {
+      // lastHudTruck, not stopCtx.truck: stopCtx is only ever written by
+      // openTruckStop, so on a fresh career (no stop has opened yet) or
+      // right after a save reload (stopCtx still points at last
+      // session's now-defunct Truck instance) reading it here would
+      // silently no-op. lastHudTruck is refreshed every frame by
+      // updateCareerHud regardless of whether a stop has ever opened.
+      if (!lastHudTruck || !lastHudTruck.agent) return;
+      lastHudTruck.agent.pullInRequested = true;
+      renderRigTab(p, lastHudTruck, lastKnownGameSeconds);
+    }
+  });
+
+  // FLEET's own delegated listener - hiring lives here now, not buried in
+  // the truck stop's load board (it's about the whole company, not one
+  // stop).
+  careerEl.tabFleet.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.action === "reroll-hire") {
+      hireCandidate = career.rollHireCandidate();
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "hire") {
+      if (!hireCandidate || !onHireDriver) return;
+      const res = onHireDriver(hireCandidate);
+      if (res && res.ok) hireCandidate = null; // hired - next render rolls a fresh candidate
+      renderFleetTab(career.getProfile(), lastTruckById);
+    }
+  });
+
+  // BOOKS' own save/delete controls - separate listener since the tab is
+  // visible any time (not just while a truck stop is open), so it can't
+  // rely on stopCtx being set.
+  careerEl.tabBooks.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     if (btn.dataset.action === "save-career") {
-      const ok = career.save();
-      lastSaveOk = ok;
-      renderCareerTab(career.getProfile(), lastCareerTruck);
+      lastSaveOk = career.save();
+      renderBooksTab(career.getProfile(), lastHudTruck);
     } else if (btn.dataset.action === "delete-save") {
       if (!confirm("Delete your saved career? This can't be undone.")) return;
       career.deleteSave();
-      renderCareerTab(career.getProfile(), lastCareerTruck);
+      renderBooksTab(career.getProfile(), lastHudTruck);
     }
   });
 }
 
-let lastCareerTruck = null; // stashed so the save/delete handlers above can re-render without main.js in the loop
-let lastTruckById = null; // ditto - without this, the save/delete handlers' 2-arg renderCareerTab call left truckById undefined, so every hired truck rendered as "no longer in the fleet" until the next 400ms tick repaired it
+let lastTruckById = null; // stashed so FLEET's own hire/reroll re-renders (no main.js round-trip) don't lose every hired truck's live status
 let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
@@ -141,8 +178,8 @@ export function isTruckStopOpen() { return open; }
 // moment that's supposed to read as "you just got here, you need gas,"
 // is the wrong first screen. This never writes truck.stopVendor itself -
 // that field stays exactly what fleet.js set it to, since career.js's
-// delivery-credit check (tickNeeds) and the Roll Out/hotshot-HUD gates
-// below all key off that same field meaning "a load hasn't been taken yet."
+// delivery-credit check (tickNeeds) and the Roll Out gate below both key
+// off that same field meaning "a load hasn't been taken yet."
 function pickDefaultVendor(truck) {
   if (truck.stopVendor !== "BOARD") return truck.stopVendor || "PUMPS";
   const p = career.getProfile();
@@ -184,7 +221,7 @@ export function closeTruckStop() {
   // is deliberately no way to leave the truck MOVING without going
   // through ROLL OUT (ending a PLAYER stop always goes through
   // career.rollOut/takeOffer, never just closing this panel). Tap the
-  // CAREER button (or, once it ships, the status bar) to get back in.
+  // CAREER button (or the status bar) to get back in.
   open = false;
   if (stopCtx) dismissedParkedAt = stopCtx.truck.parkedAt;
   careerEl.overlay.classList.add("hidden");
@@ -243,6 +280,26 @@ function formatClockShort(gameSeconds) {
   const ampm = h >= 12 ? "PM" : "AM";
   h = h % 12 || 12;
   return `${h}:${m < 10 ? "0" + m : m} ${ampm}`;
+}
+
+// hours (float) -> "3h 20m" / "45m" / "overdue" - shared by the truck
+// stop's own clock-adjacent copy and RIG's ETA/hotshot/buff countdowns.
+function formatHours(h) {
+  if (h < 0) return "overdue";
+  const hh = Math.floor(h);
+  const mm = Math.round((h - hh) * 60);
+  return hh > 0 ? `${hh}h ${mm}m` : `${mm}m`;
+}
+
+// Shared stat-bar builder (RIG's vitals, BOOKS' XP progress). `valueLabel`
+// overrides the default "NN%" readout (used for XP's "X / Y XP" phrasing);
+// `sub` appends a bullet-separated hint after it (RIG's fuel range).
+function statBar(label, value01, color, sub, valueLabel) {
+  const shown = valueLabel || `${Math.round(value01 * 100)}%`;
+  return `<div class="stat-bar-row">
+    <div class="stat-bar-label"><span>${label}</span><span>${shown}${sub ? " &bull; " + sub : ""}</span></div>
+    <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.max(0, Math.min(100, value01 * 100))}%;background:${color}"></div></div>
+  </div>`;
 }
 
 function statChip(label, value, color) {
@@ -413,6 +470,8 @@ function renderMechanic() {
     <div class="vendor-grid">${upgradeRows}</div>`;
 }
 
+// Shared by FLEET's own render below - hiring is about the company as a
+// whole, not any one stop, so it no longer lives on the load board.
 function renderHiringSection() {
   if (!onHireDriver) return ""; // main.js didn't wire hiring in (shouldn't happen, but never render a dead button)
   const p = career.getProfile();
@@ -423,7 +482,7 @@ function renderHiringSection() {
   const locked = p.level < career.HIRE_MIN_LEVEL;
   const disabled = locked || p.cash < career.HIRE_COST;
   return `
-    <div class="vendor-section-title">Hire a Driver &mdash; ${p.hiredTrucks.length} on payroll</div>
+    <div class="section-label">Hire a Driver &mdash; ${p.hiredTrucks.length} on payroll</div>
     <div class="vendor-grid">
       <div class="vendor-item" style="cursor:default;">
         <span class="v-name">Candidate</span>
@@ -444,9 +503,8 @@ function renderHiringSection() {
 
 function renderBoard() {
   const { truck, graph } = stopCtx;
-  const hiringSection = renderHiringSection();
   if (truck.stopVendor !== "BOARD") {
-    return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing to pick up here - you're between drops.</div>${hiringSection}`;
+    return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing to pick up here - you're between drops.</div>`;
   }
   // Generated once per stop and cached on stopCtx (fresh again next stop,
   // since openTruckStop always makes a new stopCtx) - renderBoard used to
@@ -459,7 +517,7 @@ function renderBoard() {
     stopCtx.boardOffers = offers;
   }
   const offers = stopCtx.boardOffers;
-  if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>${hiringSection}`;
+  if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>`;
   const rows = offers.map((o, i) => {
     const rpm = o.payout / Math.max(1, o.optimalMiles);
     const hotshotBadge = o.hotshot
@@ -474,7 +532,7 @@ function renderBoard() {
       </button>`;
   }).join("");
   careerEl._lastOffers = offers; // stashed for the click handler (index-based lookup)
-  return `<div class="vendor-section-title">Load Board &mdash; ${truck.parkedAt}</div><div class="vendor-grid">${rows}</div>${hiringSection}`;
+  return `<div class="vendor-section-title">Load Board &mdash; ${truck.parkedAt}</div><div class="vendor-grid">${rows}</div>`;
 }
 
 function handleAction(action, arg) {
@@ -513,14 +571,6 @@ function handleAction(action, arg) {
     career.takeOffer(graph, truck, offer, currentGameSeconds);
     closeTruckStop();
     if (onRollOut) onRollOut(null); // no junction pending - a fresh contract always starts clean
-  } else if (action === "reroll-hire") {
-    hireCandidate = career.rollHireCandidate();
-    renderVendor();
-  } else if (action === "hire") {
-    if (!hireCandidate || !onHireDriver) return;
-    const res = onHireDriver(hireCandidate);
-    if (res && res.ok) hireCandidate = null; // hired - next render rolls a fresh candidate
-    renderVendor(); renderStatus();
   }
 }
 
@@ -539,10 +589,8 @@ function handleRollOut() {
 // career.js's drainRecentLog() was written for exactly this and never
 // actually called. Every buy/ticket/settlement/level-up/hire already
 // pushes through career.js's pushLog; this just surfaces that feed as
-// brief on-screen toasts instead of requiring a trip into the Career
-// tab's Activity log to notice anything happened - the same events, just
-// visible immediately, which is a big part of career mode reading as
-// "you're driving" rather than "spectator mode with an extra tab."
+// brief on-screen toasts instead of requiring a trip into a tab to notice
+// anything happened.
 const TOAST_DURATION_MS = 3200;
 let lastToastedAt = null; // lazy-initialized on the first check (see checkToasts) so a resumed/loaded career doesn't replay its entire history as a toast flood
 let toastQueue = [];
@@ -573,131 +621,327 @@ function showNextToast() {
   toastTimer = setTimeout(showNextToast, TOAST_DURATION_MS);
 }
 
-// --- HUD -------------------------------------------------------------
+// --- Status bar + tab-set swap -----------------------------------------
 
-let lastHudTruck = null; // refreshed every frame (unlike lastCareerTruck, which only updates while the Career tab itself is rendered) - the throttle group lives in the always-visible top HUD, so it needs a reference that's never stale regardless of which tab is open
-// updateCareerHud runs every live frame regardless of which tab is open
-// (unlike currentGameSeconds above, which is only ever set while the
-// truck-stop takeover itself is open) - renderCareerTab's settlement
-// countdown falls back to this when it isn't given gameSeconds directly,
-// so it reads correctly even before the player's very first stop.
-let lastKnownGameSeconds = 0;
+let lastHudTruck = null; // refreshed every frame regardless of which tab is open - RIG's throttle/PULL IN handlers need a reference that's never stale
+let lastKnownGameSeconds = 0; // ditto - BOOKS/FLEET's settlement countdown falls back to this when a click-triggered re-render doesn't have gameSeconds on hand
+let prevCareerActive = false; // edge-detects the active flip, for the tab-set swap fallback and the CB-feed reparent-back-on-end below
 
 export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
   lastKnownGameSeconds = gameSeconds;
   const active = profile.active;
   // Stronger mode-shift: career mode was visually just "spectator mode
-  // plus a HUD strip" - #career-hud/#btn-career.active already use --go
-  // as the "you're driving" accent (vs. --caution, the app's ordinary
-  // chrome accent - see #top-bar/#truckstop-header), but nothing else in
-  // the shell picked it up. This class lets the same --go accent spread
-  // to the rest of the top-level chrome (style.css) while a career is
-  // active, instead of introducing a new color.
+  // plus a HUD strip" - the status bar/#btn-career.active already use
+  // --go as the "you're driving" accent (vs. --caution, the app's
+  // ordinary chrome accent - see #top-bar/#truckstop-header), but
+  // nothing else in the shell picked it up. This class lets the same
+  // --go accent spread to the rest of the top-level chrome (style.css)
+  // while a career is active, instead of introducing a new color.
   document.body.classList.toggle("career-mode", active);
   careerEl.btnCareer.classList.toggle("active", active);
   careerEl.btnCareer.textContent = active ? "\u{1F69B} " + (truck ? truck.name : "CAREER") : "\u{1F69B} CAREER";
-  careerEl.careerHud.classList.toggle("hidden", !active);
-  careerEl.careerTabBtn.classList.toggle("hidden", !active);
-  careerEl.btnPullIn.classList.toggle("hidden", !truck || !truck.edge || (truck.agent && truck.agent.pullInRequested));
+
+  if (active !== prevCareerActive) {
+    // Tab-set swap: spectator (Dispatch/Rankings/Economy/CB) and career
+    // (Rig/Fleet/Books/World) tabs never show at once. If the tab the
+    // sheet currently has open just got hidden by this flip, fall back
+    // to a sane default instead of leaving the sheet on an invisible tab.
+    for (const btn of document.querySelectorAll(".spectator-tab")) btn.classList.toggle("hidden", active);
+    for (const btn of document.querySelectorAll(".career-tab")) btn.classList.toggle("hidden", !active);
+    const activeBtn = document.querySelector(".tab-btn.active");
+    if (activeBtn && activeBtn.classList.contains("hidden")) openTab(active ? "rig" : "overview");
+    // Career just ended - move the CB feed back to its spectator home
+    // before spectator tabs come back on screen, or #tab-cb would show
+    // empty (World's own slot, wherever it last was, is about to stop
+    // being re-rendered).
+    if (prevCareerActive && !active) {
+      careerEl.tabCbHome.appendChild(careerEl.cbFeed);
+      if (onCareerEnded) onCareerEnded();
+    }
+    prevCareerActive = active;
+  }
+
+  careerEl.careerStatus.classList.toggle("hidden", !active);
   if (active) checkToasts();
   else careerEl.toast.classList.add("hidden");
   if (!active || !truck) return;
-  careerEl.careerHudCash.textContent = "$" + Math.round(profile.cash).toLocaleString();
-  careerEl.careerHudCash.style.color = profile.cash < 0 ? "var(--stop)" : "var(--go)";
+
+  careerEl.careerStatusCash.textContent = "$" + Math.round(profile.cash).toLocaleString();
+  careerEl.careerStatusCash.style.color = profile.cash < 0 ? "var(--stop)" : "var(--go)";
   const fuelPct = Math.round(truck.fuel);
-  careerEl.careerHudFuel.textContent = `FUEL ${fuelPct}%`;
-  careerEl.careerHudFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
+  careerEl.careerStatusFuel.textContent = `FUEL ${fuelPct}%`;
+  careerEl.careerStatusFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
+  const fatiguePct = Math.round(truck.fatigue);
+  careerEl.careerStatusFatigue.textContent = `FATIGUE ${fatiguePct}%`;
+  careerEl.careerStatusFatigue.style.color = fatiguePct > 70 ? "var(--stop)" : fatiguePct > 40 ? "var(--caution)" : "var(--ink)";
+  careerEl.careerStatusDest.textContent = truck.contract && truck.edge ? `→ ${truck.contract.destination}` : truck.parkedAt || "";
   const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
-  careerEl.hotshotHud.classList.toggle("hidden", !hotshot);
+  careerEl.careerStatusHotshot.classList.toggle("hidden", !hotshot);
   if (hotshot) {
     const hoursLeft = (truck.contract.deadlineGameSeconds - gameSeconds) / 3600;
-    careerEl.hotshotHud.textContent = hoursLeft > 0 ? `HOTSHOT ${hoursLeft.toFixed(1)}h left` : "HOTSHOT LATE";
+    careerEl.careerStatusHotshot.textContent = hoursLeft > 0 ? `HOTSHOT ${hoursLeft.toFixed(1)}h` : "HOTSHOT LATE";
   }
-  // Keeps the highlighted chip in sync with profile.throttle even when it
-  // changed by some path other than clicking here - a fresh startCareer/
-  // reattachTruck, or a loaded save restoring a different value.
-  for (const c of careerEl.throttleGroup.children) c.classList.toggle("active", c.dataset.throttle === profile.throttle);
+  // Heat only appeared in the old Career tab, so a ticket used to arrive
+  // with zero warning while driving - the one place the player was
+  // actually looking. Shown once it's high enough to matter (tickNeeds'
+  // own ticket-chance roll only starts above 40).
+  careerEl.careerStatusHeat.classList.toggle("hidden", profile.heat <= 40);
 }
 
-// --- Career tab (bottom sheet) ---------------------------------------
+// Remaining distance to the truck's contract destination: the tail of
+// its current edge plus every edge still queued in remainingPath.
+function remainingMilesOf(truck) {
+  if (!truck.contract) return 0;
+  let miles = truck.edge ? Math.max(0, truck.edge.miles - truck.s) : 0;
+  for (const e of truck.remainingPath) miles += e.miles;
+  return miles;
+}
 
-export function renderCareerTab(profile, truck, truckById, gameSeconds) {
-  lastCareerTruck = truck;
-  // The save/delete handlers below re-render with only 2 args (they fire
-  // from a click inside the Career tab itself, with no truckById/
-  // gameSeconds on hand) - falling back to the last real values keeps
-  // "Your Company" from reading every hired truck as "no longer in the
-  // fleet" and the settlement countdown from reading 0/negative until
-  // the next 400ms tick repairs it.
-  if (truckById) lastTruckById = truckById;
-  else truckById = lastTruckById;
-  if (gameSeconds == null) gameSeconds = lastKnownGameSeconds;
-  if (!profile.active) {
-    careerEl.tabCareer.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
+// --- RIG - the cockpit ---------------------------------------------------
+//
+// "What am I doing right now, how am I holding up, and what can I do
+// about it?" Status + vitals + buffs are read-only; throttle and PULL IN
+// are the only two driving decisions a player makes outside a truck stop,
+// now full-size instead of squeezed into the old always-visible HUD.
+
+export function renderRigTab(profile, truck, gameSeconds) {
+  if (!profile.active || !truck) {
+    careerEl.tabRig.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
   }
-  const statBar = (label, value01, color) => `<div class="stat-bar-row">
-    <div class="stat-bar-label"><span>${label}</span><span>${Math.round(value01 * 100)}%</span></div>
-    <div class="stat-bar"><div class="stat-bar-fill" style="width:${value01 * 100}%;background:${color}"></div></div>
-  </div>`;
-  const s = profile.stats;
-  // Deliveries/earnings are read straight off the live truck rather than
-  // a mirrored profile.stats counter - truck.contractsCompleted/earnings
-  // (fleet.js) are already the single source of truth for THIS truck, so
-  // duplicating them into profile.stats would just be a second number
-  // that has to be kept in sync and can drift. profile.stats keeps the
-  // fields no truck object has anywhere to live (rescues, onTimeDeliveries,
-  // milesDriven-across-a-fleet) for once those exist (missions/hiring).
-  const deliveries = truck ? truck.contractsCompleted : 0;
-  const totalEarned = truck ? truck.earnings : 0;
-  const logRows = profile.log.slice(0, 8).map((l) => `<div class="row-sub" style="padding:3px 0;">${l.text}</div>`).join("")
-    || `<div class="placeholder-text">Quiet so far.</div>`;
-  // Your Company (Phase 11): hired trucks are ordinary AI-piloted Trucks
-  // living in the same `trucks` array as everything else - looked up here
-  // by id rather than mirrored into profile, so a hired truck's current
-  // earnings/status are always exactly what fleet.js says they are, same
-  // "read it from the live truck" principle as the career truck's own
-  // Deliveries/Total Earned above.
-  const companyRows = !profile.hiredTrucks.length ? "" : profile.hiredTrucks.map((h) => {
-    const t = truckById?.get(h.id);
-    if (!t) return `<div class="row-sub" style="padding:3px 0;">${h.id} - no longer in the fleet.</div>`;
-    const status = t.parkedAt ? `parked at ${t.parkedAt}` : t.disabledHoursLeft > 0 ? "disabled roadside" : "hauling";
-    const pending = Math.max(0, t.earnings - (h.lastSettledEarnings ?? 0));
-    return `<div class="row-sub" style="padding:3px 0;">${t.name} (${h.id}) - ${status} - $${Math.round(t.earnings).toLocaleString()} lifetime, ${t.contractsCompleted} loads - $${Math.round(pending).toLocaleString()} pending payout</div>`;
-  }).join("");
-  // Settlement clock: profile.lastSettlementGameSeconds is null for one
-  // frame right after career start/load (checkSettlement hasn't ticked
-  // yet) - fall back to "now" so the countdown reads as a full interval
-  // rather than a stale/negative number for that one frame.
-  const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (gameSeconds - (profile.lastSettlementGameSeconds ?? gameSeconds)));
-  const companySection = !profile.hiredTrucks.length ? "" : `
-    <div class="section-label">Your Company &mdash; ${profile.hiredTrucks.length} driver${profile.hiredTrucks.length === 1 ? "" : "s"}</div>
-    ${companyRows}
-    <div class="row-sub" style="padding:3px 0;">Next settlement in ~${Math.ceil(settlementIn / 3600)}h - pending payouts collect automatically, minus overhead.</div>`;
-  careerEl.tabCareer.innerHTML = `
-    <div class="metric-grid" style="margin-bottom:12px;">
-      <div class="metric-card good"><div class="metric-title">Cash</div><div class="metric-value">$${Math.round(profile.cash).toLocaleString()}</div></div>
-      <div class="metric-card"><div class="metric-title">Level</div><div class="metric-value">${profile.level}</div></div>
-      <div class="metric-card"><div class="metric-title">Deliveries</div><div class="metric-value">${deliveries}</div></div>
-      <div class="metric-card"><div class="metric-title">Rescues</div><div class="metric-value">${s.rescues}</div></div>
-      <div class="metric-card"><div class="metric-title">Total Earned</div><div class="metric-value">$${Math.round(totalEarned).toLocaleString()}</div></div>
-      <div class="metric-card"><div class="metric-title">Total Spent</div><div class="metric-value">$${Math.round(s.totalSpent).toLocaleString()}</div></div>
-      ${profile.hiredTrucks.length ? `<div class="metric-card good"><div class="metric-title">Fleet Collected</div><div class="metric-value">$${Math.round(s.fleetEarningsCollected ?? 0).toLocaleString()}</div></div>` : ""}
-    </div>
-    <div class="section-label">Driver &amp; Rig</div>
-    ${statBar("Hunger", profile.hunger / 100, "var(--go)")}
-    ${statBar("Morale", profile.morale / 100, "var(--info)")}
-    ${statBar("Condition", 1 - profile.wear / 100, "var(--caution)")}
-    ${statBar("Heat", profile.heat / 100, "var(--stop)")}
-    <div class="section-label">Recent Activity</div>
-    ${logRows}
-    ${companySection}
-    <div class="section-label">Save</div>
-    <div class="vendor-grid">
-      <button class="vendor-item" data-action="save-career"><span class="v-name">Save Career</span><span class="v-desc">Keeps cash, stats and upgrades if you close the tab</span></button>
-      <button class="vendor-item" data-action="delete-save"><span class="v-name">Delete Save</span><span class="v-desc">Wipes the saved profile - your current run keeps going</span></button>
-    </div>
-    ${lastSaveOk != null ? `<div class="row-sub" style="padding:4px 0;">${lastSaveOk ? "Saved." : "Save failed (storage full or unavailable)."}</div>` : ""}
-  `;
+  preserveScroll(careerEl.tabRig, () => {
+    let statusHtml;
+    if (truck.disabledHoursLeft > 0) {
+      statusHtml = `<div class="detail-header"><div><div class="detail-title" style="color:var(--stop);">BROKEN DOWN</div><div class="detail-sub">${truck.disabledHoursLeft.toFixed(1)}h until you're rolling again</div></div></div>`;
+    } else if (truck.parkedAt) {
+      statusHtml = `<div class="detail-header"><div><div class="detail-title">PARKED &mdash; ${truck.parkedAt}</div><div class="detail-sub">${truck.contract ? "Load in the truck stop's board" : "No load yet"}</div></div></div>`;
+    } else if (truck.contract && truck.edge) {
+      const miles = remainingMilesOf(truck);
+      const etaH = miles / Math.max(20, truck.speed || 55);
+      statusHtml = `<div class="detail-header"><div><div class="detail-title">HAULING</div><div class="detail-sub">${truck.contract.cargo} &rarr; <strong style="color:var(--ink);">${truck.contract.destination}</strong> &bull; ${Math.round(miles).toLocaleString()} mi &bull; ETA ~${formatHours(etaH)}</div></div></div>`;
+    } else {
+      statusHtml = `<div class="detail-header"><div><div class="detail-title">ON THE ROAD</div></div></div>`;
+    }
+
+    const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
+    const hotshotHtml = !hotshot ? "" : (() => {
+      const hoursLeft = (truck.contract.deadlineGameSeconds - gameSeconds) / 3600;
+      return `<div class="metric-card bad" style="margin-bottom:12px;">
+        <div class="metric-title">Hotshot Deadline</div>
+        <div class="metric-value">${hoursLeft > 0 ? formatHours(hoursLeft) : "LATE"}</div>
+        <div class="metric-sub">+$${truck.contract.bonusPayout.toLocaleString()} on time</div>
+      </div>`;
+    })();
+
+    const range = Math.round(estimatedRangeMiles(truck));
+    const vitalsHtml = [
+      statBar("Fuel", truck.fuel / 100, truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)", `~${range} mi`),
+      statBar("Fatigue", truck.fatigue / 100, truck.fatigue > 70 ? "var(--stop)" : truck.fatigue > 40 ? "var(--caution)" : "var(--go)"),
+      statBar("Hunger", profile.hunger / 100, profile.hunger < 20 ? "var(--stop)" : profile.hunger < 45 ? "var(--caution)" : "var(--go)"),
+      statBar("Morale", profile.morale / 100, profile.morale < 30 ? "var(--stop)" : profile.morale < 55 ? "var(--caution)" : "var(--go)"),
+      statBar("Heat", profile.heat / 100, profile.heat > 60 ? "var(--stop)" : profile.heat > 40 ? "var(--caution)" : "var(--go)"),
+      statBar("Health", profile.health / 100, profile.health < 50 ? "var(--stop)" : profile.health < 80 ? "var(--caution)" : "var(--go)"),
+      statBar("Condition", (100 - profile.wear) / 100, profile.wear > 60 ? "var(--stop)" : profile.wear > 30 ? "var(--caution)" : "var(--go)"),
+    ].join("");
+
+    const buffsHtml = !profile.buffs.length ? `<div class="placeholder-text">Nothing running.</div>` : profile.buffs.map((b) => {
+      const hoursLeft = Math.max(0, (b.expiresAtGameSeconds - gameSeconds) / 3600);
+      const item = career.STORE_ITEMS[b.kind];
+      const crashNote = item?.crash ? " &bull; rough crash when it wears off" : "";
+      return `<div class="row-sub" style="padding:3px 0;">${b.label} &mdash; ${formatHours(hoursLeft)} left${crashNote}</div>`;
+    }).join("");
+
+    const throttleDefs = [
+      { key: "CONSERVE", label: "CONSERVE", sub: `${Math.round((career.THROTTLE_MULT.CONSERVE - 1) * 100)}% speed · -10% fuel · -10% wear`, color: "var(--go)" },
+      { key: "LEGAL", label: "LEGAL", sub: "cruise speed", color: "var(--caution)" },
+      { key: "HAMMER", label: "HAMMER", sub: `+${Math.round((career.THROTTLE_MULT.HAMMER - 1) * 100)}% speed · +15% fuel · +25% wear · draws heat`, color: "var(--stop)" },
+    ];
+    const throttleHtml = throttleDefs.map((t) => `
+      <button class="vendor-item${profile.throttle === t.key ? " active" : ""}" data-action="throttle" data-arg="${t.key}" style="--cargo:${t.color};${profile.throttle === t.key ? `border-color:${t.color};` : ""}">
+        <span class="v-name" style="${profile.throttle === t.key ? `color:${t.color};` : ""}">${t.label}</span>
+        <span class="v-desc">${t.sub}</span>
+      </button>`).join("");
+
+    const pullInDisabled = !truck.edge || (truck.agent && truck.agent.pullInRequested);
+    const pullInLabel = !truck.edge ? "You're parked - nowhere to pull in to" : (truck.agent && truck.agent.pullInRequested) ? "Already pulling in…" : "Stop at the next town";
+
+    const upgradeChips = [];
+    if (profile.upgrades.engine) upgradeChips.push(`Engine ${"I".repeat(profile.upgrades.engine)}`);
+    if (profile.upgrades.tires) upgradeChips.push(`Tires ${"I".repeat(profile.upgrades.tires)}`);
+    if (profile.upgrades.sleeper) upgradeChips.push(`Sleeper ${"I".repeat(profile.upgrades.sleeper)}`);
+    if (profile.upgrades.aero) upgradeChips.push("Aero Kit");
+    if (profile.upgrades.tank) upgradeChips.push("Big Tank");
+    if (profile.upgrades.apu) upgradeChips.push("APU");
+    if (profile.upgrades.radar) upgradeChips.push("Radar Detector");
+    const chipsHtml = upgradeChips.length
+      ? upgradeChips.map((c) => `<span class="chip active" style="cursor:default;">${c}</span>`).join("")
+      : `<span class="row-sub">No upgrades yet - visit the Mechanic.</span>`;
+    const a = truck.agent;
+    const multsHtml = !a ? "" : `<div class="row-sub" style="padding:3px 0;">Speed &times;${a.speedMult.toFixed(2)} &bull; Fuel &times;${a.burnMult.toFixed(2)} &bull; Wear &times;${a.wearMult.toFixed(2)} &bull; Rest &times;${a.restMult.toFixed(2)}</div>`;
+
+    careerEl.tabRig.innerHTML = `
+      ${statusHtml}
+      ${hotshotHtml}
+      <div class="section-label">Vitals</div>
+      ${vitalsHtml}
+      <div class="section-label">Running Now</div>
+      ${buffsHtml}
+      <div class="section-label">Throttle</div>
+      <div class="vendor-grid">${throttleHtml}</div>
+      <div class="vendor-grid" style="margin-top:8px;">
+        <button class="vendor-item${pullInDisabled ? " disabled" : ""}" data-action="pull-in" ${pullInDisabled ? "disabled" : ""}>
+          <span class="v-name">Pull In</span>
+          <span class="v-desc">${pullInLabel}</span>
+        </button>
+      </div>
+      <div class="section-label">Your Rig</div>
+      <div class="row-sub" style="padding:3px 0;">${truck.name}${profile.homeCity ? ` &bull; out of ${profile.homeCity}` : ""}</div>
+      <div class="chip-row" style="margin:6px 0;">${chipsHtml}</div>
+      ${multsHtml}
+    `;
+  });
+}
+
+// --- FLEET - your company -----------------------------------------------
+//
+// "Who works for me, where are they, what are they earning me?" Your own
+// rig plus every hired driver, and the hiring flow itself - moved here
+// from the truck stop's load board, since it's about the whole company
+// rather than any one stop.
+
+export function renderFleetTab(profile, truckById) {
+  if (truckById) lastTruckById = truckById; else truckById = lastTruckById;
+  if (!profile.active) {
+    careerEl.tabFleet.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
+    return;
+  }
+  preserveScroll(careerEl.tabFleet, () => {
+    const truck = lastHudTruck;
+    const pendingTotal = profile.hiredTrucks.reduce((sum, h) => {
+      const t = truckById?.get(h.id);
+      return sum + (t ? Math.max(0, t.earnings - (h.lastSettledEarnings ?? 0)) : 0);
+    }, 0);
+    const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (lastKnownGameSeconds - (profile.lastSettlementGameSeconds ?? lastKnownGameSeconds)));
+    const headerHtml = `<div class="detail-sub" style="margin-bottom:10px;">${profile.hiredTrucks.length} truck${profile.hiredTrucks.length === 1 ? "" : "s"} on payroll &bull; $${Math.round(pendingTotal).toLocaleString()} pending &bull; settles in ~${Math.ceil(settlementIn / 3600)}h</div>`;
+
+    const yourRigHtml = !truck ? "" : `
+      <div class="list-row" style="border-left-color:var(--go);cursor:default;">
+        <div style="flex:1;">
+          <div class="row-main">${truck.name} <span class="row-sub">(You)</span></div>
+          <div class="row-sub">${truck.parkedAt ? "parked at " + truck.parkedAt : truck.disabledHoursLeft > 0 ? "disabled roadside" : "hauling"} &bull; ${truck.contractsCompleted} loads</div>
+        </div>
+        <div class="row-value">$${Math.round(truck.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+      </div>`;
+
+    const hiredHtml = profile.hiredTrucks.map((h) => {
+      const t = truckById?.get(h.id);
+      if (!t) return `<div class="row-sub" style="padding:3px 0;">${h.id} - no longer in the fleet.</div>`;
+      const status = t.parkedAt ? `parked at ${t.parkedAt}` : t.disabledHoursLeft > 0 ? "disabled roadside" : "hauling";
+      const pending = Math.max(0, t.earnings - (h.lastSettledEarnings ?? 0));
+      const traits = traitSummary(t.driver).map((tr) =>
+        `<span class="chip active" style="cursor:default;background:${tr.color};border-color:${tr.color};padding:2px 6px;font-size:0.6rem;">${tr.label}</span>`
+      ).join("");
+      return `
+        <div class="list-row" style="border-left-color:var(--info);">
+          <div style="flex:1;">
+            <div class="row-main">${t.name} <span class="row-sub">(${h.id})</span></div>
+            <div class="row-sub">${status} &bull; ${t.contractsCompleted} loads &bull; $${Math.round(pending).toLocaleString()} pending</div>
+            ${traits ? `<div class="chip-row" style="margin-top:3px;">${traits}</div>` : ""}
+          </div>
+          <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+        </div>`;
+    }).join("") || `<div class="placeholder-text">No hired drivers yet.</div>`;
+
+    careerEl.tabFleet.innerHTML = `
+      ${headerHtml}
+      <div class="section-label">Your Company</div>
+      ${yourRigHtml}
+      ${hiredHtml}
+      ${renderHiringSection()}
+    `;
+  });
+}
+
+// --- BOOKS - the ledger --------------------------------------------------
+//
+// "Am I making money, on what, and how close am I to the next level?"
+
+export function renderBooksTab(profile, truck) {
+  if (!profile.active) {
+    careerEl.tabBooks.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
+    return;
+  }
+  preserveScroll(careerEl.tabBooks, () => {
+    const s = profile.stats;
+    const totalEarned = truck ? truck.earnings : 0;
+    const thresholds = career.LEVEL_XP_THRESHOLDS;
+    const prevThreshold = thresholds[profile.level - 1] ?? 0;
+    const nextThreshold = thresholds[profile.level];
+    const xpProgress = nextThreshold != null ? Math.min(1, Math.max(0, (profile.xp - prevThreshold) / (nextThreshold - prevThreshold))) : 1;
+    const xpLabel = nextThreshold != null ? `${profile.xp.toLocaleString()} / ${nextThreshold.toLocaleString()} XP` : `${profile.xp.toLocaleString()} XP — max level`;
+
+    const logHtml = profile.log.slice(0, 8).map((l) => `<div class="row-sub" style="padding:3px 0;">${l.text}</div>`).join("")
+      || `<div class="placeholder-text">Quiet so far.</div>`;
+
+    careerEl.tabBooks.innerHTML = `
+      <div class="metric-grid" style="margin-bottom:12px;">
+        <div class="metric-card good"><div class="metric-title">Cash</div><div class="metric-value">$${Math.round(profile.cash).toLocaleString()}</div></div>
+        <div class="metric-card"><div class="metric-title">Level</div><div class="metric-value">${profile.level}</div></div>
+        <div class="metric-card"><div class="metric-title">Total Earned</div><div class="metric-value">$${Math.round(totalEarned).toLocaleString()}</div></div>
+        <div class="metric-card"><div class="metric-title">Total Spent</div><div class="metric-value">$${Math.round(s.totalSpent).toLocaleString()}</div></div>
+        ${profile.hiredTrucks.length ? `<div class="metric-card good"><div class="metric-title">Fleet Collected</div><div class="metric-value">$${Math.round(s.fleetEarningsCollected ?? 0).toLocaleString()}</div></div>` : ""}
+        <div class="metric-card info"><div class="metric-title">Reputation</div><div class="metric-value">${Math.round(profile.reputation)}</div></div>
+      </div>
+      <div class="section-label">Progress</div>
+      ${statBar("XP to next level", xpProgress, "var(--info)", null, xpLabel)}
+      <div class="section-label">Career Stats</div>
+      <div class="metric-grid" style="margin-bottom:12px;">
+        <div class="metric-card"><div class="metric-title">Deliveries</div><div class="metric-value">${truck ? truck.contractsCompleted : 0}</div></div>
+        <div class="metric-card"><div class="metric-title">On-Time Hotshots</div><div class="metric-value">${s.onTimeDeliveries}</div></div>
+        <div class="metric-card"><div class="metric-title">Hotshot Bonus</div><div class="metric-value">$${Math.round(s.hotshotBonusEarned).toLocaleString()}</div></div>
+        <div class="metric-card"><div class="metric-title">Fuel Bought</div><div class="metric-value">${Math.round(s.fuelUnitsBought).toLocaleString()} gal</div></div>
+        <div class="metric-card${s.ticketsReceived ? " bad" : ""}"><div class="metric-title">Tickets</div><div class="metric-value">${s.ticketsReceived}</div></div>
+        <div class="metric-card${s.duiCount ? " bad" : ""}"><div class="metric-title">DUIs</div><div class="metric-value">${s.duiCount}</div></div>
+      </div>
+      <div class="section-label">Recent Activity</div>
+      ${logHtml}
+      <div class="section-label">Save</div>
+      <div class="vendor-grid">
+        <button class="vendor-item" data-action="save-career"><span class="v-name">Save Career</span><span class="v-desc">Keeps cash, stats and upgrades if you close the tab</span></button>
+        <button class="vendor-item" data-action="delete-save"><span class="v-name">Delete Save</span><span class="v-desc">Wipes the saved profile - your current run keeps going</span></button>
+      </div>
+      ${lastSaveOk != null ? `<div class="row-sub" style="padding:4px 0;">${lastSaveOk ? "Saved." : "Save failed (storage full or unavailable)."}</div>` : ""}
+    `;
+  });
+}
+
+// --- WORLD - the living sim, condensed -----------------------------------
+//
+// "What's going on out there?" A short fleet-wide status row plus the CB
+// feed folded in (see careerEl.cbFeed's own doc comment) - the rest of
+// what a spectator would want is one tap away if career mode ever ends.
+
+export function renderWorldTab(trucks) {
+  preserveScroll(careerEl.tabWorld, () => {
+    let moving = 0, parked = 0, disabled = 0, speedSum = 0, speedCount = 0;
+    for (const t of trucks) {
+      if (t.disabledHoursLeft > 0) disabled++;
+      else if (t.parkedAt) parked++;
+      else { moving++; if (t.edge) { speedSum += t.speed; speedCount++; } }
+    }
+    const avgSpeed = speedCount ? Math.round(speedSum / speedCount) : 0;
+    careerEl.tabWorld.innerHTML = `
+      <div class="metric-grid" style="margin-bottom:12px;">
+        <div class="metric-card"><div class="metric-title">Active Fleet</div><div class="metric-value">${trucks.length.toLocaleString()}</div></div>
+        <div class="metric-card good"><div class="metric-title">Rolling</div><div class="metric-value">${moving.toLocaleString()}</div></div>
+        <div class="metric-card"><div class="metric-title">Parked</div><div class="metric-value">${parked.toLocaleString()}</div></div>
+        <div class="metric-card${disabled > 20 ? " bad" : ""}"><div class="metric-title">Disabled</div><div class="metric-value">${disabled.toLocaleString()}</div></div>
+        <div class="metric-card"><div class="metric-title">Network Speed</div><div class="metric-value">${avgSpeed} mph</div></div>
+      </div>
+      <div class="section-label">CB Chatter</div>
+      <div id="cb-feed-slot"></div>
+    `;
+    document.getElementById("cb-feed-slot").appendChild(careerEl.cbFeed);
+  });
 }

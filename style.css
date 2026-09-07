@@ -691,6 +691,15 @@ html, body {
    pull down through rather than three lines that evaporate.
 --------------------------------------------------------------------- */
 #tab-cb { padding: 8px 10px; }
+/* #cb-feed is cb.js's actual scroll container (it reads/writes
+   feedEl.scrollTop directly to preserve position as messages arrive) -
+   it used to just BE #tab-cb. Now it's reparented between #tab-cb
+   (spectating) and World's own slot (driving, see career-ui.js's
+   renderWorldTab), so it needs its own bounded height/scroll wherever it
+   lands rather than inheriting the parent panel's, which differs between
+   the two homes (one is the whole sheet, the other shares space with
+   World's metrics grid above it). */
+#cb-feed { max-height: 400px; overflow-y: auto; }
 .cb-msg {
   display: flex;
   gap: 8px;
@@ -997,11 +1006,14 @@ html, body {
    Owner-Operator career mode.
    --------------------------------------------------------------------- */
 
-/* HUD: the cash/fuel readout that sits beside the nav-view toggle while a
-   career is active, plus the always-visible CAREER pill that starts one
-   (and turns green/active once it has). */
+/* HUD: the always-visible CAREER pill that starts a career (and turns
+   green/active once it has), plus the read-only status bar that replaces
+   it once driving. No controls live in the status bar anymore - throttle
+   and PULL IN moved into the RIG tab, full-size (see career-ui.js's
+   renderRigTab); this is purely glanceable, and doubles as a shortcut
+   into RIG on tap. */
 #btn-career.active { background: var(--go); color: #fff; }
-#career-hud {
+#career-status {
   pointer-events: auto;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1014,19 +1026,27 @@ html, body {
   font-family: var(--font-mono);
   font-size: 0.72rem;
   font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  max-width: 92vw;
+  overflow-x: auto;
 }
-#career-hud-cash { color: var(--go); }
-#career-hud-fuel { color: var(--ink); }
-#career-hud-hotshot { color: var(--stop); font-weight: 700; }
-/* Throttle: CONSERVE trades speed for fuel/wear (safe green), LEGAL is
-   cruise-speed baseline (neutral), HAMMER trades fuel/wear/ticket-heat for
-   speed (risk red) - same semantic colors as everywhere else in the app,
-   not a fresh palette invented for this one control. */
-#throttle-group { display: flex; gap: 4px; }
-#throttle-group .chip { padding: 5px 7px; font-size: 0.62rem; }
-#throttle-group .chip[data-throttle="CONSERVE"].active { background: var(--go); border-color: var(--go); color: #fff; }
-#throttle-group .chip[data-throttle="LEGAL"].active { background: var(--caution); border-color: var(--caution); color: var(--caution-ink); }
-#throttle-group .chip[data-throttle="HAMMER"].active { background: var(--stop); border-color: var(--stop); color: #fff; }
+#career-status:active { transform: scale(0.98); }
+#career-status-hotshot { color: var(--stop); font-weight: 700; }
+#career-status-heat { color: var(--stop); font-weight: 700; }
+
+/* Career mode-shift: body.career-mode is toggled by career-ui.js's
+   updateCareerHud, on/off with profile.active. Without this, "driving"
+   looked identical to spectating except for the status strip - the app's
+   own chrome (top-bar border, truck-stop header) stayed on --caution,
+   the ordinary/spectator accent, right next to the status bar's --go
+   border. This spreads the SAME --go "you're driving" accent already
+   established there to the rest of the top-level chrome instead of
+   introducing a new color. */
+body.career-mode #top-bar { border-bottom-color: var(--go); }
+body.career-mode #truckstop-header { border-bottom-color: var(--go); }
+body.career-mode #truckstop-city { color: var(--go); }
+body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--go); }
 
 /* Career mode-shift: body.career-mode is toggled by career-ui.js's
    updateCareerHud, on/off with profile.active. Without this, "driving"

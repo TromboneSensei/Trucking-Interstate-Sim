@@ -20,18 +20,20 @@
     <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
     <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
     <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
-    <div id="career-hud" class="hidden">
-      <span id="career-hud-cash">$0</span>
+    <!-- Read-only status while driving - no controls live here anymore
+         (throttle/PULL IN moved into the RIG tab, full-size, where a
+         thumb can actually hit them; see career-ui.js's renderRigTab).
+         Tapping anywhere on the bar opens RIG - it's a shortcut into the
+         cockpit, not a second place to act from up here. -->
+    <button id="career-status" class="hidden" title="Open your rig">
+      <span id="career-status-cash">$0</span>
       <span class="divider">/</span>
-      <span id="career-hud-fuel">FUEL 0%</span>
-      <span id="career-hud-hotshot" class="hidden"></span>
-      <div id="throttle-group">
-        <button class="chip" data-throttle="CONSERVE">CONSERVE</button>
-        <button class="chip active" data-throttle="LEGAL">LEGAL</button>
-        <button class="chip" data-throttle="HAMMER">HAMMER</button>
-      </div>
-      <button id="btn-pull-in" class="pill-btn" style="background:var(--caution);color:var(--caution-ink);padding:6px 10px;font-size:0.68rem;">PULL IN</button>
-    </div>
+      <span id="career-status-fuel">FUEL 0%</span>
+      <span id="career-status-fatigue">FATIGUE 0%</span>
+      <span id="career-status-dest"></span>
+      <span id="career-status-hotshot" class="hidden"></span>
+      <span id="career-status-heat" class="hidden">&#128680; HEAT</span>
+    </button>
   </div>
 
   <button id="btn-settings" title="Settings">&#9881;</button>
@@ -168,18 +170,36 @@
   <div id="bottom-sheet">
     <div id="sheet-handle"></div>
     <div id="sheet-tabs">
-      <button class="tab-btn active" data-tab="overview">Dispatch</button>
-      <button class="tab-btn" data-tab="rankings">Rankings</button>
-      <button class="tab-btn" data-tab="economy">Economy</button>
-      <button class="tab-btn" data-tab="cb">CB Feed<span id="cb-unread" class="tab-badge hidden"></span></button>
-      <button class="tab-btn hidden" id="tab-btn-career" data-tab="career">Career</button>
+      <!-- Spectator tabs (default): visible unless a career is active.
+           Career tabs (RIG/FLEET/BOOKS/WORLD): the reverse. Never both at
+           once - see career-ui.js's updateCareerHud, which is also what
+           forces a fallback selection if the active tab is the one just
+           hidden. Both sets are declared up front (not injected later) so
+           el's static-vs-live query concerns never come up. -->
+      <button class="tab-btn active spectator-tab" data-tab="overview">Dispatch</button>
+      <button class="tab-btn spectator-tab" data-tab="rankings">Rankings</button>
+      <button class="tab-btn spectator-tab" data-tab="economy">Economy</button>
+      <button class="tab-btn spectator-tab" data-tab="cb">CB Feed<span id="cb-unread" class="tab-badge hidden"></span></button>
+      <button class="tab-btn career-tab hidden" data-tab="rig">Rig</button>
+      <button class="tab-btn career-tab hidden" data-tab="fleet">Fleet</button>
+      <button class="tab-btn career-tab hidden" data-tab="books">Books</button>
+      <button class="tab-btn career-tab hidden" data-tab="world">World</button>
     </div>
     <div class="tab-content">
       <div id="tab-overview" class="content-panel active"></div>
       <div id="tab-rankings" class="content-panel"></div>
       <div id="tab-economy" class="content-panel"></div>
-      <div id="tab-cb" class="content-panel"></div>
-      <div id="tab-career" class="content-panel"></div>
+      <!-- #cb-feed is cb.js's one persistent feed element - it never gets
+           destroyed/rebuilt (cb.js appends messages into it directly and
+           tracks its own scroll position). This div is its HOME while
+           spectating; career-ui.js's renderWorldTab reparents it into the
+           World tab's own slot while a career is active, and moves it
+           back here the moment the career ends - see updateCareerHud. -->
+      <div id="tab-cb" class="content-panel"><div id="cb-feed"></div></div>
+      <div id="tab-rig" class="content-panel"></div>
+      <div id="tab-fleet" class="content-panel"></div>
+      <div id="tab-books" class="content-panel"></div>
+      <div id="tab-world" class="content-panel"></div>
       <!-- Not a tab: tapping a truck or a city slides this over whichever
            tab is open, and the back button (or picking any tab) closes it
            again. Inspecting something is a detour from browsing, not a

@@ -9,7 +9,7 @@ import { chooseOffer } from "./economy.js";
 import { initCB, resetCB, updateCB } from "./cb.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 import * as career from "./career.js";
-import { initCareerUI, updateCareerHud, renderCareerTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed } from "./career-ui.js";
+import { initCareerUI, updateCareerHud, renderRigTab, renderFleetTab, renderBooksTab, renderWorldTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed } from "./career-ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 // The load board gets longer than a junction call: picking a haul is a
@@ -76,7 +76,7 @@ const el = {
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
   dailyDigest: document.getElementById("daily-digest"),
-  cbFeed: document.getElementById("tab-cb"),
+  cbFeed: document.getElementById("cb-feed"),
   cbUnread: document.getElementById("cb-unread"),
   settingCBRadio: document.getElementById("setting-cb-radio"),
 };
@@ -786,7 +786,11 @@ initCB({
   feedEl: el.cbFeed,
   badgeEl: el.cbUnread,
   onSelectTruck: followTruck,
-  isFeedVisible: () => visibleTab() === "cb",
+  // #cb-feed itself is reparented between #tab-cb (spectating) and the
+  // World tab's own slot (driving) - see career-ui.js's renderWorldTab and
+  // updateCareerHud - so "is the feed actually on screen" means either
+  // tab, whichever currently hosts it.
+  isFeedVisible: () => visibleTab() === "cb" || visibleTab() === "world",
 });
 initUI({
   onSelectTruck: followTruck,
@@ -843,7 +847,10 @@ const TAB_RENDERERS = {
   overview: () => renderDispatchTab(trucks, graph, lastCongestedSegments),
   rankings: () => renderRankingsTab(trucks, graph),
   economy: () => renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo),
-  career: () => renderCareerTab(career.getProfile(), getCareerTruck(), truckById, state.gameSeconds),
+  rig: () => renderRigTab(career.getProfile(), getCareerTruck(), state.gameSeconds),
+  fleet: () => renderFleetTab(career.getProfile(), truckById),
+  books: () => renderBooksTab(career.getProfile(), getCareerTruck()),
+  world: () => renderWorldTab(trucks),
 };
 
 function frame(now) {
