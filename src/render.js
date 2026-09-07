@@ -199,6 +199,16 @@ const HEADLIGHT_SPREAD = 4.6;  // half-width at the far end of the beam
 const HEADLIGHT_COLOR = "rgba(255, 220, 150, 0.16)";
 const headlightPts = [];
 
+// Identity ring for a hired company truck (isCompanyTruck) - there are only
+// ever a handful of these, and they otherwise draw as the exact same
+// cargo-colored dot as the other 9,999 AI trucks. Without a visual
+// differentiator the payoff for actually building a fleet is invisible.
+// Color mirrors style.css's --info (#3f6fb0) rather than --go, since --go
+// already carries a "healthy status" meaning elsewhere in the HUD - this
+// ring is an identity marker, not a status readout.
+const COMPANY_RING_COLOR = "#3f6fb0";
+const companyTruckPts = [];
+
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
 // onward; each further tier needs progressively more zoom-in, revealed
@@ -1168,7 +1178,13 @@ function laneOffsetFor(edge, truck) {
     ? RIGHT_LANE_OFFSET + (LEFT_LANE_OFFSET - RIGHT_LANE_OFFSET) * truck.laneT
     : HIGHWAY_LANE_OFFSET;
   if (truck.fatigue > FATIGUE_JITTER_THRESHOLD) {
-    off += Math.sin(_renderGameSeconds * 0.5 + truck.id) * FATIGUE_JITTER_AMPLITUDE;
+    // truck.id is a plain number for every ordinary AI truck but a string
+    // ("H-1", ...) for a hired company truck (see fleet.js's isCompanyTruck) -
+    // `+ truck.id` on a string coerces this whole expression to NaN, which
+    // then poisons laneOffsetFor's caller and corrupts the canvas path.
+    // hashStr gives a stable per-truck phase either way.
+    const idPhase = typeof truck.id === "string" ? hashStr(truck.id) : truck.id;
+    off += Math.sin(_renderGameSeconds * 0.5 + idPhase) * FATIGUE_JITTER_AMPLITUDE;
   }
   return off;
 }
@@ -1627,6 +1643,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   const headlightsOn = dayNightOn && renderOpts.showHeadlights !== false
     && darkAtMid > 0.22 && roadDetailFactor(camera) >= 1;
   headlightPts.length = 0;
+  companyTruckPts.length = 0;
 
   const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
@@ -1666,6 +1683,13 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     if (headlightsOn && truck.edge && truck.speed > 1) {
       headlightPts.push(p.x, p.y, p.heading);
     }
+    // Inlined rather than imported from fleet.js's isCompanyTruck: fleet.js
+    // already imports TRUCK_DOT_RADIUS/LEFT_LANE_OFFSET/RIGHT_LANE_OFFSET
+    // FROM render.js, so a render.js -> fleet.js import here would close a
+    // circular module loop and throw a TDZ ReferenceError on load (fleet.js
+    // resolving to a still-mid-evaluation render.js). Same one-line check,
+    // no import needed.
+    if (typeof truck.id === "string" && truck.id.startsWith("H-")) companyTruckPts.push(p.x, p.y);
   }
 
   // One path, one fill, for every headlight on screen - the whole reason
@@ -1730,6 +1754,20 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+
+  // Company-truck identity ring - one batched stroke, same "one path" shape
+  // as the headlight cones above, drawn on top of the fleet fill so it
+  // reads at every zoom level a company dot is visible at.
+  if (companyTruckPts.length) {
+    ctx.strokeStyle = COMPANY_RING_COLOR;
+    ctx.lineWidth = 1.5 / camera.zoom;
+    ctx.beginPath();
+    for (let i = 0; i < companyTruckPts.length; i += 2) {
+      ctx.moveTo(companyTruckPts[i] + TRUCK_DOT_RADIUS + 2, companyTruckPts[i + 1]);
+      ctx.arc(companyTruckPts[i], companyTruckPts[i + 1], TRUCK_DOT_RADIUS + 2, 0, Math.PI * 2);
+    }
+    ctx.stroke();
+  }
 
   // Google-Maps-style directional arrow for the followed truck in nav
   // view, in place of its plain dot. No separate counter-rotation needed:

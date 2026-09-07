@@ -113,11 +113,31 @@ let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
 
+// Which vendor tab to open on, on ARRIVAL only (switchVendor still works
+// freely once the stop is open). A mid-route fuel/pull-in stop
+// (stopVendor "PUMPS") can only ever mean one thing, so it's untouched. A
+// genuine delivery arrival (stopVendor "BOARD") is otherwise a fine
+// default - but if the player is also critically low on fuel/rest/food,
+// forcing them to notice and click away from the load board first, in a
+// moment that's supposed to read as "you just got here, you need gas,"
+// is the wrong first screen. This never writes truck.stopVendor itself -
+// that field stays exactly what fleet.js set it to, since career.js's
+// delivery-credit check (tickNeeds) and the Roll Out/hotshot-HUD gates
+// below all key off that same field meaning "a load hasn't been taken yet."
+function pickDefaultVendor(truck) {
+  if (truck.stopVendor !== "BOARD") return truck.stopVendor || "PUMPS";
+  const p = career.getProfile();
+  if (Math.round(truck.fuel) <= 15) return "PUMPS";
+  if (truck.fatigue > 70) return "SLEEPER";
+  if (p.hunger < 20) return "DINER";
+  return "BOARD";
+}
+
 export function openTruckStop(truck, graph, trucks, weather) {
   stopCtx = { truck, graph, trucks, weather };
   open = true;
   fuelUnitsThisStop = 0;
-  activeVendor = truck.stopVendor || "PUMPS";
+  activeVendor = pickDefaultVendor(truck);
   careerEl.city.textContent = truck.parkedAt || "Truck Stop";
   careerEl.overlay.classList.remove("hidden");
   renderTabs();
