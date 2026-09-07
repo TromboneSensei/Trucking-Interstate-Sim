@@ -5,7 +5,7 @@
 // (no inline-styled template strings).
 "use strict";
 import { travelDirectionLabel, baseRouteName } from "./geo.js";
-import { estimatedRangeMiles } from "./fleet.js";
+import { estimatedRangeMiles, isCompanyTruck } from "./fleet.js";
 import { cbLastMessageFor } from "./cb.js";
 
 const el = {
@@ -415,11 +415,16 @@ function cityTally(trucks) {
 // Only the single leader is ever needed for the summary cards, so take it
 // in one linear scan rather than copying and fully sorting the fleet.
 // Sorting 3,000 trucks is ~34,600 comparisons; this is 3,000.
+// Company trucks (Phase 11 hires) never appear in these fleet-wide
+// leaderboards, same reasoning as the daily digest's Top Earner/Lead Foot
+// exclusion - a cash-subsidized player-owned rig would otherwise dominate
+// every superlative meant to rank the other ~9999 autopilot trucks.
 function leaderTruckBy(trucks, key) {
   const stat = TRUCK_STATS[key];
   const asc = stat.dir === "asc";
   let best = null, bestV = 0;
   for (const t of trucks) {
+    if (isCompanyTruck(t)) continue;
     const v = stat.get(t);
     if (best === null || (asc ? v < bestV : v > bestV)) { best = t; bestV = v; }
   }
@@ -431,7 +436,7 @@ function sortedTrucksBy(trucks, key) {
   // Decorate-sort-undecorate: stat.get runs once per truck instead of
   // twice per comparison. For etaMiles in particular that matters a lot -
   // its getter walks the truck's whole remaining path.
-  const decorated = trucks.map((t) => ({ t, v: stat.get(t) }));
+  const decorated = trucks.filter((t) => !isCompanyTruck(t)).map((t) => ({ t, v: stat.get(t) }));
   decorated.sort(stat.dir === "asc" ? (a, b) => a.v - b.v : (a, b) => b.v - a.v);
   return decorated.map((d) => d.t);
 }

@@ -1,7 +1,7 @@
 // main.js - boot + the single game loop. Ties the graph, fleet
 // simulation, camera, renderer, and dashboard together.
 import { buildGraph, WORLD_WIDTH, WORLD_HEIGHT, travelDirectionLabel } from "./geo.js";
-import { spawnFleet, updateFleet, drainFleetEvents, BASE_TIME_SCALE } from "./fleet.js";
+import { spawnFleet, updateFleet, drainFleetEvents, BASE_TIME_SCALE, Truck, isCompanyTruck } from "./fleet.js";
 import { Camera } from "./camera.js";
 import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truckWorldPos, truckPose } from "./render.js";
 import { createWeather, updateWeather } from "./weather.js";
@@ -221,6 +221,11 @@ function checkDayRollover() {
     deliveries += t.dayDeliveries;
     breakdowns += t.dayBreakdowns;
     fuelExpense += t.dayFuelSpend;
+    // Company trucks (Phase 11 hires) are excluded from these fleet-wide
+    // awards - a cash-subsidized player-owned rig would otherwise dominate
+    // every superlative. They still count in the raw totals above (real
+    // fleet activity), just never win Top Earner/Lead Foot.
+    if (isCompanyTruck(t)) continue;
     if (t.dayEarnings > 0 && (!topEarner || t.dayEarnings > topEarner.dayEarnings)) topEarner = t;
     // Averaged over the WHOLE day, not just the hours spent rolling, so a
     // truck that parked for a long layover or sat on the shoulder is
@@ -408,6 +413,29 @@ function handleStartCareer() {
   if (!truck) return;
   career.startCareer(truck, graph);
   followTruck(truck);
+}
+
+// career.js rolls the candidate driver and handles the cash/id bookkeeping
+// (confirmHire) but never touches `trucks` itself (see its own doc
+// comment) - this is the one place that actually constructs the Truck and
+// puts it into the live fleet, mirroring handleStartCareer's split with
+// startCareer/reattachTruck above. Spawned at the career truck's current
+// city (a hired driver reports to wherever the boss happens to be) as an
+// ordinary, fully autopilot truck - `agent` stays null, so every existing
+// AI system (contracts, fatigue, breakdowns, weather) treats it exactly
+// like any of the other ~9999 trucks except for its "H-" id, which is what
+// excludes it from fleet-wide rankings/digest awards (see fleet.js's
+// isCompanyTruck and its two call sites).
+function handleHireDriver(driver) {
+  const ct = getCareerTruck();
+  if (!ct) return null;
+  const res = career.confirmHire(driver);
+  if (!res.ok) return res;
+  const t = new Truck(graph, ct.currentNode, Math.random, driver);
+  t.id = res.id;
+  trucks.push(t);
+  truckById.set(t.id, t);
+  return res;
 }
 
 function toggleControl() {
@@ -762,6 +790,7 @@ initCareerUI({
   // pending, exactly like updateFleet's normal return value would - reuse
   // the exact same decision panel rather than inventing a second one.
   onRollOut: (waiting) => { if (waiting && waiting.awaitingDecision) showDecisionPanel(waiting); },
+  onHireDriver: handleHireDriver,
 });
 // Autosave on the way out - a career the player forgot to save manually
 // (closing the tab, navigating away) shouldn't just vanish. save() is a
@@ -968,7 +997,7 @@ function frame(now) {
       if (tab === "overview") renderDispatchTab(trucks, graph, lastCongestedSegments);
       else if (tab === "rankings") renderRankingsTab(trucks, graph);
       else if (tab === "economy") renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo);
-      else if (tab === "career") renderCareerTab(career.getProfile(), getCareerTruck());
+      else if (tab === "career") renderCareerTab(career.getProfile(), getCareerTruck(), truckById);
       if (tab === "details" && state.detailsView && state.detailsView.kind === "city") {
         refreshViewedCityDetails(graph.nodes[state.detailsView.name], graph, trucks);
       }

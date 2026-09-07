@@ -10,6 +10,7 @@
 import * as career from "./career.js";
 import { pumpFuel, estimatedRangeMiles } from "./fleet.js";
 import { generateContractOffers } from "./economy.js";
+import { traitSummary } from "./driver.js";
 
 const careerEl = {
   btnCareer: document.getElementById("btn-career"),
@@ -37,16 +38,19 @@ const VENDOR_LABEL = { PUMPS: "Pumps", STORE: "Store", DINER: "Diner", SHOWERS: 
 let onStartCareer = null; // () => void - main.js decides which truck becomes the career truck
 let onTimeAdvanced = null; // (newGameSeconds) => void - keeps main.js's state.gameSeconds in sync
 let onRollOut = null; // () => void - main.js re-checks for a pending junction decision after resuming
-let onCareerEnded = null; // () => void - reserved (Phase 11+), not fired yet
+let onCareerEnded = null; // () => void - reserved, not fired yet
+let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is the only place that can actually construct a Truck and push it into the live fleet (career.js never touches `trucks`)
 
 let open = false;
 let activeVendor = "PUMPS";
 let stopCtx = null; // { truck, graph, trucks, weather }
 let fuelUnitsThisStop = 0; // tracked for the shower's "free with a big fill" perk
+let hireCandidate = null; // the currently-rolled DriverDNA shown on BOARD's hiring section, re-rolled each time the board renders fresh
 
 export function initCareerUI(callbacks) {
   onStartCareer = callbacks.onStartCareer;
   onTimeAdvanced = callbacks.onTimeAdvanced;
+  onHireDriver = callbacks.onHireDriver || null;
   onRollOut = callbacks.onRollOut;
   onCareerEnded = callbacks.onCareerEnded || null;
 
@@ -354,13 +358,43 @@ function renderMechanic() {
     <div class="vendor-grid">${upgradeRows}</div>`;
 }
 
+function renderHiringSection() {
+  if (!onHireDriver) return ""; // main.js didn't wire hiring in (shouldn't happen, but never render a dead button)
+  const p = career.getProfile();
+  if (!hireCandidate) hireCandidate = career.rollHireCandidate();
+  const traits = traitSummary(hireCandidate).map((t) =>
+    `<span class="chip active" style="cursor:default;background:${t.color};border-color:${t.color};">${t.label}</span>`
+  ).join("") || `<span class="row-sub">No standout traits - a steady, ordinary driver.</span>`;
+  const locked = p.level < career.HIRE_MIN_LEVEL;
+  const disabled = locked || p.cash < career.HIRE_COST;
+  return `
+    <div class="vendor-section-title">Hire a Driver &mdash; ${p.hiredTrucks.length} on payroll</div>
+    <div class="vendor-grid">
+      <div class="vendor-item" style="cursor:default;">
+        <span class="v-name">Candidate</span>
+        <div class="chip-row" style="margin:4px 0;">${traits}</div>
+        <span class="v-desc">${locked ? `Requires level ${career.HIRE_MIN_LEVEL}` : "Spawns as a new truck, hauling on its own from wherever you are now"}</span>
+      </div>
+      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="hire" data-arg="" ${disabled ? "disabled" : ""}>
+        <span class="v-name">Hire This Driver</span>
+        <span class="v-desc">Signing bonus, one-time</span>
+        <span class="v-meta"><span></span><span class="v-price expense">$${career.HIRE_COST.toLocaleString()}</span></span>
+      </button>
+      <button class="vendor-item" data-action="reroll-hire" data-arg="">
+        <span class="v-name">Different Candidate</span>
+        <span class="v-desc">Free - see who else is available</span>
+      </button>
+    </div>`;
+}
+
 function renderBoard() {
   const { truck, graph } = stopCtx;
+  const hiringSection = renderHiringSection();
   if (truck.stopVendor !== "BOARD") {
-    return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing to pick up here - you're between drops.</div>`;
+    return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing to pick up here - you're between drops.</div>${hiringSection}`;
   }
   const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
-  if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>`;
+  if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>${hiringSection}`;
   career.decorateHotshot(offers);
   const rows = offers.map((o, i) => {
     const rpm = o.payout / Math.max(1, o.optimalMiles);
@@ -376,7 +410,7 @@ function renderBoard() {
       </button>`;
   }).join("");
   careerEl._lastOffers = offers; // stashed for the click handler (index-based lookup)
-  return `<div class="vendor-section-title">Load Board &mdash; ${truck.parkedAt}</div><div class="vendor-grid">${rows}</div>`;
+  return `<div class="vendor-section-title">Load Board &mdash; ${truck.parkedAt}</div><div class="vendor-grid">${rows}</div>${hiringSection}`;
 }
 
 function handleAction(action, arg) {
@@ -415,6 +449,14 @@ function handleAction(action, arg) {
     career.takeOffer(graph, truck, offer, currentGameSeconds);
     closeTruckStop();
     if (onRollOut) onRollOut(null); // no junction pending - a fresh contract always starts clean
+  } else if (action === "reroll-hire") {
+    hireCandidate = career.rollHireCandidate();
+    renderVendor();
+  } else if (action === "hire") {
+    if (!hireCandidate || !onHireDriver) return;
+    const res = onHireDriver(hireCandidate);
+    if (res && res.ok) hireCandidate = null; // hired - next render rolls a fresh candidate
+    renderVendor(); renderStatus();
   }
 }
 
@@ -458,7 +500,7 @@ export function updateCareerHud(profile, truck, gameSeconds) {
 
 // --- Career tab (bottom sheet) ---------------------------------------
 
-export function renderCareerTab(profile, truck) {
+export function renderCareerTab(profile, truck, truckById) {
   lastCareerTruck = truck;
   if (!profile.active) {
     careerEl.tabCareer.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
@@ -480,6 +522,21 @@ export function renderCareerTab(profile, truck) {
   const totalEarned = truck ? truck.earnings : 0;
   const logRows = profile.log.slice(0, 8).map((l) => `<div class="row-sub" style="padding:3px 0;">${l.text}</div>`).join("")
     || `<div class="placeholder-text">Quiet so far.</div>`;
+  // Your Company (Phase 11): hired trucks are ordinary AI-piloted Trucks
+  // living in the same `trucks` array as everything else - looked up here
+  // by id rather than mirrored into profile, so a hired truck's current
+  // earnings/status are always exactly what fleet.js says they are, same
+  // "read it from the live truck" principle as the career truck's own
+  // Deliveries/Total Earned above.
+  const companyRows = !profile.hiredTrucks.length ? "" : profile.hiredTrucks.map((h) => {
+    const t = truckById?.get(h.id);
+    if (!t) return `<div class="row-sub" style="padding:3px 0;">${h.id} - no longer in the fleet.</div>`;
+    const status = t.parkedAt ? `parked at ${t.parkedAt}` : t.disabledHoursLeft > 0 ? "disabled roadside" : "hauling";
+    return `<div class="row-sub" style="padding:3px 0;">${t.name} (${h.id}) - ${status} - $${Math.round(t.earnings).toLocaleString()} lifetime, ${t.contractsCompleted} loads</div>`;
+  }).join("");
+  const companySection = !profile.hiredTrucks.length ? "" : `
+    <div class="section-label">Your Company &mdash; ${profile.hiredTrucks.length} driver${profile.hiredTrucks.length === 1 ? "" : "s"}</div>
+    ${companyRows}`;
   careerEl.tabCareer.innerHTML = `
     <div class="metric-grid" style="margin-bottom:12px;">
       <div class="metric-card good"><div class="metric-title">Cash</div><div class="metric-value">$${Math.round(profile.cash).toLocaleString()}</div></div>
@@ -496,6 +553,7 @@ export function renderCareerTab(profile, truck) {
     ${statBar("Heat", profile.heat / 100, "var(--stop)")}
     <div class="section-label">Recent Activity</div>
     ${logRows}
+    ${companySection}
     <div class="section-label">Save</div>
     <div class="vendor-grid">
       <button class="vendor-item" data-action="save-career"><span class="v-name">Save Career</span><span class="v-desc">Keeps cash, stats and upgrades if you close the tab</span></button>

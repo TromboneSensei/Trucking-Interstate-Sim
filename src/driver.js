@@ -6,6 +6,21 @@
 // logic uses to make aggressive drivers visibly surge and brake harder.
 "use strict";
 
+// Shared with career-ui.js's hiring-candidate preview (Phase 11) - same
+// labels/colors ui.js's own truck-detail trait chips already use, kept
+// here once rather than duplicated, since both are reading the same DNA
+// fields for the same reason (telling the player what kind of driver this
+// is before they commit to anything).
+export function traitSummary(driver) {
+  const traits = [];
+  if (driver.isOutlaw) traits.push({ label: "OUTLAW — never sleeps", color: "var(--stop)" });
+  if (driver.isSuperSpeeder) traits.push({ label: "SUPER-SPEEDER — pushes 100+ mph", color: "var(--stop)" });
+  if (driver.isDrafter) traits.push({ label: "DRAFTER — tucks in to save fuel", color: "var(--go)" });
+  if (driver.isLaneCamper) traits.push({ label: "LANE CAMPER — won't move over", color: "var(--caution)" });
+  if (driver.hustle < 0.2 && !driver.isOutlaw) traits.push({ label: "LOT LOITERER — long layovers", color: "var(--dim)" });
+  return traits;
+}
+
 export class DriverDNA {
     constructor(rnd = Math.random) {
         this.aggression = rnd();

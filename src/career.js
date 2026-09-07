@@ -8,6 +8,7 @@
 
 import { updateFleet, drainFleetEvents, BASE_TIME_SCALE, resumeFromPlayerStop } from "./fleet.js";
 import { updateWeather } from "./weather.js";
+import { DriverDNA } from "./driver.js";
 
 // --- fast-forward ------------------------------------------------------
 //
@@ -716,6 +717,50 @@ export function takeOffer(graph, truck, offer, gameSeconds) {
   } else {
     pushLog(`Took on ${offer.cargo} bound for ${offer.destination}.`);
   }
+}
+
+// --- fleet ownership (Phase 11) ------------------------------------------
+//
+// Hiring a driver spawns a real, ordinary AI-piloted Truck into the live
+// `trucks` array - but this module never touches that array (see the
+// header doc comment: it must stay safe to import with no window/document
+// and no fleet reference at all). So the split is: career.js rolls the
+// candidate driver, checks eligibility, deducts cash, and allocates the
+// "H-N" id (bookkeeping only, no truck object exists yet); main.js is the
+// one that actually calls `new Truck(...)`, stamps that id onto it, and
+// pushes it into the live array - the same division of labor as
+// startCareer/reattachTruck already have with the truck main.js supplies.
+export const HIRE_COST = 8000;
+export const HIRE_MIN_LEVEL = 5;
+
+export function canHire() {
+  return profile.level >= HIRE_MIN_LEVEL && profile.cash >= HIRE_COST;
+}
+
+// Pure - rolls a candidate driver to show the player (traits and all)
+// BEFORE any commitment. Call again to reroll; nothing is spent or
+// recorded until confirmHire() is called with the driver the player
+// actually picks.
+export function rollHireCandidate(rnd = Math.random) {
+  return new DriverDNA(rnd);
+}
+
+// Commits to hiring the given (already-rolled) driver: deducts cash,
+// allocates the next "H-N" id from profile.nextHiredId (a separate counter
+// from fleet.js's own numeric nextId - see the plan's "hired fleet id
+// namespace" note reproduced on the profile.nextHiredId field itself),
+// and records it in profile.hiredTrucks for the Career tab's "Your
+// Company" section. Returns {ok:true, id, driver} for main.js to actually
+// spawn, or {ok:false, reason}.
+export function confirmHire(driver) {
+  if (profile.level < HIRE_MIN_LEVEL) return { ok: false, reason: `Requires level ${HIRE_MIN_LEVEL}.` };
+  if (profile.cash < HIRE_COST) return { ok: false, reason: "Can't afford it." };
+  profile.cash -= HIRE_COST;
+  profile.stats.totalSpent += HIRE_COST;
+  const id = `H-${profile.nextHiredId++}`;
+  profile.hiredTrucks.push({ id, hiredAtGameSeconds: null });
+  pushLog(`Hired a new driver for $${HIRE_COST.toLocaleString()} - dispatched as ${id}.`);
+  return { ok: true, id, driver };
 }
 
 // --- save / load ---------------------------------------------------------

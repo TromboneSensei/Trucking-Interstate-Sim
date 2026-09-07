@@ -369,11 +369,23 @@ function nextTruckName() {
 
 let nextId = 1;
 
+// A hired company truck (Phase 11) gets a string id from career.js's own
+// "H-1", "H-2", ... counter instead of one of these - a separate
+// namespace, never bumping `nextId`, so collision with an ambient AI
+// truck's id is structurally impossible rather than merely avoided by
+// arithmetic (see career.js's nextHiredId doc comment for the full
+// rationale). Exported so both ui.js's rankings and main.js's daily
+// digest can exclude company trucks from fleet-wide awards without either
+// one needing to know the "H-" convention itself.
+export function isCompanyTruck(truck) {
+  return typeof truck.id === "string" && truck.id.startsWith("H-");
+}
+
 export class Truck {
-  constructor(graph, spawnCityName, rnd = Math.random) {
+  constructor(graph, spawnCityName, rnd = Math.random, presetDriver = null) {
     this.id = nextId++;
     this.name = nextTruckName();
-    this.driver = new DriverDNA(rnd);
+    this.driver = presetDriver || new DriverDNA(rnd);
     this.currentNode = spawnCityName;
     this.edge = null;
     this.s = 0; // miles traveled along the current edge
