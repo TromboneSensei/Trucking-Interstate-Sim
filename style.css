@@ -1212,3 +1212,50 @@ body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--
 /* Career tab (Dispatch/Rankings/Economy/CB's sibling in the bottom sheet)
    reuses .metric-grid/.metric-card/.section-label/.stat-bar wholesale -
    no new component classes needed there beyond what's already shared. */
+
+/* ---------------------------------------------------------------------
+   Company logo (Phase 12) - a filled circle in the company's chosen color
+   with its glyph (or monogram fallback) centered inside. Renders
+   identically wherever it appears: the FLEET tab header and, once the map
+   beacon lands, a canvas-drawn equivalent using the same color/glyph/
+   monogram fields (career-ui.js's badge is DOM-only; render.js can't share
+   this markup, only the underlying data shape).
+   --------------------------------------------------------------------- */
+.company-badge {
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.logo-picker-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.logo-picker-groups { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.logo-swatch-row, .logo-glyph-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.logo-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.logo-swatch.active { border-color: var(--ink); box-shadow: 0 0 0 1px var(--caution); }
+.logo-glyph-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 4px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.logo-glyph-btn.active { border-color: var(--caution); background: #2a3441; }

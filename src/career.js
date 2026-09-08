@@ -926,6 +926,50 @@ export function confirmHire(driver) {
   return { ok: true, id, driver };
 }
 
+// --- company identity (Phase 12) -----------------------------------------
+//
+// `profile.logo` is deliberately absent from newProfile() rather than
+// defaulted there - a save from before this existed just renders a sensible
+// placeholder (see the beacon/FLEET-header consumers, which always compute
+// `logo?.color ?? fallback` rather than assuming the field exists), so no
+// save-version migration is needed. `profile.companyName` is the same story
+// (set by the wizard's setupCompany, not yet built) - deriveMonogram falls
+// back to profile.truckName so the badge has something to show either way.
+//
+// Palette deliberately excludes all four semantic accents (--go/--caution/
+// --stop/--info) - a logo badge must never be mistaken for a status color.
+export const LOGO_PALETTE = [
+  { color: "#8b5cf6", label: "Violet" },
+  { color: "#ec4899", label: "Magenta" },
+  { color: "#22d3ee", label: "Cyan" },
+  { color: "#6366f1", label: "Indigo" },
+  { color: "#14b8a6", label: "Teal" },
+  { color: "#84cc16", label: "Lime" },
+  { color: "#f97316", label: "Orange" },
+  { color: "#64748b", label: "Slate" },
+];
+// Matches the game's existing emoji-glyph convention (#btn-career's own
+// truck, heat warnings' siren) rather than introducing a new icon system.
+export const LOGO_GLYPHS = ["🚛", "🦅", "⭐", "🔥", "⚡", "🛣️", "🐺", "🏔️"];
+
+// First letters of the first two words, or the first two letters of a
+// single word - always available as the fallback the glyph sits in front
+// of (a glyph-less badge still needs to read as "your company").
+export function deriveMonogram(name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return "CO";
+  const words = trimmed.split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return trimmed.slice(0, 2).toUpperCase() || "CO";
+}
+
+// Free - confirmed zero gameplay effect (a logo is cosmetic), so unlike
+// renameCompany there's no fee to gate this behind.
+export function setLogo(color, glyph) {
+  profile.logo = { color, glyph: glyph || null, monogram: deriveMonogram(profile.companyName || profile.truckName) };
+  pushLog(`Updated the company logo.`);
+}
+
 // --- save / load ---------------------------------------------------------
 
 const SAVE_KEY = "interstate-fleet-career-v1";

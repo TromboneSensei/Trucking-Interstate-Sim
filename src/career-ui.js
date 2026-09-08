@@ -158,6 +158,15 @@ export function initCareerUI(callbacks) {
       const res = onHireDriver(hireCandidate);
       if (res && res.ok) hireCandidate = null; // hired - next render rolls a fresh candidate
       renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "set-logo-color") {
+      const cur = career.getProfile().logo;
+      career.setLogo(btn.dataset.arg, cur?.glyph || null);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "set-logo-glyph") {
+      const cur = career.getProfile().logo;
+      const color = cur?.color || career.LOGO_PALETTE[0].color;
+      career.setLogo(color, btn.dataset.arg || null);
+      renderFleetTab(career.getProfile(), lastTruckById);
     }
   });
 
@@ -926,6 +935,49 @@ export function renderRigTab(profile, truck, gameSeconds) {
 // from the truck stop's load board, since it's about the whole company
 // rather than any one stop.
 
+// Shared fallback rule for a company's visual identity - an existing save
+// with no profile.logo yet (or before profile.companyName exists at all)
+// renders a sensible placeholder rather than needing a migration. render.js's
+// map beacon (once it lands) computes this same fallback independently
+// rather than importing from here, since it can't import career-ui.js.
+function effectiveLogo(profile) {
+  const logo = profile.logo;
+  return {
+    color: logo?.color || "#3f6fb0",
+    glyph: logo?.glyph || null,
+    monogram: logo?.monogram || career.deriveMonogram(profile.companyName || profile.truckName),
+  };
+}
+
+function logoBadgeHTML(profile, sizePx = 40) {
+  const logo = effectiveLogo(profile);
+  const fontPx = Math.round(sizePx * 0.5);
+  return `<div class="company-badge" style="width:${sizePx}px;height:${sizePx}px;font-size:${fontPx}px;background:${logo.color};">${logo.glyph || logo.monogram}</div>`;
+}
+
+// Palette swatches + glyph buttons (glyph list plus the plain monogram as
+// its own "no glyph" option) - free to change any time (see career.js's
+// setLogo doc comment: a logo is cosmetic, no fee to gate it behind).
+function renderLogoPickerSection(profile) {
+  const logo = effectiveLogo(profile);
+  const swatches = career.LOGO_PALETTE.map((p) =>
+    `<button class="logo-swatch${logo.color === p.color ? " active" : ""}" data-action="set-logo-color" data-arg="${p.color}" title="${p.label}" style="background:${p.color};"></button>`
+  ).join("");
+  const glyphButtons = career.LOGO_GLYPHS.map((g) =>
+    `<button class="logo-glyph-btn${logo.glyph === g ? " active" : ""}" data-action="set-logo-glyph" data-arg="${g}">${g}</button>`
+  ).join("");
+  const monogramButton = `<button class="logo-glyph-btn${!logo.glyph ? " active" : ""}" data-action="set-logo-glyph" data-arg="" title="Use your monogram instead">${logo.monogram}</button>`;
+  return `
+    <div class="section-label">Company Logo</div>
+    <div class="logo-picker-row">
+      ${logoBadgeHTML(profile, 48)}
+      <div class="logo-picker-groups">
+        <div class="logo-swatch-row">${swatches}</div>
+        <div class="logo-glyph-row">${glyphButtons}${monogramButton}</div>
+      </div>
+    </div>`;
+}
+
 export function renderFleetTab(profile, truckById) {
   if (truckById) lastTruckById = truckById; else truckById = lastTruckById;
   if (!profile.active) {
@@ -939,6 +991,10 @@ export function renderFleetTab(profile, truckById) {
       return sum + (t ? Math.max(0, t.earnings - (h.lastSettledEarnings ?? 0)) : 0);
     }, 0);
     const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (lastKnownGameSeconds - (profile.lastSettlementGameSeconds ?? lastKnownGameSeconds)));
+    const companyHeaderHtml = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+      ${logoBadgeHTML(profile, 36)}
+      <div class="detail-title" style="font-size:1rem;">${profile.companyName || (profile.truckName ? `${profile.truckName}'s Fleet` : "Your Fleet")}</div>
+    </div>`;
     const headerHtml = `<div class="detail-sub" style="margin-bottom:10px;">${profile.hiredTrucks.length} truck${profile.hiredTrucks.length === 1 ? "" : "s"} on payroll &bull; $${Math.round(pendingTotal).toLocaleString()} pending &bull; settles in ~${Math.ceil(settlementIn / 3600)}h</div>`;
 
     const yourRigHtml = !truck ? "" : `
@@ -970,11 +1026,13 @@ export function renderFleetTab(profile, truckById) {
     }).join("") || `<div class="placeholder-text">No hired drivers yet.</div>`;
 
     careerEl.tabFleet.innerHTML = `
+      ${companyHeaderHtml}
       ${headerHtml}
       <div class="section-label">Your Company</div>
       ${yourRigHtml}
       ${hiredHtml}
       ${renderHiringSection()}
+      ${renderLogoPickerSection(profile)}
     `;
   });
 }
