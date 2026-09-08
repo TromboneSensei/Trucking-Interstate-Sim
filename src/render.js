@@ -1689,7 +1689,13 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
 
   const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
-    if (drawArrowForSelected && truck === selectedTruck) continue;
+    // The nav-mode arrow substitutes for this truck's own batched dot (and
+    // its headlight cone), but NOT for its beacon or its visibility-list
+    // membership - both still need computing below, so this only skips
+    // the bucket/headlight pushes further down rather than the whole body
+    // via an early `continue` (which used to silently drop the beacon for
+    // exactly the followed truck whenever nav mode drew it as an arrow).
+    const isArrowedSelected = drawArrowForSelected && truck === selectedTruck;
     // Parked trucks sit exactly on their city's node (see truckCenterlinePos
     // for an edge-less truck) - drawing a dot there would just paint over
     // the city itself, and with several trucks parked at once, stack a pile
@@ -1717,19 +1723,23 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     if (!visible && truck !== selectedTruck) continue;
     if (visible) visibleTruckList.push(truck);
 
-    const bucket = truck.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
-    bucket.xs.push(p.x);
-    bucket.ys.push(p.y);
-    // Only moving trucks throw light, and only ones actually on an edge
-    // have a bearing to throw it along.
-    if (headlightsOn && truck.edge && truck.speed > 1) {
-      headlightPts.push(p.x, p.y, p.heading);
+    if (!isArrowedSelected) {
+      const bucket = truck.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
+      bucket.xs.push(p.x);
+      bucket.ys.push(p.y);
+      // Only moving trucks throw light, and only ones actually on an edge
+      // have a bearing to throw it along.
+      if (headlightsOn && truck.edge && truck.speed > 1) {
+        headlightPts.push(p.x, p.y, p.heading);
+      }
     }
     // Set-membership rather than an id-prefix check (fleet.js's
     // isCompanyTruck): the player's own currently-driven rig is included
     // here too - it may hold a plain numeric id, never an "H-" one - and
     // this correctly follows a truck through career.switchActiveTruck
-    // regardless of which id shape it happens to carry.
+    // regardless of which id shape it happens to carry. Computed
+    // regardless of isArrowedSelected, so the followed truck still gets
+    // its own beacon while nav mode is drawing it as a directional arrow.
     if (company && company.truckIds.has(truck.id)) companyBeaconPts.push(p.x, p.y);
   }
 

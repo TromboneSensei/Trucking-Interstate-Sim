@@ -195,6 +195,7 @@ export function initCareerUI(callbacks) {
 }
 
 let lastTruckById = null; // stashed so FLEET's own hire/reroll re-renders (no main.js round-trip) don't lose every hired truck's live status
+let lastRigGraph = null; // stashed so RIG's own throttle/pull-in re-renders (no main.js round-trip) keep PULL IN's next-city subtitle working
 let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
@@ -327,10 +328,13 @@ function formatHours(h) {
 
 // Shared stat-bar builder (RIG's vitals, BOOKS' XP progress). `valueLabel`
 // overrides the default "NN%" readout (used for XP's "X / Y XP" phrasing);
-// `sub` appends a bullet-separated hint after it (RIG's fuel range).
-function statBar(label, value01, color, sub, valueLabel) {
+// `sub` appends a bullet-separated hint after it (RIG's fuel range). `hero`
+// (RIG's Fuel/Fatigue only) renders a taller, bigger-type bar - the two
+// vitals players actually need to find at a glance, previously buried in a
+// flat list of seven identical-looking rows.
+function statBar(label, value01, color, sub, valueLabel, hero) {
   const shown = valueLabel || `${Math.round(value01 * 100)}%`;
-  return `<div class="stat-bar-row">
+  return `<div class="stat-bar-row${hero ? " hero" : ""}">
     <div class="stat-bar-label"><span>${label}</span><span>${shown}${sub ? " &bull; " + sub : ""}</span></div>
     <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.max(0, Math.min(100, value01 * 100))}%;background:${color}"></div></div>
   </div>`;
@@ -833,7 +837,8 @@ function remainingMilesOf(truck) {
 // are the only two driving decisions a player makes outside a truck stop,
 // now full-size instead of squeezed into the old always-visible HUD.
 
-export function renderRigTab(profile, truck, gameSeconds) {
+export function renderRigTab(profile, truck, gameSeconds, graph) {
+  if (graph) lastRigGraph = graph; else graph = lastRigGraph;
   if (!profile.active || !truck) {
     careerEl.tabRig.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
@@ -863,9 +868,13 @@ export function renderRigTab(profile, truck, gameSeconds) {
     })();
 
     const range = Math.round(estimatedRangeMiles(truck));
+    // Fuel and Fatigue are the two numbers players actually need to find
+    // in a hurry - hero bars, first, ahead of the other five compact rows.
+    const heroVitalsHtml = [
+      statBar("Fuel", truck.fuel / 100, truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)", `~${range} mi`, undefined, true),
+      statBar("Fatigue", truck.fatigue / 100, truck.fatigue > 70 ? "var(--stop)" : truck.fatigue > 40 ? "var(--caution)" : "var(--go)", undefined, undefined, true),
+    ].join("");
     const vitalsHtml = [
-      statBar("Fuel", truck.fuel / 100, truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)", `~${range} mi`),
-      statBar("Fatigue", truck.fatigue / 100, truck.fatigue > 70 ? "var(--stop)" : truck.fatigue > 40 ? "var(--caution)" : "var(--go)"),
       statBar("Hunger", profile.hunger / 100, profile.hunger < 20 ? "var(--stop)" : profile.hunger < 45 ? "var(--caution)" : "var(--go)"),
       statBar("Morale", profile.morale / 100, profile.morale < 30 ? "var(--stop)" : profile.morale < 55 ? "var(--caution)" : "var(--go)"),
       statBar("Heat", profile.heat / 100, profile.heat > 60 ? "var(--stop)" : profile.heat > 40 ? "var(--caution)" : "var(--go)"),
@@ -880,19 +889,32 @@ export function renderRigTab(profile, truck, gameSeconds) {
       return `<div class="row-sub" style="padding:3px 0;">${b.label} &mdash; ${formatHours(hoursLeft)} left${crashNote}</div>`;
     }).join("");
 
+    // Condensed into one segmented row (was three separate cards) - the
+    // combined effect caption now lives on one shared line below instead
+    // of being repeated per button.
     const throttleDefs = [
-      { key: "CONSERVE", label: "CONSERVE", sub: `${Math.round((career.THROTTLE_MULT.CONSERVE - 1) * 100)}% speed · -10% fuel · -10% wear`, color: "var(--go)" },
-      { key: "LEGAL", label: "LEGAL", sub: "cruise speed", color: "var(--caution)" },
-      { key: "HAMMER", label: "HAMMER", sub: `+${Math.round((career.THROTTLE_MULT.HAMMER - 1) * 100)}% speed · +15% fuel · +25% wear · draws heat`, color: "var(--stop)" },
+      { key: "CONSERVE", label: "Conserve", sub: `${Math.round((career.THROTTLE_MULT.CONSERVE - 1) * 100)}% speed &bull; -10% fuel &bull; -10% wear`, color: "var(--go)" },
+      { key: "LEGAL", label: "Legal", sub: "Cruise speed", color: "var(--caution)" },
+      { key: "HAMMER", label: "Hammer", sub: `+${Math.round((career.THROTTLE_MULT.HAMMER - 1) * 100)}% speed &bull; +15% fuel &bull; +25% wear &bull; draws heat`, color: "var(--stop)" },
     ];
-    const throttleHtml = throttleDefs.map((t) => `
-      <button class="vendor-item${profile.throttle === t.key ? " active" : ""}" data-action="throttle" data-arg="${t.key}" style="--cargo:${t.color};${profile.throttle === t.key ? `border-color:${t.color};` : ""}">
-        <span class="v-name" style="${profile.throttle === t.key ? `color:${t.color};` : ""}">${t.label}</span>
-        <span class="v-desc">${t.sub}</span>
-      </button>`).join("");
+    const activeThrottle = throttleDefs.find((t) => t.key === profile.throttle) || throttleDefs[1];
+    const throttleHtml = `<div class="throttle-row">${throttleDefs.map((t) =>
+      `<button class="throttle-seg${profile.throttle === t.key ? " active" : ""}" data-action="throttle" data-arg="${t.key}" style="--seg-color:${t.color};">${t.label}</button>`
+    ).join("")}</div>
+    <div class="row-sub" style="margin:4px 0 0;">${activeThrottle.sub}</div>`;
 
+    // PULL IN's subtitle names the actual next real town ahead (or the
+    // existing disabled-state strings when those apply) instead of the
+    // old generic "Stop at the next town" - `graph` comes from main.js's
+    // TAB_RENDERERS map, or the stashed lastRigGraph on a self-triggered
+    // re-render (see this function's own top).
     const pullInDisabled = !truck.edge || (truck.agent && truck.agent.pullInRequested);
-    const pullInLabel = !truck.edge ? "You're parked - nowhere to pull in to" : (truck.agent && truck.agent.pullInRequested) ? "Already pulling in…" : "Stop at the next town";
+    const pullInSub = !truck.edge ? "You're parked - nowhere to pull in to"
+      : (truck.agent && truck.agent.pullInRequested) ? "Already pulling in…"
+      : (() => {
+          const nextCity = graph ? career.nextPullInStopCity(graph, truck) : null;
+          return nextCity ? `(${nextCity})` : "No town on this route";
+        })();
 
     const upgradeChips = [];
     if (profile.upgrades.engine) upgradeChips.push(`Engine ${"I".repeat(profile.upgrades.engine)}`);
@@ -913,20 +935,18 @@ export function renderRigTab(profile, truck, gameSeconds) {
     const multsHtml = !a ? "" : `<div class="row-sub" style="padding:3px 0;">Speed &times;${a.speedMult.toFixed(2)} &bull; Fuel &times;${a.burnMult.toFixed(2)} &bull; Wear &times;${a.wearMult.toFixed(2)} &bull; Rest &times;${a.restMult.toFixed(2)}</div>`;
 
     careerEl.tabRig.innerHTML = `
+      ${throttleHtml}
+      <button class="pull-in-btn" data-action="pull-in" ${pullInDisabled ? "disabled" : ""}>
+        <span class="pull-in-title">Pull In</span>
+        <span class="pull-in-sub">${pullInSub}</span>
+      </button>
       ${statusHtml}
       ${hotshotHtml}
       <div class="section-label">Vitals</div>
+      ${heroVitalsHtml}
       ${vitalsHtml}
       <div class="section-label">Running Now</div>
       ${buffsHtml}
-      <div class="section-label">Throttle</div>
-      <div class="vendor-grid">${throttleHtml}</div>
-      <div class="vendor-grid" style="margin-top:8px;">
-        <button class="vendor-item${pullInDisabled ? " disabled" : ""}" data-action="pull-in" ${pullInDisabled ? "disabled" : ""}>
-          <span class="v-name">Pull In</span>
-          <span class="v-desc">${pullInLabel}</span>
-        </button>
-      </div>
       <div class="section-label">Your Rig</div>
       <div class="row-sub" style="padding:3px 0;">${truck.name}${profile.homeCity ? ` &bull; out of ${profile.homeCity}` : ""}</div>
       <div class="chip-row" style="margin:6px 0;">${chipsHtml}</div>

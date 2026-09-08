@@ -1259,3 +1259,69 @@ body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--
   padding: 0;
 }
 .logo-glyph-btn.active { border-color: var(--caution); background: #2a3441; }
+
+/* ---------------------------------------------------------------------
+   RIG redesign (Phase 12) - throttle condensed into one segmented row and
+   PULL IN as a large two-line button, both moved to the top of the tab
+   above everything else; a "hero" variant of the shared stat-bar for
+   Fuel/Fatigue so the two vitals players actually need are never buried
+   among five other identical-looking rows.
+   --------------------------------------------------------------------- */
+.throttle-row {
+  display: flex;
+  gap: 3px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px;
+}
+.throttle-seg {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  color: var(--dim);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 10px 4px;
+  cursor: pointer;
+}
+.throttle-seg.active { background: var(--seg-color, var(--caution)); color: #0b0e13; }
+
+.pull-in-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  margin-top: 8px;
+  margin-bottom: 14px;
+  background: var(--go);
+  border: none;
+  border-radius: 4px;
+  padding: 13px;
+  color: #fff;
+  cursor: pointer;
+  font-family: var(--font-display);
+}
+.pull-in-btn:active { transform: scale(0.98); }
+.pull-in-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: var(--panel-strong);
+  color: var(--dim);
+}
+.pull-in-btn .pull-in-title {
+  font-size: 1.02rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.pull-in-btn .pull-in-sub { font-size: 0.74rem; font-weight: 600; opacity: 0.9; }
+
+.stat-bar-row.hero { margin-bottom: 14px; }
+.stat-bar-row.hero .stat-bar-label { font-size: 0.82rem; }
+.stat-bar-row.hero .stat-bar { height: 13px; border-radius: 5px; }

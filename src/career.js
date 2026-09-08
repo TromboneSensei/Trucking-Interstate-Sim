@@ -471,6 +471,21 @@ export function createAgent(truck, profile) {
   return agent;
 }
 
+// Pure graph-walking helper for RIG's PULL IN button subtitle - names the
+// next REAL town (tier > 0) ahead on the truck's route, mirroring
+// stopReasonAt's own "tier-0 is junction filler, never a real stop" gate
+// so the button never promises a stop at an unnamed interchange. Walks the
+// truck's current edge first, then its queued remainingPath; returns null
+// once the route genuinely has no real town left in it.
+export function nextPullInStopCity(graph, truck) {
+  if (!truck.edge) return null;
+  for (const e of [truck.edge, ...truck.remainingPath]) {
+    const node = graph.nodes[e.to];
+    if (node && node.t > 0) return e.to;
+  }
+  return null;
+}
+
 function newProfile() {
   return {
     version: CAREER_SAVE_VERSION,
