@@ -540,6 +540,18 @@ export class Truck {
   // this branch).
   _advanceToNextEdge(graph, laneGroups, fromFullStop = false) {
     const next = this.remainingPath.shift();
+    if (!next) {
+      // remainingPath ran out before reaching contract.destination - a
+      // route/destination mismatch (see resolveDecision's own fix for the
+      // one known way this happened) rather than a truck that's actually
+      // arrived. Strand gracefully like any other truly-unreachable truck
+      // (_assignContract's own fallback) instead of crashing the whole
+      // fleet loop on a null edge.
+      this.edge = null;
+      this.pendingEdge = null;
+      this.speed = 0;
+      return;
+    }
     if (fromFullStop && graph.nodes[next.from].t > 0) {
       this.edge = null;
       this.pendingEdge = next;
@@ -549,7 +561,21 @@ export class Truck {
       this.passingLeaderId = null;
       this.departureWaitS = 0;
     } else {
-      placeOnEdge(graph, this, next, laneGroups);
+      // Phase 2's speed*gameHours integration for the whole tick isn't
+      // clamped to the current edge's remaining length, so at a high sim
+      // speed (several game-hours can pass in one real frame) `this.s`
+      // may already sit well past `this.edge.miles` by the time this
+      // runs. Always restarting the new edge at s=0 (the old behavior)
+      // silently discarded that already-earned distance every time a
+      // truck crossed a short edge fast enough to overshoot it, which
+      // reads as the truck stalling/lagging behind its own displayed
+      // speed - most visible right where it matters most, a dense run of
+      // short junction-filler edges taken at 8x. Carry the overshoot
+      // forward as a head start on the new edge instead; placeOnEdge's
+      // own lane-conflict clamp still applies on top exactly as it would
+      // for a start of 0.
+      const overshoot = this.edge ? Math.max(0, this.s - this.edge.miles) : 0;
+      placeOnEdge(graph, this, next, laneGroups, overshoot);
     }
   }
 
@@ -574,7 +600,7 @@ export class Truck {
     this.passingLeaderId = null;
     this.parkedAt = this.currentNode;
     this.milesSinceStop = 0; // a delivery + layover counts as a real stop for breakdown wear
-    if (this.agent) {
+    if (this.agent && !this.autoDriver) {
       // Career mode: a delivery is never auto-resolved. dwellHoursLeft
       // stays at 0 and stopReason "PLAYER" makes Phase 4's parked branch
       // skip the whole auto-dwell/auto-contract pipeline entirely (see
@@ -587,6 +613,13 @@ export class Truck {
       this.stopReason = "PLAYER";
       this.stopVendor = "BOARD";
     } else {
+      // this.autoDriver (career.js's AI Driver upgrade) takes this same
+      // branch an ordinary agent-less truck does - dwell, auto-refuel, and
+      // (via Phase 4's own LAYOVER handling in updateFleet) an auto-picked
+      // contract, with no load-board prompt. A fully autonomous rig is
+      // meant to behave exactly like a hired driver's truck here; the only
+      // thing distinguishing it is still holding .agent (so upgrades/
+      // throttle/heat keep applying to it as normal).
       this.dwellHoursLeft = rollDwellHours(this.driver, rnd);
       this.stopReason = "LAYOVER";
       // Top off while the trailer is being unloaded - a truck rolling out
@@ -617,7 +650,7 @@ export class Truck {
   // This is a deliberate, already-paused human choice, not a routine
   // automated transition, so unlike _advanceToNextEdge it places the
   // truck instantly with no departure-gap check.
-  resolveDecision(graph, chosenEdge) {
+  resolveDecision(graph, chosenEdge, rnd = Math.random) {
     this.edge = chosenEdge;
     this.s = 0;
     this.lane = 0;
@@ -625,9 +658,29 @@ export class Truck {
     this.passingLeaderId = null;
     this.awaitingDecision = false;
     this.pendingOptions = null;
-    this.remainingPath = chosenEdge.to === this.contract.destination
-      ? []
-      : (findPath(graph, chosenEdge.to, this.contract.destination) || []);
+    if (chosenEdge.to === this.contract.destination) {
+      this.remainingPath = [];
+      return;
+    }
+    const path = findPath(graph, chosenEdge.to, this.contract.destination);
+    if (path) {
+      this.remainingPath = path;
+      return;
+    }
+    // The player's pick left no way back to the original destination (a
+    // one-way/customs edge, usually) - leaving remainingPath empty here
+    // used to run the truck dry mid-drive with no destination reached,
+    // crashing the whole fleet the next time it hit a node with only one
+    // way out (_advanceToNextEdge trying to place a null "next edge").
+    // Redirect onto a fresh contract from the new position instead, same
+    // as any other truck that's arrived somewhere and needs a new load.
+    let contract, attempts = 0;
+    do {
+      contract = generateContract(graph, chosenEdge.to, rnd);
+      attempts++;
+    } while (!contract.path && attempts < 8);
+    this.contract = contract;
+    this.remainingPath = contract.path ? [...contract.path] : [];
   }
 }
 
@@ -899,7 +952,13 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, followerMap,
   // before tailgating) keeps that transition comfortably clear.
   const wantsToPass = !!leader && gapToLeader < safeMi * PASS_CONSIDER_MULT + timeGap;
   const inArrivalZone = arrivalSpeedCap(graph, truck, cruiseTargetSpeed) < cruiseTargetSpeed;
-  if (truck.lane === 0 && wantsToPass && !inArrivalZone && truck.driver.aggression > PASS_AGGRESSION_THRESHOLD) {
+  // HAMMER throttle (career mode) always clears the aggression gate below,
+  // regardless of this specific rig's own fixed driver.aggression roll -
+  // "floor it and get around slower traffic" is the whole point of
+  // choosing HAMMER, so a low-aggression driver's truck shouldn't sit
+  // stuck behind a leader just because its baseline DNA rolled passive.
+  const willingToPass = truck.driver.aggression > PASS_AGGRESSION_THRESHOLD || truck.agent?.hammering;
+  if (truck.lane === 0 && wantsToPass && !inArrivalZone && willingToPass) {
     const leftArr = group.lane1;
     const clear = !leftArr.some((t) => t.s > truck.s - safeMi * PASS_CLEAR_BEHIND_MULT && t.s < leader.s + safeMi * PASS_CLEAR_AHEAD_MULT);
     if (clear) {
@@ -981,14 +1040,14 @@ function tryDepartTruck(graph, truck, laneGroups, dt) {
 // nearest occupant isn't enough once a third truck can arrive the same
 // tick and need to clear the truck the *second* one was just nudged
 // behind, not the original.
-function placeOnEdge(graph, truck, edge, laneGroups) {
+function placeOnEdge(graph, truck, edge, laneGroups, headStart = 0) {
   truck.edge = edge;
   truck.pendingEdge = null;
   const key = edgeId(edge);
   let group = laneGroups ? laneGroups.get(key) : null;
   const unitsPerMile = worldUnitsPerMile(graph, edge);
   const myOffset = laneOffset(truck);
-  let s = 0;
+  let s = Math.min(headStart, edge.miles);
   if (group) {
     const occupants = [...group.lane0, ...group.lane1].sort((a, b) => a.s - b.s);
     for (const t of occupants) {
@@ -1326,7 +1385,13 @@ function rubberneckMult(sortedS, graph, truck) {
 // to `_advanceToNextEdge` to decide whether this departure gets the
 // stop-and-wait-for-a-gap treatment.
 function departFromNode(graph, truck, laneGroups, controlledTruck, reverseOfEdge, fromFullStop) {
-  if (truck === controlledTruck) {
+  // GPS (or the AI Driver upgrade, which implies it - see main.js's
+  // stamping side) skips the junction call entirely: the truck just keeps
+  // rolling along its own already-planned remainingPath below, exactly
+  // like any ordinary AI truck already does without ever pausing. Plain
+  // fields on the truck itself, same as fleetWearMult above - fleet.js has
+  // no idea "GPS" or career mode exist, it just reads a flag.
+  if (truck === controlledTruck && !truck.gps && !truck.autoDriver) {
     const options = pickEdgesFrom(graph, truck.currentNode, reverseOfEdge);
     if (options.length > 1) {
       truck.pendingOptions = rankAndCapOptions(graph, options, truck.remainingPath[0]);
@@ -1474,7 +1539,15 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
       continue;
     }
 
-    const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles * (truck.agent?.wearMult ?? 1);
+    // truck.fleetWearMult is a plain field career.js/main.js stamp directly
+    // onto every company truck (including hired, agent-less ones) when the
+    // player buys the Fleet Maintenance upgrade - unlike agent.wearMult,
+    // which only ever reaches whichever truck currently holds .agent, this
+    // is the one wear-reduction path that actually generalizes to a hired
+    // truck's own ordinary AI-driven physics. Composes with agent.wearMult
+    // rather than replacing it, so the player's own currently-driven rig
+    // still gets both if both apply.
+    const p = BREAKDOWN_PER_MILE * (1.6 - truck.driver.skill) * (1 + truck.milesSinceStop / BREAKDOWN_MILES_SINCE_STOP_SCALE) * miles * (truck.agent?.wearMult ?? 1) * (truck.fleetWearMult ?? 1);
     if (rnd() < p) {
       truck.dayBreakdowns++;
       emitFleetEvent("BREAKDOWN", truck);
@@ -1560,7 +1633,7 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         truck.dwellHoursLeft = 1;
         continue;
       }
-      if (truck === controlledTruck) {
+      if (truck === controlledTruck && !truck.autoDriver) {
         truck.pendingOffers = offers;
         truck.awaitingContract = true;
         awaitingResult = truck;

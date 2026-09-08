@@ -210,7 +210,8 @@ const headlightPts = [];
 // headlight cones above - one batched path for the whole company is cheap
 // even though it's a deliberate exception to the "one draw call per
 // 10k-truck pass" rule everywhere else in this file.
-const COMPANY_BEACON_RADIUS = 6; // world units - reads at a glance without overwhelming a 3.5px dot
+const COMPANY_BEACON_RADIUS = 6; // world units at camera.maxZoom - see companyBeaconScreenRadius, which is what's actually drawn with
+const COMPANY_BEACON_BUMP = 1.2; // 20% bigger than the old always-zoom-scaled size, measured at max zoom
 const companyBeaconPts = [];
 
 // Multiples of camera.baseZoom at which each additional tier of city
@@ -1724,7 +1725,18 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     if (visible) visibleTruckList.push(truck);
 
     if (!isArrowedSelected) {
-      const bucket = truck.disabledHoursLeft > 0 ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
+      // Company trucks (the player's own rig + every hired driver) never
+      // swap to the generic yellow-circle DISABLED look while broken down
+      // or towed - there are only ever a handful of them, they're exactly
+      // the trucks a player is tracking, and losing their real cargo
+      // color/silhouette mid-breakdown made them hard to keep spotting
+      // (and was inconsistent with the nav-mode arrow just below, which
+      // already always keeps selectedTruck's true contract.truckType.color
+      // regardless of disabledHoursLeft). The rest of the 10,000-truck
+      // fleet keeps the DISABLED signal - it's still a useful "something's
+      // wrong here" cue for anonymous spectator traffic.
+      const isCompany = company && company.truckIds.has(truck.id);
+      const bucket = (truck.disabledHoursLeft > 0 && !isCompany) ? truckBuckets.get("DISABLED") : truckBuckets.get(truck.contract.truckType.id);
       bucket.xs.push(p.x);
       bucket.ys.push(p.y);
       // Only moving trucks throw light, and only ones actually on an edge
@@ -1813,10 +1825,26 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // the dot) rather than inventing a second treatment.
   if (companyBeaconPts.length && company) {
     const beaconLabel = company.glyph || company.monogram;
-    const stemH = TRUCK_DOT_RADIUS + 14;
+    // Held at a constant ON-SCREEN size across every zoom level, unlike a
+    // truck's own dot (which is meant to shrink/grow with the map) - the
+    // whole point of the beacon is to stay spottable even zoomed out over
+    // the entire country. Sized off the OLD always-zoom-scaled look at
+    // camera.maxZoom (its biggest, most legible point) plus the requested
+    // 20% bump, then divided back down by the CURRENT zoom every frame so
+    // the actual on-screen pixels never change - same idiom this file
+    // already uses for zoom-independent line widths (e.g. `6.5 /
+    // camera.zoom` on the route line above).
+    const beaconScreenRadius = COMPANY_BEACON_RADIUS * camera.maxZoom * COMPANY_BEACON_BUMP;
+    const stemScreenH = (TRUCK_DOT_RADIUS + 14) * camera.maxZoom * COMPANY_BEACON_BUMP;
+    const beaconFontScreenPx = beaconScreenRadius * 1.5; // same ~9:6 ratio the old fixed font-size/radius pair had
+    const beaconR = beaconScreenRadius / camera.zoom;
+    const stemH = stemScreenH / camera.zoom;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = labelFont(9);
+    // Built directly rather than through labelFont's cache: that cache is
+    // keyed by exact px and font size here tracks continuously-variable
+    // zoom, so caching it would just leak an ever-growing Map.
+    ctx.font = `600 ${(beaconFontScreenPx / camera.zoom).toFixed(2)}px "Oswald", sans-serif`;
     for (let i = 0; i < companyBeaconPts.length; i += 2) {
       const x = companyBeaconPts[i], y = companyBeaconPts[i + 1];
       if (nav) {
@@ -1832,7 +1860,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
         ctx.stroke();
         ctx.fillStyle = company.color;
         ctx.beginPath();
-        ctx.arc(0, -stemH, COMPANY_BEACON_RADIUS, 0, Math.PI * 2);
+        ctx.arc(0, -stemH, beaconR, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.fillText(beaconLabel, 0, -stemH);
@@ -1846,7 +1874,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
         ctx.stroke();
         ctx.fillStyle = company.color;
         ctx.beginPath();
-        ctx.arc(x, y - stemH, COMPANY_BEACON_RADIUS, 0, Math.PI * 2);
+        ctx.arc(x, y - stemH, beaconR, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = "#fff";
         ctx.fillText(beaconLabel, x, y - stemH);

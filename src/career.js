@@ -1075,6 +1075,134 @@ export function setupCompany(companyName, homeBaseCity, logo) {
   pushLog(`${profile.companyName || "The company"} is open for business, headquartered in ${homeBaseCity}.`);
 }
 
+// --- Fleet-wide shop & autonomy -------------------------------------------
+//
+// Everything below is deliberately kept off `truck`/`Truck` objects here -
+// career.js never imports fleet.js's Truck class or touches the live
+// `trucks` array (see the file's own header split with main.js). Purchases
+// here only ever write to `profile`; main.js is the one that actually
+// stamps the resulting `truck.gps`/`truck.autoDriver`/`truck.fleetWearMult`
+// fields onto live Truck instances (at hire/wizard-spawn/switch time, and
+// retroactively across the whole company the instant a purchase lands),
+// mirroring the exact confirmHire/handleHireDriver split already
+// documented above. fleet.js itself never imports career.js either - it
+// just reads those plain fields directly off whichever truck it's ticking,
+// with no idea "GPS" or "career mode" exist at all.
+//
+// GPS is deliberately its own concept from `profile.upgrades`/`agent`: an
+// agent's multipliers only ever apply to whichever truck currently HOLDS
+// it (see the two-layer physics model note up top), so they can't reach a
+// hired truck's own AI-driven physics at all. GPS and Fleet Maintenance
+// below are the two upgrade concepts that genuinely generalize to a hired
+// truck's ordinary, agent-less driving: which junction it picks (GPS) and
+// how likely it is to break down (Fleet Maintenance's wear reduction).
+// Sleeper/Radar/APU/etc. stay agent-only on purpose - fatigue, heat/
+// tickets, and fuel capacity are either meaningless for an AI-driven truck
+// (nothing in fleet.js ever tickets or fines one) or, for TANK, already a
+// documented one-truck-only physical modification, not a policy.
+
+// Per-truck: profile.gpsOwnedByTruckId[id] = true once bought for that
+// specific truck. Fleet-wide: profile.gpsFleetWide = true once bought once
+// for the whole company - covers every truck owned NOW and every one
+// hired/spawned AFTER, with no separate purchase needed. Neither field is
+// declared in newProfile() (same "absent until first written" convention
+// as profile.logo) - an old save just reads as "no GPS anywhere yet".
+export const GPS_PRICE_PER_TRUCK = 1200;
+const GPS_FLEET_BASE = 1000; // scaled by fleet size below - see buyFleetGPS
+
+export function hasGPS(truckId) {
+  return !!profile.gpsFleetWide || !!(profile.gpsOwnedByTruckId && profile.gpsOwnedByTruckId[truckId]);
+}
+
+export function buyGPS(truckId) {
+  if (hasGPS(truckId)) return { ok: false, reason: "This truck already has GPS." };
+  if (profile.cash < GPS_PRICE_PER_TRUCK) return { ok: false, reason: `Can't afford it. ($${GPS_PRICE_PER_TRUCK.toLocaleString()})` };
+  profile.cash -= GPS_PRICE_PER_TRUCK;
+  profile.stats.totalSpent += GPS_PRICE_PER_TRUCK;
+  if (!profile.gpsOwnedByTruckId) profile.gpsOwnedByTruckId = {};
+  profile.gpsOwnedByTruckId[truckId] = true;
+  pushLog(`Installed GPS navigation for $${GPS_PRICE_PER_TRUCK.toLocaleString()} - this rig now handles its own junction calls.`);
+  return { ok: true };
+}
+
+// Priced as a bulk discount over buying every current truck individually
+// (never more than that), but still scales with fleet size since it's
+// covering every truck the company will EVER own, not just today's roster.
+export function fleetGPSPrice() {
+  return Math.round(GPS_FLEET_BASE * (1 + profile.hiredTrucks.length) * 0.7);
+}
+
+export function buyFleetGPS() {
+  if (profile.gpsFleetWide) return { ok: false, reason: "The whole fleet already has GPS." };
+  const cost = fleetGPSPrice();
+  if (profile.cash < cost) return { ok: false, reason: `Can't afford it. ($${cost.toLocaleString()})` };
+  profile.cash -= cost;
+  profile.stats.totalSpent += cost;
+  profile.gpsFleetWide = true;
+  pushLog(`Rolled out fleet-wide GPS for $${cost.toLocaleString()} - every truck, present and future, navigates itself now.`);
+  return { ok: true };
+}
+
+// Fleet Maintenance: a company-wide, tiered wear/breakdown-risk reduction -
+// the one existing per-driver upgrade (TIRES) that has a real, meaningful
+// equivalent for a hired truck's own ordinary physics (fleet.js's
+// breakdown-probability formula already reads a generic `truck.
+// fleetWearMult` multiplier - see main.js's stamping side for where that
+// field actually gets set). Same 3-tier shape and discount logic as GPS.
+export const FLEET_MAINT_TIER_COST = [1400, 2800, 4600]; // per-truck-equivalent, before the fleet-size multiplier
+export const FLEET_MAINT_WEAR_MULT = [1, 0.85, 0.72, 0.60]; // index 0 = no tier owned yet
+
+export function fleetMaintenanceTier() {
+  return profile.fleetMaintenanceTier || 0;
+}
+
+export function fleetWearMult() {
+  return FLEET_MAINT_WEAR_MULT[fleetMaintenanceTier()];
+}
+
+export function fleetMaintenancePrice() {
+  const tier = fleetMaintenanceTier();
+  if (tier >= FLEET_MAINT_TIER_COST.length) return null; // maxed out
+  return Math.round(FLEET_MAINT_TIER_COST[tier] * (1 + profile.hiredTrucks.length) * 0.7);
+}
+
+export function buyFleetMaintenance() {
+  const cost = fleetMaintenancePrice();
+  if (cost == null) return { ok: false, reason: "Fleet Maintenance is already maxed out." };
+  if (profile.cash < cost) return { ok: false, reason: `Can't afford it. ($${cost.toLocaleString()})` };
+  profile.cash -= cost;
+  profile.stats.totalSpent += cost;
+  profile.fleetMaintenanceTier = fleetMaintenanceTier() + 1;
+  pushLog(`Upgraded Fleet Maintenance to Tier ${profile.fleetMaintenanceTier} for $${cost.toLocaleString()} - every company truck breaks down less.`);
+  return { ok: true };
+}
+
+// AI Driver: hands the PLAYER's own currently-driven rig over to full
+// autopilot - combined with GPS (which this implies regardless of whether
+// GPS was bought separately - see main.js's stamping side), the career
+// truck now also auto-picks its next load the instant it's free, the same
+// chooseOffer() pick an ordinary hired truck's AI already makes, instead of
+// opening the load board and waiting on the player. The player keeps full
+// manual control of everything else - upgrades, fuel, purchases - this
+// only ever touches navigation and load selection. One-time, company-wide
+// (there's only ever one "player's own truck" at a time, whichever one
+// profile.truckId currently points at - see switchActiveTruck).
+export const AI_DRIVER_PRICE = 15000;
+
+export function hasAIDriver() {
+  return !!profile.autoDriver;
+}
+
+export function buyAIDriver() {
+  if (profile.autoDriver) return { ok: false, reason: "Already fully autonomous." };
+  if (profile.cash < AI_DRIVER_PRICE) return { ok: false, reason: `Can't afford it. ($${AI_DRIVER_PRICE.toLocaleString()})` };
+  profile.cash -= AI_DRIVER_PRICE;
+  profile.stats.totalSpent += AI_DRIVER_PRICE;
+  profile.autoDriver = true;
+  pushLog(`Hired an AI Driver for $${AI_DRIVER_PRICE.toLocaleString()} - your rig now runs itself end to end.`);
+  return { ok: true };
+}
+
 // --- save / load ---------------------------------------------------------
 
 const SAVE_KEY = "interstate-fleet-career-v1";

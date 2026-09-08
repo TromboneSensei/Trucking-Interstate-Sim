@@ -65,6 +65,7 @@ let onCareerEnded = null; // () => void - reserved, not fired yet
 let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is the only place that can actually construct a Truck and push it into the live fleet (career.js never touches `trucks`)
 let onSwitchTruck = null; // (truckId) => {ok, reason?} - main.js owns state.decisionTruck/contractTruck (the only thing worth gating on - the truck-stop overlay already makes FLEET structurally unreachable while it's open) and the actual switchActiveTruck + followTruck call
 let onOpenWizard = null; // () => void - opens the company creation wizard (wizard-ui.js); only reachable from the fresh-career (no save) choice card below
+let onFleetSelectTruck = null; // (truck) => void - FLEET tab row tap (not the Drive This Truck button): just follows/selects the truck on the map, same as tapping it in Dispatch/Rankings, without switching who's controlled
 
 let open = false;
 let activeVendor = "FUEL";
@@ -80,6 +81,7 @@ export function initCareerUI(callbacks) {
   onRollOut = callbacks.onRollOut;
   onCareerEnded = callbacks.onCareerEnded || null;
   onOpenWizard = callbacks.onOpenWizard || null;
+  onFleetSelectTruck = callbacks.onSelectTruck || null;
 
   careerEl.btnCareer.addEventListener("click", () => {
     if (career.isActive()) {
@@ -173,7 +175,24 @@ export function initCareerUI(callbacks) {
   // stop).
   careerEl.tabFleet.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
-    if (!btn || btn.disabled) return;
+    if (!btn || btn.disabled) {
+      // Tapping the row itself (not a button inside it) just selects and
+      // follows that truck on the map, same as tapping it in Dispatch/
+      // Rankings - distinct from "Drive This Truck", which actually
+      // switches who's controlled.
+      if (!btn) {
+        const row = e.target.closest("[data-truck]");
+        if (row && onFleetSelectTruck) {
+          // Hired trucks carry a string "H-N" id, the player's own an
+          // ordinary numeric one - the DOM attribute is always a string
+          // either way, so try both forms against the Map's real keys.
+          const key = row.dataset.truck;
+          const t = lastTruckById?.get(key) ?? lastTruckById?.get(Number(key));
+          if (t) onFleetSelectTruck(t);
+        }
+      }
+      return;
+    }
     if (btn.dataset.action === "reroll-hire") {
       hireCandidate = career.rollHireCandidate();
       renderFleetTab(career.getProfile(), lastTruckById);
@@ -187,6 +206,22 @@ export function initCareerUI(callbacks) {
       const res = onSwitchTruck(btn.dataset.arg);
       if (res && res.ok) renderFleetTab(career.getProfile(), lastTruckById);
       else if (res && res.reason) toastNow(res.reason);
+    } else if (btn.dataset.action === "buy-gps") {
+      const res = career.buyGPS(btn.dataset.arg);
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "buy-fleet-gps") {
+      const res = career.buyFleetGPS();
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "buy-fleet-maintenance") {
+      const res = career.buyFleetMaintenance();
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "buy-ai-driver") {
+      const res = career.buyAIDriver();
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
     } else if (btn.dataset.action === "set-logo-color") {
       const cur = career.getProfile().logo;
       career.setLogo(btn.dataset.arg, cur?.glyph || null);
@@ -1045,6 +1080,42 @@ function renderLogoPickerSection(profile) {
 // changes, well under one medium load's payout); Home Base is free -
 // confirmed zero gameplay effect (see career.js's setHomeBaseCity doc
 // comment), so there's nothing to charge a fee against.
+// Fleet Shop: purchases that apply to the whole company (present AND
+// future trucks) rather than one truck at a time - GPS and Fleet
+// Maintenance both generalize to a hired truck's own agent-less AI
+// physics (see career.js's own doc comment on why those two specifically),
+// and AI Driver hands the player's own currently-driven rig over to full
+// autopilot. Reuses the exact .vendor-grid/.vendor-item vocabulary the
+// truck stop and Company Settings above already use - a shop shelf is a
+// shop shelf whether it's parked at one city or covers the whole company.
+function renderFleetShopSection(profile) {
+  const gpsOwned = profile.gpsFleetWide;
+  const gpsPrice = career.fleetGPSPrice();
+  const maintTier = career.fleetMaintenanceTier();
+  const maintPrice = career.fleetMaintenancePrice();
+  const maintMaxed = maintPrice == null;
+  const aiOwned = career.hasAIDriver();
+  return `
+    <div class="section-label">Fleet Shop</div>
+    <div class="vendor-grid">
+      <button class="vendor-item${gpsOwned ? " disabled" : ""}" data-action="buy-fleet-gps" ${gpsOwned ? "disabled" : ""}>
+        <span class="v-name">Fleet-Wide GPS</span>
+        <span class="v-desc">${gpsOwned ? "Every truck navigates itself - owned." : "Every current AND future truck skips junction decisions."}</span>
+        ${gpsOwned ? "" : `<span class="v-meta"><span class="v-price expense">$${gpsPrice.toLocaleString()}</span></span>`}
+      </button>
+      <button class="vendor-item${maintMaxed ? " disabled" : ""}" data-action="buy-fleet-maintenance" ${maintMaxed ? "disabled" : ""}>
+        <span class="v-name">Fleet Maintenance ${maintTier > 0 ? `(Tier ${maintTier})` : ""}</span>
+        <span class="v-desc">${maintMaxed ? "Maxed out - every truck breaks down as rarely as it gets." : `Cuts breakdown risk fleet-wide, present and future trucks alike.`}</span>
+        ${maintMaxed ? "" : `<span class="v-meta"><span class="v-price expense">$${maintPrice.toLocaleString()}</span></span>`}
+      </button>
+      <button class="vendor-item${aiOwned ? " disabled" : ""}" data-action="buy-ai-driver" ${aiOwned ? "disabled" : ""}>
+        <span class="v-name">AI Driver</span>
+        <span class="v-desc">${aiOwned ? "Your rig runs itself end to end - owned." : "Your own rig auto-navigates AND auto-picks its next load. You still handle upgrades, fuel, and purchases."}</span>
+        ${aiOwned ? "" : `<span class="v-meta"><span class="v-price expense">$${career.AI_DRIVER_PRICE.toLocaleString()}</span></span>`}
+      </button>
+    </div>`;
+}
+
 function renderCompanySettingsSection(profile) {
   return `
     <div class="section-label">Company Settings</div>
@@ -1082,11 +1153,19 @@ export function renderFleetTab(profile, truckById) {
     </div>`;
     const headerHtml = `<div class="detail-sub" style="margin-bottom:10px;">${profile.hiredTrucks.length} truck${profile.hiredTrucks.length === 1 ? "" : "s"} on payroll &bull; $${Math.round(pendingTotal).toLocaleString()} pending &bull; settles in ~${Math.ceil(settlementIn / 3600)}h</div>`;
 
+    const yourRigGPS = !truck ? false : career.hasGPS(truck.id);
+    const yourRigAI = career.hasAIDriver();
+    const yourRigGpsChip = !truck ? "" : yourRigAI
+      ? `<span class="chip active" style="cursor:default;background:var(--go);border-color:var(--go);padding:2px 6px;font-size:0.6rem;">AI DRIVER</span>`
+      : yourRigGPS
+        ? `<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);padding:2px 6px;font-size:0.6rem;">GPS</span>`
+        : `<button class="pill-btn" data-action="buy-gps" data-arg="${truck.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">+ GPS $${career.GPS_PRICE_PER_TRUCK.toLocaleString()}</button>`;
     const yourRigHtml = !truck ? "" : `
-      <div class="list-row" style="border-left-color:var(--go);cursor:default;">
+      <div class="list-row" data-truck="${truck.id}" style="border-left-color:var(--go);align-items:flex-start;">
         <div style="flex:1;">
           <div class="row-main">${truck.name} <span class="row-sub">(You)</span></div>
           <div class="row-sub">${truck.parkedAt ? "parked at " + truck.parkedAt : truck.disabledHoursLeft > 0 ? "disabled roadside" : "hauling"} &bull; ${truck.contractsCompleted} loads</div>
+          <div class="chip-row" style="margin-top:5px;margin-bottom:0;padding-bottom:0;">${yourRigGpsChip}</div>
         </div>
         <div class="row-value">$${Math.round(truck.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
       </div>`;
@@ -1110,13 +1189,16 @@ export function renderFleetTab(profile, truckById) {
         <span style="color:${fuelColor};">FUEL ${fuelPct}%</span>
         <span style="color:${fatigueColor};margin-left:10px;">FATIGUE ${fatiguePct}%</span>
       </div>`;
+      const gpsChip = career.hasGPS(t.id)
+        ? `<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);padding:2px 6px;font-size:0.6rem;">GPS</span>`
+        : `<button class="pill-btn" data-action="buy-gps" data-arg="${t.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">+ GPS $${career.GPS_PRICE_PER_TRUCK.toLocaleString()}</button>`;
       return `
-        <div class="list-row" style="border-left-color:var(--info);align-items:flex-start;">
+        <div class="list-row" data-truck="${t.id}" style="border-left-color:var(--info);align-items:flex-start;">
           <div style="flex:1;">
             <div class="row-main">${t.name} <span class="row-sub">(${h.id})</span></div>
             <div class="row-sub">${status} &bull; ${t.contractsCompleted} loads &bull; $${Math.round(pending).toLocaleString()} pending</div>
             ${vitalsHtml}
-            ${traits ? `<div class="chip-row" style="margin-top:3px;">${traits}</div>` : ""}
+            <div class="chip-row" style="margin-top:3px;margin-bottom:0;padding-bottom:0;">${traits}${gpsChip}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
             <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
@@ -1132,6 +1214,7 @@ export function renderFleetTab(profile, truckById) {
       ${yourRigHtml}
       ${hiredHtml}
       ${renderHiringSection()}
+      ${renderFleetShopSection(profile)}
       ${renderLogoPickerSection(profile)}
       ${renderCompanySettingsSection(profile)}
     `;

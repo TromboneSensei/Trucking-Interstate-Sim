@@ -217,22 +217,39 @@ function checkDayRollover() {
   const finished = dayIndex + 1; // the day that just ended, 1-based like the HUD clock
   dayIndex = nowDay;
 
+  // In career mode this reports on the player's OWN company (their rig +
+  // every hired driver), not the whole 10,000-truck sim - a fleet-wide
+  // digest is spectator content and, worse, buries the player's own day
+  // under numbers that have nothing to do with them. Same truckIds Set
+  // shape as the map beacon's (main.js's per-frame companyRenderOpts) -
+  // rebuilt here rather than shared, since this only runs once a day.
+  const inCareer = career.isActive();
+  const companyIds = inCareer
+    ? new Set([career.getCareerTruckId(), ...career.getProfile().hiredTrucks.map((h) => h.id)])
+    : null;
+
   let revenue = 0, deliveries = 0, breakdowns = 0, fuelExpense = 0;
   let topEarner = null, leadFoot = null, leadFootMph = 0;
   for (const t of trucks) {
+    if (inCareer && !companyIds.has(t.id)) continue;
     revenue += t.dayEarnings;
     deliveries += t.dayDeliveries;
     breakdowns += t.dayBreakdowns;
     fuelExpense += t.dayFuelSpend;
-    // Company trucks (Phase 11 hires) are excluded from these fleet-wide
+    // Fleet-wide mode excludes company trucks (Phase 11 hires) from these
     // awards - a cash-subsidized player-owned rig would otherwise dominate
-    // every superlative. They still count in the raw totals above (real
-    // fleet activity), just never win Top Earner/Lead Foot.
-    if (isCompanyTruck(t)) continue;
+    // every superlative - while career mode's own digest is scoped to
+    // company trucks ONLY (the loop above already filtered to just them),
+    // so this same "Top Earner" award naturally becomes "best truck in
+    // MY company today" there instead, with no separate award needed.
+    if (!inCareer && isCompanyTruck(t)) continue;
     if (t.dayEarnings > 0 && (!topEarner || t.dayEarnings > topEarner.dayEarnings)) topEarner = t;
     // Averaged over the WHOLE day, not just the hours spent rolling, so a
     // truck that parked for a long layover or sat on the shoulder is
-    // correctly beaten by one that kept moving.
+    // correctly beaten by one that kept moving. Skipped in career mode -
+    // Lead Foot is a fleet-wide superlative that doesn't mean much
+    // compared across a one-or-two-truck company.
+    if (inCareer) continue;
     const avgMph = t.dayMiles / 24;
     if (avgMph > leadFootMph) { leadFootMph = avgMph; leadFoot = t; }
   }
@@ -244,8 +261,8 @@ function checkDayRollover() {
       <span class="digest-award-val"><strong>${name}</strong> ${detail}</span></span></div>`;
 
   el.dailyDigest.innerHTML = `
-    <div class="digest-title">Day ${finished} Complete</div>
-    <div class="digest-line"><span>Gross revenue</span><span>${money(revenue)}</span></div>
+    <div class="digest-title">${inCareer ? `${career.getProfile().companyName || "Your Company"} &mdash; Day ${finished}` : `Day ${finished} Complete`}</div>
+    <div class="digest-line"><span>${inCareer ? "Company revenue" : "Gross revenue"}</span><span>${money(revenue)}</span></div>
     <div class="digest-line"><span>Loads delivered</span><span>${deliveries.toLocaleString()}</span></div>
     <div class="digest-line"><span>Total breakdowns</span><span>${breakdowns.toLocaleString()}</span></div>
     <div class="digest-line"><span>Fuel expense</span><span>${money(fuelExpense)}</span></div>
@@ -880,6 +897,7 @@ initCareerUI({
   onHireDriver: handleHireDriver,
   onSwitchTruck: handleSwitchTruck,
   onOpenWizard: openWizard,
+  onSelectTruck: followTruck,
 });
 initWizardUI({ onComplete: handleWizardComplete });
 // Autosave on the way out - a career the player forgot to save manually
@@ -1061,12 +1079,29 @@ function frame(now) {
     let companyRenderOpts = null;
     if (career.isActive()) {
       const p = career.getProfile();
+      const careerTruckId = career.getCareerTruckId();
       companyRenderOpts = {
-        truckIds: new Set([career.getCareerTruckId(), ...p.hiredTrucks.map((h) => h.id)]),
+        truckIds: new Set([careerTruckId, ...p.hiredTrucks.map((h) => h.id)]),
         color: p.logo?.color || "#3f6fb0",
         glyph: p.logo?.glyph || "\u{1F69B}",
         monogram: p.logo?.monogram || (p.truckName || "CO").slice(0, 2).toUpperCase(),
       };
+      // Stamps career.js's GPS/AI-Driver/Fleet-Maintenance purchases onto
+      // the actual live Truck objects every frame, so fleet.js (which
+      // never imports career.js - see its own header split) can just read
+      // plain fields off whichever truck it's ticking with no idea any of
+      // this exists. One frame of lag after a fresh purchase or a brand
+      // new hire is harmless - these flags are otherwise constant, not
+      // something physics needs pixel-perfect same-tick accuracy on.
+      const wearMult = career.fleetWearMult();
+      for (const id of companyRenderOpts.truckIds) {
+        const t = truckById.get(id);
+        if (!t) continue;
+        t.gps = career.hasGPS(id);
+        t.fleetWearMult = wearMult;
+      }
+      const careerTruck = careerTruckId == null ? null : truckById.get(careerTruckId);
+      if (careerTruck) careerTruck.autoDriver = career.hasAIDriver();
     }
 
     const frameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
