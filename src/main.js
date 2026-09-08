@@ -1034,6 +1034,23 @@ function frame(now) {
       parkedCounts.set(t.parkedAt, (parkedCounts.get(t.parkedAt) || 0) + 1);
     }
 
+    // Map beacon (Phase 12): recomputed fresh every frame rather than
+    // cached - fleet size here is cash-gated (career truck + a handful of
+    // hired drivers), so this Set is tiny. Computing the logo fallback
+    // live (rather than persisting one on profile) means an existing save
+    // with no profile.logo yet just renders a sensible placeholder badge,
+    // no migration needed.
+    let companyRenderOpts = null;
+    if (career.isActive()) {
+      const p = career.getProfile();
+      companyRenderOpts = {
+        truckIds: new Set([career.getCareerTruckId(), ...p.hiredTrucks.map((h) => h.id)]),
+        color: p.logo?.color || "#3f6fb0",
+        glyph: p.logo?.glyph || "\u{1F69B}",
+        monogram: p.logo?.monogram || (p.truckName || "CO").slice(0, 2).toUpperCase(),
+      };
+    }
+
     const frameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
       showAllLabels: settings.showAllLabels,
       showMedians: settings.showMedians,
@@ -1048,6 +1065,7 @@ function frame(now) {
       parkedCounts,
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
+      company: companyRenderOpts,
     });
     lastCongestedSegments = frameStats.congestedSegments;
     el.clock.textContent = formatClock(state.gameSeconds);

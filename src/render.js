@@ -199,15 +199,19 @@ const HEADLIGHT_SPREAD = 4.6;  // half-width at the far end of the beam
 const HEADLIGHT_COLOR = "rgba(255, 220, 150, 0.16)";
 const headlightPts = [];
 
-// Identity ring for a hired company truck (isCompanyTruck) - there are only
-// ever a handful of these, and they otherwise draw as the exact same
-// cargo-colored dot as the other 9,999 AI trucks. Without a visual
-// differentiator the payoff for actually building a fleet is invisible.
-// Color mirrors style.css's --info (#3f6fb0) rather than --go, since --go
-// already carries a "healthy status" meaning elsewhere in the HUD - this
-// ring is an identity marker, not a status readout.
-const COMPANY_RING_COLOR = "#3f6fb0";
-const companyTruckPts = [];
+// Company beacon (Phase 12) - a small floating badge above every truck
+// that's part of the player's company (the currently-driven rig AND every
+// hired driver - see main.js's renderOpts.company, built only while
+// career.isActive()), in the company's own logo color/glyph. Replaces an
+// earlier version of this that only ever rang hired ("H-") trucks, leaving
+// the player's own currently-driven rig with no map identity at all - the
+// Set membership test below covers both uniformly regardless of id shape.
+// There are only ever a handful of these, so - same reasoning as the
+// headlight cones above - one batched path for the whole company is cheap
+// even though it's a deliberate exception to the "one draw call per
+// 10k-truck pass" rule everywhere else in this file.
+const COMPANY_BEACON_RADIUS = 6; // world units - reads at a glance without overwhelming a 3.5px dot
+const companyBeaconPts = [];
 
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
@@ -1680,7 +1684,8 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   const headlightsOn = dayNightOn && renderOpts.showHeadlights !== false
     && darkAtMid > 0.22 && roadDetailFactor(camera) >= 1;
   headlightPts.length = 0;
-  companyTruckPts.length = 0;
+  companyBeaconPts.length = 0;
+  const company = renderOpts.company || null;
 
   const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
   for (const truck of trucks) {
@@ -1720,13 +1725,12 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     if (headlightsOn && truck.edge && truck.speed > 1) {
       headlightPts.push(p.x, p.y, p.heading);
     }
-    // Inlined rather than imported from fleet.js's isCompanyTruck: fleet.js
-    // already imports TRUCK_DOT_RADIUS/LEFT_LANE_OFFSET/RIGHT_LANE_OFFSET
-    // FROM render.js, so a render.js -> fleet.js import here would close a
-    // circular module loop and throw a TDZ ReferenceError on load (fleet.js
-    // resolving to a still-mid-evaluation render.js). Same one-line check,
-    // no import needed.
-    if (typeof truck.id === "string" && truck.id.startsWith("H-")) companyTruckPts.push(p.x, p.y);
+    // Set-membership rather than an id-prefix check (fleet.js's
+    // isCompanyTruck): the player's own currently-driven rig is included
+    // here too - it may hold a plain numeric id, never an "H-" one - and
+    // this correctly follows a truck through career.switchActiveTruck
+    // regardless of which id shape it happens to carry.
+    if (company && company.truckIds.has(truck.id)) companyBeaconPts.push(p.x, p.y);
   }
 
   // One path, one fill, for every headlight on screen - the whole reason
@@ -1792,18 +1796,52 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   }
   ctx.globalAlpha = 1;
 
-  // Company-truck identity ring - one batched stroke, same "one path" shape
-  // as the headlight cones above, drawn on top of the fleet fill so it
-  // reads at every zoom level a company dot is visible at.
-  if (companyTruckPts.length) {
-    ctx.strokeStyle = COMPANY_RING_COLOR;
-    ctx.lineWidth = 1.5 / camera.zoom;
-    ctx.beginPath();
-    for (let i = 0; i < companyTruckPts.length; i += 2) {
-      ctx.moveTo(companyTruckPts[i] + TRUCK_DOT_RADIUS + 2, companyTruckPts[i + 1]);
-      ctx.arc(companyTruckPts[i], companyTruckPts[i + 1], TRUCK_DOT_RADIUS + 2, 0, Math.PI * 2);
+  // Company beacon - a small floating badge above each company truck's
+  // dot, in the company's own logo color/glyph. Reuses drawCityLabels'
+  // exact stem + counter-rotation idiom (nav view stands the badge up off
+  // the tilted ground; the plain top-down fallback just floats it above
+  // the dot) rather than inventing a second treatment.
+  if (companyBeaconPts.length && company) {
+    const beaconLabel = company.glyph || company.monogram;
+    const stemH = TRUCK_DOT_RADIUS + 14;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = labelFont(9);
+    for (let i = 0; i < companyBeaconPts.length; i += 2) {
+      const x = companyBeaconPts[i], y = companyBeaconPts[i + 1];
+      if (nav) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(camera.heading);
+        ctx.scale(1, 1 / TILT_FACTOR);
+        ctx.strokeStyle = "rgba(255,255,255,0.28)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, -TRUCK_DOT_RADIUS);
+        ctx.lineTo(0, -stemH);
+        ctx.stroke();
+        ctx.fillStyle = company.color;
+        ctx.beginPath();
+        ctx.arc(0, -stemH, COMPANY_BEACON_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.fillText(beaconLabel, 0, -stemH);
+        ctx.restore();
+      } else {
+        ctx.strokeStyle = "rgba(255,255,255,0.28)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y - TRUCK_DOT_RADIUS);
+        ctx.lineTo(x, y - stemH);
+        ctx.stroke();
+        ctx.fillStyle = company.color;
+        ctx.beginPath();
+        ctx.arc(x, y - stemH, COMPANY_BEACON_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.fillText(beaconLabel, x, y - stemH);
+      }
     }
-    ctx.stroke();
   }
 
   // Google-Maps-style directional arrow for the followed truck in nav
