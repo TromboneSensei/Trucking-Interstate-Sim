@@ -49,6 +49,7 @@ const careerEl = {
   startChoice: document.getElementById("career-start-choice"),
   btnQuickStart: document.getElementById("btn-quick-start"),
   btnSetupCompany: document.getElementById("btn-setup-company"),
+  btnBackToMap: document.getElementById("btn-back-to-map"),
 };
 
 // Down from 7 to 5: REST folds Showers+Sleeper (both are "recover" actions),
@@ -66,6 +67,17 @@ let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is th
 let onSwitchTruck = null; // (truckId) => {ok, reason?} - main.js owns state.decisionTruck/contractTruck (the only thing worth gating on - the truck-stop overlay already makes FLEET structurally unreachable while it's open) and the actual switchActiveTruck + followTruck call
 let onOpenWizard = null; // () => void - opens the company creation wizard (wizard-ui.js); only reachable from the fresh-career (no save) choice card below
 let onFleetSelectTruck = null; // (truck) => void - FLEET tab row tap (not the Drive This Truck button): just follows/selects the truck on the map, same as tapping it in Dispatch/Rankings, without switching who's controlled
+let onBackToMap = null; // () => void - main.js releases the camera (unfollow) when the player backgrounds the career UI view
+let onResumeCareerUI = null; // () => void - main.js re-follows the career truck when the player taps the CAREER pill to resume a backgrounded view
+
+// True while a career is active but the player has backgrounded its UI
+// (tapped "Back to Map") - the underlying career (career.isActive()/
+// profile.active) never changes, only which top bar/tab set is shown.
+// Decoupled from profile.active on purpose: nothing about the sim, the
+// truck, or its junction/load decisions changes while backgrounded - the
+// truck still needs the player's input exactly like before, it's purely
+// a "what's on screen right now" flag, checked only inside this module.
+let uiBackgrounded = false;
 
 let open = false;
 let activeVendor = "FUEL";
@@ -82,8 +94,24 @@ export function initCareerUI(callbacks) {
   onCareerEnded = callbacks.onCareerEnded || null;
   onOpenWizard = callbacks.onOpenWizard || null;
   onFleetSelectTruck = callbacks.onSelectTruck || null;
+  onBackToMap = callbacks.onBackToMap || null;
+  onResumeCareerUI = callbacks.onResumeCareerUI || null;
+
+  careerEl.btnBackToMap.addEventListener("click", () => {
+    uiBackgrounded = true;
+    careerEl.btnBackToMap.classList.add("hidden");
+    if (onBackToMap) onBackToMap();
+  });
 
   careerEl.btnCareer.addEventListener("click", () => {
+    // Resuming a backgrounded view, not starting a new career - the
+    // career underneath was never touched, so this just brings the UI
+    // back rather than going anywhere near the fresh-career choice card.
+    if (uiBackgrounded) {
+      uiBackgrounded = false;
+      if (onResumeCareerUI) onResumeCareerUI();
+      return;
+    }
     if (career.isActive()) {
       // Not a toggle for STARTING a career - but it doubles as the way
       // back into a truck stop the player dismissed with Leave Cab
@@ -413,6 +441,95 @@ function statBar(label, value01, color, sub, valueLabel, hero) {
 
 function statChip(label, value, color) {
   return `<div class="stat-chip"><span class="stat-label">${label}</span><span style="color:${color || "var(--ink)"}">${value}</span></div>`;
+}
+
+// --- Dashboard gauges (RIG tab) ------------------------------------------
+//
+// Two real-truck-instrument-style readouts for the two numbers a driver
+// actually needs at a glance: fuel as a tank that drains bottom-up, and
+// fatigue as a driver silhouette that drains as energy runs out. Both
+// share one shape: an outline, a clipPath matching that outline, and a
+// fill rect anchored to the bottom whose height is the live percentage -
+// literally a fuel gauge / a battery icon, just drawn instead of relying
+// on a font glyph. clipPath ids are hardcoded (not generated) since each
+// gauge only ever appears once per render of the tab.
+function tankGaugeSVG(pct01, color) {
+  const p = Math.max(0, Math.min(1, pct01));
+  const fillH = 70 * p;
+  const fillY = 12 + (70 - fillH);
+  return `<svg class="dash-gauge-svg" viewBox="0 0 44 92" width="52" height="108" aria-hidden="true">
+    <defs><clipPath id="gauge-clip-fuel"><rect x="7" y="12" width="30" height="70" rx="7"/></clipPath></defs>
+    <rect x="16" y="2" width="12" height="12" rx="2" fill="var(--panel-strong)" stroke="var(--dim)" stroke-width="1.5"/>
+    <rect x="7" y="12" width="30" height="70" rx="7" fill="var(--panel-strong)" stroke="var(--dim)" stroke-width="2"/>
+    <g clip-path="url(#gauge-clip-fuel)">
+      <rect x="7" y="${fillY.toFixed(1)}" width="30" height="${fillH.toFixed(1)}" fill="${color}"/>
+    </g>
+    <g stroke="rgba(0,0,0,0.25)" stroke-width="1.5">
+      <line x1="7" y1="29" x2="14" y2="29" /><line x1="7" y1="47" x2="14" y2="47" /><line x1="7" y1="65" x2="14" y2="65" />
+    </g>
+    <rect x="7" y="12" width="30" height="70" rx="7" fill="none" stroke="var(--dim)" stroke-width="2"/>
+  </svg>`;
+}
+
+function personGaugeSVG(energyPct01, color) {
+  const p = Math.max(0, Math.min(1, energyPct01));
+  const fillH = 78 * p;
+  const fillY = 8 + (78 - fillH);
+  return `<svg class="dash-gauge-svg" viewBox="0 0 44 92" width="52" height="108" aria-hidden="true">
+    <defs>
+      <clipPath id="gauge-clip-fatigue">
+        <circle cx="22" cy="15" r="10"/>
+        <rect x="10" y="26" width="24" height="36" rx="9"/>
+        <rect x="11" y="60" width="8" height="26" rx="3.5"/>
+        <rect x="25" y="60" width="8" height="26" rx="3.5"/>
+      </clipPath>
+    </defs>
+    <g fill="var(--panel-strong)" stroke="var(--dim)" stroke-width="2">
+      <circle cx="22" cy="15" r="10"/>
+      <rect x="10" y="26" width="24" height="36" rx="9"/>
+      <rect x="11" y="60" width="8" height="26" rx="3.5"/>
+      <rect x="25" y="60" width="8" height="26" rx="3.5"/>
+    </g>
+    <g clip-path="url(#gauge-clip-fatigue)">
+      <rect x="6" y="${fillY.toFixed(1)}" width="32" height="${fillH.toFixed(1)}" fill="${color}"/>
+    </g>
+    <g fill="none" stroke="var(--dim)" stroke-width="2">
+      <circle cx="22" cy="15" r="10"/>
+      <rect x="10" y="26" width="24" height="36" rx="9"/>
+      <rect x="11" y="60" width="8" height="26" rx="3.5"/>
+      <rect x="25" y="60" width="8" height="26" rx="3.5"/>
+    </g>
+  </svg>`;
+}
+
+// The dashboard header itself: fuel tank + driver-energy gauge side by
+// side, each with its own big % readout - the two numbers RIG exists to
+// answer at a glance, drawn like real truck instruments instead of a
+// generic progress bar, and placed first in the tab's markup so they're
+// on screen at the default (unscrolled) sheet height with no extra CSS
+// height tuning needed.
+function dashboardGaugesHTML(truck, range) {
+  const fuelPct = Math.round(truck.fuel);
+  const fuelColor = truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)";
+  const fatiguePct = Math.round(truck.fatigue);
+  const energyColor = truck.fatigue < 40 ? "var(--go)" : truck.fatigue < 70 ? "var(--caution)" : "var(--stop)";
+  return `<div class="dash-gauges">
+    <div class="dash-gauge">
+      ${tankGaugeSVG(truck.fuel / 100, fuelColor)}
+      <div class="dash-gauge-label">
+        <div class="dash-gauge-pct" style="color:${fuelColor};">${fuelPct}%</div>
+        <div class="dash-gauge-name">Fuel</div>
+        <div class="dash-gauge-sub">~${range} mi</div>
+      </div>
+    </div>
+    <div class="dash-gauge">
+      ${personGaugeSVG(1 - truck.fatigue / 100, energyColor)}
+      <div class="dash-gauge-label">
+        <div class="dash-gauge-pct" style="color:${energyColor};">${fatiguePct}%</div>
+        <div class="dash-gauge-name">Fatigue</div>
+      </div>
+    </div>
+  </div>`;
 }
 
 // Attribute-safe escaping for the disabled-reason strings baked into
@@ -833,7 +950,13 @@ let prevCareerActive = false; // edge-detects the active flip, for the tab-set s
 export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
   lastKnownGameSeconds = gameSeconds;
-  const active = profile.active;
+  if (!profile.active) uiBackgrounded = false; // no career underneath to background - a fresh start never inherits a stale flag
+  // The career UI view is "active" (career top bar/tab set shown) only
+  // while a career is running AND the player hasn't backgrounded it via
+  // Back to Map - career.isActive()/profile.active themselves never
+  // reflect this, on purpose (see uiBackgrounded's own doc comment).
+  const active = profile.active && !uiBackgrounded;
+  careerEl.btnBackToMap.classList.toggle("hidden", !active);
   // Stronger mode-shift: career mode was visually just "spectator mode
   // plus a HUD strip" - the status bar/#btn-career.active already use
   // --go as the "you're driving" accent (vs. --caution, the app's
@@ -854,13 +977,18 @@ export function updateCareerHud(profile, truck, gameSeconds) {
     for (const btn of document.querySelectorAll(".career-tab")) btn.classList.toggle("hidden", !active);
     const activeBtn = document.querySelector(".tab-btn.active");
     if (activeBtn && activeBtn.classList.contains("hidden")) openTab(active ? "rig" : "overview");
-    // Career just ended - move the CB feed back to its spectator home
-    // before spectator tabs come back on screen, or #tab-cb would show
-    // empty (World's own slot, wherever it last was, is about to stop
-    // being re-rendered).
+    // The career UI view just went away - either the career itself ended,
+    // or the player merely backgrounded it (Back to Map) - either way move
+    // the CB feed back to its spectator home before spectator tabs come
+    // back on screen, or #tab-cb would show empty (World's own slot,
+    // wherever it last was, is about to stop being re-rendered; it
+    // reparents itself back into World's slot the next time that tab
+    // renders - see renderWorldTab). onCareerEnded is reserved for the
+    // career actually ending, so it's gated on profile.active specifically
+    // rather than this narrower UI-visibility flag.
     if (prevCareerActive && !active) {
       careerEl.tabCbHome.appendChild(careerEl.cbFeed);
-      if (onCareerEnded) onCareerEnded();
+      if (!profile.active && onCareerEnded) onCareerEnded();
     }
     prevCareerActive = active;
   }
@@ -915,18 +1043,23 @@ export function renderRigTab(profile, truck, gameSeconds, graph) {
     return;
   }
   preserveScroll(careerEl.tabRig, () => {
-    let statusHtml;
+    // One compact line instead of the old full detail-header treatment -
+    // the dashboard gauges below are now the tab's visual headline, so the
+    // status text just needs to answer "what am I doing" in passing, not
+    // command its own large title.
+    let statusLine;
     if (truck.disabledHoursLeft > 0) {
-      statusHtml = `<div class="detail-header"><div><div class="detail-title" style="color:var(--stop);">BROKEN DOWN</div><div class="detail-sub">${truck.disabledHoursLeft.toFixed(1)}h until you're rolling again</div></div></div>`;
+      statusLine = `<span style="color:var(--stop);font-weight:700;">BROKEN DOWN</span> &bull; ${truck.disabledHoursLeft.toFixed(1)}h until you're rolling again`;
     } else if (truck.parkedAt) {
-      statusHtml = `<div class="detail-header"><div><div class="detail-title">PARKED &mdash; ${truck.parkedAt}</div><div class="detail-sub">${truck.contract ? "Load in the truck stop's board" : "No load yet"}</div></div></div>`;
+      statusLine = `<strong style="color:var(--ink);">PARKED</strong> at ${truck.parkedAt} &bull; ${truck.contract ? "load waiting in the board" : "no load yet"}`;
     } else if (truck.contract && truck.edge) {
       const miles = remainingMilesOf(truck);
       const etaH = miles / Math.max(20, truck.speed || 55);
-      statusHtml = `<div class="detail-header"><div><div class="detail-title">HAULING</div><div class="detail-sub">${truck.contract.cargo} &rarr; <strong style="color:var(--ink);">${truck.contract.destination}</strong> &bull; ${Math.round(miles).toLocaleString()} mi &bull; ETA ~${formatHours(etaH)}</div></div></div>`;
+      statusLine = `${truck.contract.cargo} &rarr; <strong style="color:var(--ink);">${truck.contract.destination}</strong> &bull; ${Math.round(miles).toLocaleString()} mi &bull; ETA ~${formatHours(etaH)}`;
     } else {
-      statusHtml = `<div class="detail-header"><div><div class="detail-title">ON THE ROAD</div></div></div>`;
+      statusLine = "On the road";
     }
+    const statusHtml = `<div class="row-sub" style="margin-bottom:10px;">${statusLine}</div>`;
 
     const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
     const hotshotHtml = !hotshot ? "" : (() => {
@@ -939,26 +1072,30 @@ export function renderRigTab(profile, truck, gameSeconds, graph) {
     })();
 
     const range = Math.round(estimatedRangeMiles(truck));
-    // Fuel and Fatigue are the two numbers players actually need to find
-    // in a hurry - hero bars, first, ahead of the other five compact rows.
-    const heroVitalsHtml = [
-      statBar("Fuel", truck.fuel / 100, truck.fuel > 50 ? "var(--go)" : truck.fuel > 15 ? "var(--caution)" : "var(--stop)", `~${range} mi`, undefined, true),
-      statBar("Fatigue", truck.fatigue / 100, truck.fatigue > 70 ? "var(--stop)" : truck.fatigue > 40 ? "var(--caution)" : "var(--go)", undefined, undefined, true),
-    ].join("");
-    const vitalsHtml = [
-      statBar("Hunger", profile.hunger / 100, profile.hunger < 20 ? "var(--stop)" : profile.hunger < 45 ? "var(--caution)" : "var(--go)"),
-      statBar("Morale", profile.morale / 100, profile.morale < 30 ? "var(--stop)" : profile.morale < 55 ? "var(--caution)" : "var(--go)"),
-      statBar("Heat", profile.heat / 100, profile.heat > 60 ? "var(--stop)" : profile.heat > 40 ? "var(--caution)" : "var(--go)"),
-      statBar("Health", profile.health / 100, profile.health < 50 ? "var(--stop)" : profile.health < 80 ? "var(--caution)" : "var(--go)"),
-      statBar("Condition", (100 - profile.wear) / 100, profile.wear > 60 ? "var(--stop)" : profile.wear > 30 ? "var(--caution)" : "var(--go)"),
-    ].join("");
+    const dashHtml = dashboardGaugesHTML(truck, range);
 
-    const buffsHtml = !profile.buffs.length ? `<div class="placeholder-text">Nothing running.</div>` : profile.buffs.map((b) => {
-      const hoursLeft = Math.max(0, (b.expiresAtGameSeconds - gameSeconds) / 3600);
-      const item = career.STORE_ITEMS[b.kind];
-      const crashNote = item?.crash ? " &bull; rough crash when it wears off" : "";
-      return `<div class="row-sub" style="padding:3px 0;">${b.label} &mdash; ${formatHours(hoursLeft)} left${crashNote}</div>`;
-    }).join("");
+    // Weeded down from five full-width bars to a wrapping strip of small
+    // readouts - these five matter, but not enough to each command a full
+    // row under the two dashboard gauges above.
+    const vitalsHtml = `<div class="vitals-strip">
+      ${statChip("Hunger", `${Math.round(profile.hunger)}%`, profile.hunger < 20 ? "var(--stop)" : profile.hunger < 45 ? "var(--caution)" : "var(--go)")}
+      ${statChip("Morale", `${Math.round(profile.morale)}%`, profile.morale < 30 ? "var(--stop)" : profile.morale < 55 ? "var(--caution)" : "var(--go)")}
+      ${statChip("Heat", `${Math.round(profile.heat)}%`, profile.heat > 60 ? "var(--stop)" : profile.heat > 40 ? "var(--caution)" : "var(--go)")}
+      ${statChip("Health", `${Math.round(profile.health)}%`, profile.health < 50 ? "var(--stop)" : profile.health < 80 ? "var(--caution)" : "var(--go)")}
+      ${statChip("Condition", `${Math.round(100 - profile.wear)}%`, profile.wear > 60 ? "var(--stop)" : profile.wear > 30 ? "var(--caution)" : "var(--go)")}
+    </div>`;
+
+    // Only rendered at all when something's actually running - an empty
+    // "Nothing running" placeholder was exactly the kind of filler this
+    // pass is weeding out.
+    const buffsHtml = !profile.buffs.length ? "" : `
+      <div class="section-label">Running Now</div>
+      ${profile.buffs.map((b) => {
+        const hoursLeft = Math.max(0, (b.expiresAtGameSeconds - gameSeconds) / 3600);
+        const item = career.STORE_ITEMS[b.kind];
+        const crashNote = item?.crash ? " &bull; rough crash when it wears off" : "";
+        return `<div class="row-sub" style="padding:3px 0;">${b.label} &mdash; ${formatHours(hoursLeft)} left${crashNote}</div>`;
+      }).join("")}`;
 
     // Condensed into one segmented row (was three separate cards) - the
     // combined effect caption now lives on one shared line below instead
@@ -1006,17 +1143,15 @@ export function renderRigTab(profile, truck, gameSeconds, graph) {
     const multsHtml = !a ? "" : `<div class="row-sub" style="padding:3px 0;">Speed &times;${a.speedMult.toFixed(2)} &bull; Fuel &times;${a.burnMult.toFixed(2)} &bull; Wear &times;${a.wearMult.toFixed(2)} &bull; Rest &times;${a.restMult.toFixed(2)}</div>`;
 
     careerEl.tabRig.innerHTML = `
+      ${dashHtml}
+      ${statusHtml}
+      ${hotshotHtml}
       ${throttleHtml}
       <button class="pull-in-btn" data-action="pull-in" ${pullInDisabled ? "disabled" : ""}>
         <span class="pull-in-title">Pull In</span>
         <span class="pull-in-sub">${pullInSub}</span>
       </button>
-      ${statusHtml}
-      ${hotshotHtml}
-      <div class="section-label">Vitals</div>
-      ${heroVitalsHtml}
       ${vitalsHtml}
-      <div class="section-label">Running Now</div>
       ${buffsHtml}
       <div class="section-label">Your Rig</div>
       <div class="row-sub" style="padding:3px 0;">${truck.name}${profile.homeCity ? ` &bull; out of ${profile.homeCity}` : ""}</div>
@@ -1095,6 +1230,8 @@ function renderFleetShopSection(profile) {
   const maintPrice = career.fleetMaintenancePrice();
   const maintMaxed = maintPrice == null;
   const aiOwned = career.hasAIDriver();
+  const aiLocked = !aiOwned && profile.level < career.AI_DRIVER_MIN_LEVEL;
+  const aiDisabled = aiOwned || aiLocked;
   return `
     <div class="section-label">Fleet Shop</div>
     <div class="vendor-grid">
@@ -1108,10 +1245,10 @@ function renderFleetShopSection(profile) {
         <span class="v-desc">${maintMaxed ? "Maxed out - every truck breaks down as rarely as it gets." : `Cuts breakdown risk fleet-wide, present and future trucks alike.`}</span>
         ${maintMaxed ? "" : `<span class="v-meta"><span class="v-price expense">$${maintPrice.toLocaleString()}</span></span>`}
       </button>
-      <button class="vendor-item${aiOwned ? " disabled" : ""}" data-action="buy-ai-driver" ${aiOwned ? "disabled" : ""}>
+      <button class="vendor-item${aiDisabled ? " disabled" : ""}" data-action="buy-ai-driver" ${aiDisabled ? "disabled" : ""}>
         <span class="v-name">AI Driver</span>
-        <span class="v-desc">${aiOwned ? "Your rig runs itself end to end - owned." : "Your own rig auto-navigates AND auto-picks its next load. You still handle upgrades, fuel, and purchases."}</span>
-        ${aiOwned ? "" : `<span class="v-meta"><span class="v-price expense">$${career.AI_DRIVER_PRICE.toLocaleString()}</span></span>`}
+        <span class="v-desc">${aiOwned ? "Your rig runs itself end to end - owned." : aiLocked ? `Requires level ${career.AI_DRIVER_MIN_LEVEL} (you're level ${profile.level}).` : "Your own rig auto-navigates AND auto-picks its next load. You still handle upgrades, fuel, and purchases."}</span>
+        ${aiDisabled ? "" : `<span class="v-meta"><span class="v-price expense">$${career.AI_DRIVER_PRICE.toLocaleString()}</span></span>`}
       </button>
     </div>`;
 }

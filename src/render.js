@@ -210,8 +210,8 @@ const headlightPts = [];
 // headlight cones above - one batched path for the whole company is cheap
 // even though it's a deliberate exception to the "one draw call per
 // 10k-truck pass" rule everywhere else in this file.
-const COMPANY_BEACON_RADIUS = 6; // world units at camera.maxZoom - see companyBeaconScreenRadius, which is what's actually drawn with
-const COMPANY_BEACON_BUMP = 1.2; // 20% bigger than the old always-zoom-scaled size, measured at max zoom
+const COMPANY_BEACON_RADIUS = 6; // world units - scales with zoom like a truck's own dot; see the draw site for the low-zoom floor that keeps it visible zoomed out
+const COMPANY_BEACON_BUMP = 1.2; // 20% bigger than the plain world-scaled size
 const companyBeaconPts = [];
 
 // Multiples of camera.baseZoom at which each additional tier of city
@@ -1825,17 +1825,21 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   // the dot) rather than inventing a second treatment.
   if (companyBeaconPts.length && company) {
     const beaconLabel = company.glyph || company.monogram;
-    // Held at a constant ON-SCREEN size across every zoom level, unlike a
-    // truck's own dot (which is meant to shrink/grow with the map) - the
-    // whole point of the beacon is to stay spottable even zoomed out over
-    // the entire country. Sized off the OLD always-zoom-scaled look at
-    // camera.maxZoom (its biggest, most legible point) plus the requested
-    // 20% bump, then divided back down by the CURRENT zoom every frame so
-    // the actual on-screen pixels never change - same idiom this file
-    // already uses for zoom-independent line widths (e.g. `6.5 /
-    // camera.zoom` on the route line above).
-    const beaconScreenRadius = COMPANY_BEACON_RADIUS * camera.maxZoom * COMPANY_BEACON_BUMP;
-    const stemScreenH = (TRUCK_DOT_RADIUS + 14) * camera.maxZoom * COMPANY_BEACON_BUMP;
+    // Scales naturally with zoom, like everything else on the map (so the
+    // badge always sits right on top of its truck's actual position, never
+    // drifting away into looking like a different city as you zoom out),
+    // floored at a minimum on-screen size/offset so it doesn't shrink to
+    // invisible once zoomed out over the whole country - that floor is
+    // exactly what "20% bigger, easy to spot" was asking for. The floor
+    // only ever kicks in once the natural size would already have shrunk
+    // past it, so it never grows into an oversized halo floating away from
+    // the dot the way an unconditional constant screen size did.
+    const MIN_BEACON_SCREEN_R = 9;
+    const MIN_STEM_SCREEN_H = 14;
+    const naturalR = COMPANY_BEACON_RADIUS * COMPANY_BEACON_BUMP * camera.zoom;
+    const naturalStemH = (TRUCK_DOT_RADIUS + 14) * camera.zoom;
+    const beaconScreenRadius = Math.max(MIN_BEACON_SCREEN_R, naturalR);
+    const stemScreenH = Math.max(MIN_STEM_SCREEN_H, naturalStemH);
     const beaconFontScreenPx = beaconScreenRadius * 1.5; // same ~9:6 ratio the old fixed font-size/radius pair had
     const beaconR = beaconScreenRadius / camera.zoom;
     const stemH = stemScreenH / camera.zoom;

@@ -806,6 +806,92 @@ export function checkSettlement(gameSeconds, trucks) {
   }
 }
 
+// Weekly wage run, distinct from checkSettlement above: settlement sweeps
+// hired trucks' NET earnings into profile.cash (revenue collection, minus
+// overhead); this pays OUT of profile.cash to every company truck's
+// driver - including the player's own currently-driven rig, which
+// settlement never touches at all - as a real expense. Scaled by each
+// truck's own delta since its last payroll run: deliveries and miles
+// (both already tracked as lifetime counters - contractsCompleted,
+// totalMilesDriven, earnings - so no new per-frame bookkeeping is needed),
+// each driver's skill (0-1, so skillMult spans 0.7x-1.3x - a veteran
+// genuinely out-earns a rookie doing identical work), and a quality bonus
+// derived from this period's average payout-per-delivery (a truck that
+// spent the week hauling high-tier freight earns more per load than one
+// running milk routes, without needing to touch economy.js's payout
+// formula itself). profile.payrollBaselines is declared lazily here (not
+// in newProfile()) - same established pattern as profile.logo/gpsOwnedByTruckId/
+// etc - so an existing save with no baselines yet just starts fresh with
+// this week's numbers, no migration needed.
+export const PAYROLL_INTERVAL_HOURS = 168; // 1 game week, elapsed GAME time - same convention as SETTLEMENT_INTERVAL_HOURS
+const PAYROLL_PER_DELIVERY = 40;
+const PAYROLL_PER_MILE = 0.12;
+
+export function checkPayroll(gameSeconds, trucks) {
+  if (profile.lastPayrollGameSeconds == null) {
+    profile.lastPayrollGameSeconds = gameSeconds; // first check since career start/load - nothing to pay yet, just start the clock
+    return null;
+  }
+  if (gameSeconds - profile.lastPayrollGameSeconds < PAYROLL_INTERVAL_HOURS * 3600) return null;
+  profile.lastPayrollGameSeconds = gameSeconds;
+  if (!profile.payrollBaselines) profile.payrollBaselines = {};
+
+  const companyIds = new Set([profile.truckId, ...profile.hiredTrucks.map((h) => h.id)]);
+  const paid = [];
+  let totalPaid = 0;
+  for (const t of trucks) {
+    if (!companyIds.has(t.id)) continue;
+    const base = profile.payrollBaselines[t.id] || {
+      contractsCompleted: t.contractsCompleted,
+      totalMilesDriven: t.totalMilesDriven,
+      earnings: t.earnings,
+    };
+    const deltaDeliveries = Math.max(0, t.contractsCompleted - base.contractsCompleted);
+    const deltaMiles = Math.max(0, t.totalMilesDriven - base.totalMilesDriven);
+    const deltaEarnings = Math.max(0, t.earnings - base.earnings);
+    profile.payrollBaselines[t.id] = {
+      contractsCompleted: t.contractsCompleted,
+      totalMilesDriven: t.totalMilesDriven,
+      earnings: t.earnings,
+    };
+    if (deltaDeliveries <= 0 && deltaMiles <= 0) continue; // sat idle/parked all week - nothing earned, nothing owed
+
+    const skillMult = 0.7 + t.driver.skill * 0.6;
+    const avgPayoutPerDelivery = deltaDeliveries > 0 ? deltaEarnings / deltaDeliveries : 0;
+    // Typical medium haul nets ~$1,650-2,200 (economy.js); anything
+    // clearing $1,200/load starts nudging this driver's cut up, capped at
+    // a real but not run-away +50%.
+    const qualityBonusMult = 1 + Math.min(0.5, Math.max(0, (avgPayoutPerDelivery - 1200) / 4000));
+    const pay = Math.round((PAYROLL_PER_DELIVERY * deltaDeliveries + PAYROLL_PER_MILE * deltaMiles) * skillMult * qualityBonusMult);
+    if (pay <= 0) continue;
+    paid.push({
+      id: t.id,
+      name: t.name,
+      isPlayer: t.id === profile.truckId,
+      deliveries: deltaDeliveries,
+      miles: Math.round(deltaMiles),
+      skill: t.driver.skill,
+      pay,
+    });
+    totalPaid += pay;
+  }
+  // Drop baselines for ids no longer in the company (defensive - hired
+  // trucks are never actually removed from profile.hiredTrucks today).
+  // Object.keys always comes back as strings even for a numeric truck.id,
+  // so companyIds needs a string-keyed twin here or every entry this very
+  // call just wrote gets immediately deleted again (a number id 443 in
+  // companyIds never string-equals the "443" key Object.keys hands back).
+  const companyIdStrs = new Set([...companyIds].map(String));
+  for (const id of Object.keys(profile.payrollBaselines)) {
+    if (!companyIdStrs.has(id)) delete profile.payrollBaselines[id];
+  }
+  if (!paid.length) return null;
+
+  profile.cash -= totalPaid;
+  pushLog(`Payroll: paid ${paid.length} driver${paid.length === 1 ? "" : "s"} $${totalPaid.toLocaleString()} total.`);
+  return { paid, totalPaid };
+}
+
 // Wraps fastForwardHours with tickNeeds wired through onSubstep - the
 // ONE path DINER/SHOWERS/SLEEPER all use to actually let time (and the
 // rest of the fleet) pass while the player eats/showers/sleeps. See the
@@ -817,6 +903,7 @@ export function advanceTime(graph, trucks, weatherCells, truck, gameSeconds, hou
     onSubstep: (gs, stepHours) => {
       tickNeeds(truck, stepHours, gs, opts.rnd);
       checkSettlement(gs, trucks);
+      checkPayroll(gs, trucks);
       if (opts.onSubstep) opts.onSubstep(gs, stepHours);
     },
   });
@@ -1188,6 +1275,7 @@ export function buyFleetMaintenance() {
 // (there's only ever one "player's own truck" at a time, whichever one
 // profile.truckId currently points at - see switchActiveTruck).
 export const AI_DRIVER_PRICE = 15000;
+export const AI_DRIVER_MIN_LEVEL = 3;
 
 export function hasAIDriver() {
   return !!profile.autoDriver;
@@ -1195,6 +1283,7 @@ export function hasAIDriver() {
 
 export function buyAIDriver() {
   if (profile.autoDriver) return { ok: false, reason: "Already fully autonomous." };
+  if (profile.level < AI_DRIVER_MIN_LEVEL) return { ok: false, reason: `Requires level ${AI_DRIVER_MIN_LEVEL}.` };
   if (profile.cash < AI_DRIVER_PRICE) return { ok: false, reason: `Can't afford it. ($${AI_DRIVER_PRICE.toLocaleString()})` };
   profile.cash -= AI_DRIVER_PRICE;
   profile.stats.totalSpent += AI_DRIVER_PRICE;

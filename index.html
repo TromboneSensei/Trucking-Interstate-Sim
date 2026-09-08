@@ -17,7 +17,6 @@
       <span id="fleet-count">0 UNITS</span>
     </div>
 
-    <button id="btn-exit-follow" class="pill-btn hidden">&times; RELEASE</button>
     <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
     <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
     <!-- Read-only status while driving - no controls live here anymore
@@ -57,6 +56,14 @@
     <input type="range" id="time-slider" min="0" max="8" step="0.5" value="1" title="Simulation speed">
   </div>
   <div id="fps-counter">60 FPS</div>
+  <!-- Only shown while the career UI view (RIG/FLEET/BOOKS/WORLD tabs +
+       career status bar) is on screen. Backgrounds that view back to the
+       spectator top bar/tab set WITHOUT ending the career itself - the
+       CAREER pill reappears clickable and resumes it. Replaces the old
+       always-there RELEASE button, which only ever unfollowed the camera
+       (redundant - dragging the map already does that, see main.js's
+       per-frame camera-mode resync). -->
+  <button id="btn-back-to-map" class="pill-btn hidden">&larr; Back to Map</button>
 
   <div id="settings-overlay" class="hidden">
     <div id="settings-panel">
@@ -247,6 +254,7 @@
   </div>
 
   <div id="daily-digest" class="hidden"></div>
+  <div id="payroll-alert" class="hidden"></div>
   <div id="toast" class="hidden"></div>
   <div id="fatal-error" class="hidden"></div>
 

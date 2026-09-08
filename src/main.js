@@ -48,7 +48,6 @@ const el = {
   timeReadout: document.getElementById("time-readout"),
   speedPopover: document.getElementById("speed-popover"),
   speedPresets: document.getElementById("speed-presets"),
-  btnExitFollow: document.getElementById("btn-exit-follow"),
   btnNavToggle: document.getElementById("btn-nav-toggle"),
   decisionOverlay: document.getElementById("decision-overlay"),
   decisionOptions: document.getElementById("decision-options"),
@@ -77,6 +76,7 @@ const el = {
   btnSettingsApply: document.getElementById("btn-settings-apply"),
   fpsCounter: document.getElementById("fps-counter"),
   dailyDigest: document.getElementById("daily-digest"),
+  payrollAlert: document.getElementById("payroll-alert"),
   cbFeed: document.getElementById("cb-feed"),
   cbUnread: document.getElementById("cb-unread"),
   settingCBRadio: document.getElementById("setting-cb-radio"),
@@ -134,6 +134,7 @@ let lastEconSampleMin = -Infinity;
 // just the total.
 let dayIndex = 0;
 let digestTimer = null;
+let payrollTimer = null;
 
 const state = {
   paused: false, // true only while a junction decision is pending (see showDecisionPanel/resolveDecision)
@@ -208,6 +209,37 @@ function captureDayStart() {
 function hideDigest() {
   if (digestTimer) { clearTimeout(digestTimer); digestTimer = null; }
   el.dailyDigest.classList.add("hidden");
+}
+
+function hidePayroll() {
+  if (payrollTimer) { clearTimeout(payrollTimer); payrollTimer = null; }
+  el.payrollAlert.classList.add("hidden");
+}
+
+// Renders career.checkPayroll()'s result the same way checkDayRollover
+// renders the daily digest - a corner card, non-modal, auto-dismissing.
+// Kept as its own card rather than folded into the daily digest because
+// it fires on a different cadence (weekly, not daily) and the two firing
+// on the very same tick (a fresh week starting at midnight) would only
+// ever stack, never collide - #payroll-alert and #daily-digest each own a
+// separate fixed corner slot.
+function showPayrollAlert(result) {
+  const money = (n) => "$" + Math.round(n).toLocaleString();
+  const rows = [...result.paid].sort((a, b) => b.pay - a.pay).slice(0, 6);
+  const rowHtml = (r) => `<div class="digest-award">
+    <span class="digest-badge">${r.isPlayer ? "&#9733;" : "&#128100;"}</span>
+    <span><span class="digest-award-title">${r.name}${r.isPlayer ? " (you)" : ""}</span>
+    <span class="digest-award-val">${r.deliveries} load${r.deliveries === 1 ? "" : "s"} &bull; ${r.miles.toLocaleString()} mi &mdash; <strong>${money(r.pay)}</strong></span></span></div>`;
+
+  el.payrollAlert.innerHTML = `
+    <div class="digest-title">${career.getProfile().companyName || "Your Company"} &mdash; Payroll</div>
+    <div class="digest-line"><span>Drivers paid</span><span>${result.paid.length}</span></div>
+    <div class="digest-line"><span>Total paid out</span><span>${money(result.totalPaid)}</span></div>
+    <div class="digest-awards">${rows.map(rowHtml).join("")}</div>`;
+  el.payrollAlert.classList.remove("hidden");
+
+  if (payrollTimer) clearTimeout(payrollTimer);
+  payrollTimer = setTimeout(hidePayroll, 9000);
 }
 
 // Called once per frame; fires only on a midnight boundary.
@@ -328,7 +360,6 @@ function followTruck(truck) {
   state.controlledTruckId = null; // following defaults to spectate-only; Take Control is an explicit opt-in
   state.detailsView = { kind: "truck", id: truck.id };
   camera.follow(truckWorldPos(graph, truck)); // always starts flat FOLLOW - nav view is an explicit opt-in via btnNavToggle, never the default
-  el.btnExitFollow.classList.remove("hidden");
   el.btnNavToggle.classList.remove("hidden");
   el.btnNavToggle.classList.remove("active");
   openDetailsFor(truck, "truck", false);
@@ -341,11 +372,10 @@ function unfollow() {
   state.followedTruckId = null;
   state.controlledTruckId = null;
   camera.unfollow();
-  el.btnExitFollow.classList.add("hidden");
   el.btnNavToggle.classList.add("hidden");
 }
-el.btnExitFollow.addEventListener("click", unfollow);
 el.dailyDigest.addEventListener("click", hideDigest);
+el.payrollAlert.addEventListener("click", hidePayroll);
 
 el.btnNavToggle.addEventListener("click", () => {
   if (!getFollowedTruck()) return; // button is hidden otherwise, but guard defensively
@@ -794,6 +824,7 @@ function bootSim(newSettings) {
   lastEconSampleMin = -Infinity;
   dayIndex = Math.floor(settings.startSeconds / 86400);
   hideDigest();
+  hidePayroll();
   // The CB feed and the sim's event queue both hold references to trucks
   // from the fleet about to be replaced, so both are emptied here.
   resetCB();
@@ -820,7 +851,6 @@ function bootSim(newSettings) {
   el.timeSlider.value = String(settings.defaultTimeScale);
   el.timeReadout.textContent = settings.defaultTimeScale.toFixed(1) + "x";
   syncSpeedPresetHighlight();
-  el.btnExitFollow.classList.add("hidden");
   el.btnNavToggle.classList.add("hidden");
   el.btnNavToggle.classList.remove("active");
   el.decisionOverlay.classList.add("hidden");
@@ -898,6 +928,13 @@ initCareerUI({
   onSwitchTruck: handleSwitchTruck,
   onOpenWizard: openWizard,
   onSelectTruck: followTruck,
+  // Back to Map only backgrounds the career UI view (career-ui.js's own
+  // uiBackgrounded flag) - the career itself keeps running untouched, so
+  // this side just needs to let go of the camera the same way tapping off
+  // a truck already does. Resuming re-follows the career truck, mirroring
+  // what starting a career or switching trucks already does.
+  onBackToMap: unfollow,
+  onResumeCareerUI: () => { const ct = getCareerTruck(); if (ct) followTruck(ct); },
 });
 initWizardUI({ onComplete: handleWizardComplete });
 // Autosave on the way out - a career the player forgot to save manually
@@ -1016,6 +1053,8 @@ function frame(now) {
         if (ct) {
           career.tickNeeds(ct, gameHours, state.gameSeconds);
           career.checkSettlement(state.gameSeconds, trucks);
+          const payrollResult = career.checkPayroll(state.gameSeconds, trucks);
+          if (payrollResult) showPayrollAlert(payrollResult);
           // wasStopDismissed: without it, closing the overlay via "Leave
           // Cab" (rather than ROLL OUT) had no visible effect - this exact
           // check ran again the very next frame, ct.parkedAt/stopReason
@@ -1053,8 +1092,8 @@ function frame(now) {
       // Camera dropped to FREE on its own (a drag on the canvas calls
       // camera.js's own internal unfollow() directly, decoupled from
       // this outer unfollow() which owns the HUD button visibility) -
-      // resync state/UI to match rather than leaving stale RELEASE/NAV
-      // VIEW buttons showing for a camera that's no longer following.
+      // resync state/UI to match rather than leaving a stale NAV VIEW
+      // button showing for a camera that's no longer following.
       unfollow();
     }
     // Same idea as the followedTruckId resync just above, for the corridor/

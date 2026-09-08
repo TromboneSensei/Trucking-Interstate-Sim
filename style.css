@@ -145,8 +145,7 @@ html, body {
 }
 .pill-btn:active { transform: scale(0.96); }
 
-/* Nav-view toggle - neutral until engaged (unlike the red "release"
-   button, this isn't a destructive action), amber/active to match the
+/* Nav-view toggle - neutral until engaged, amber/active to match the
    chip/tab "currently selected" convention used elsewhere. */
 #btn-nav-toggle { background: var(--panel-strong); color: var(--ink); }
 #btn-nav-toggle.active { background: var(--caution); color: var(--caution-ink); }
@@ -189,6 +188,31 @@ html, body {
   color: var(--dim);
   opacity: 0.7;
 }
+
+/* Back to Map - top-left, tucked under the FPS counter's line so the two
+   never collide. Only shown while the career UI view is actually on
+   screen (see career-ui.js's updateCareerHud); backgrounds that view
+   back to spectator without ending the career itself. */
+#btn-back-to-map {
+  position: fixed;
+  top: calc(max(8px, env(safe-area-inset-top)) + 20px);
+  left: max(8px, env(safe-area-inset-left));
+  z-index: 5;
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--go);
+  border-radius: 3px;
+  color: var(--ink);
+  padding: 6px 10px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+#btn-back-to-map:active { transform: scale(0.94); }
 
 /* ---------------------------------------------------------------------
    Settings modal - centered card over a dimmed backdrop (distinct from
@@ -515,6 +539,68 @@ html, body {
 }
 .chip.active { background: var(--caution); border-color: var(--caution); color: var(--caution-ink); }
 
+/* RIG tab dashboard gauges - tank-shaped fuel gauge + humanoid fatigue
+   gauge, rendered as inline SVG by career-ui.js's tankGaugeSVG/personGaugeSVG.
+   This block only styles their layout/typography; the gauge shapes
+   themselves are drawn entirely in SVG markup. */
+.dash-gauges {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  padding: 10px 4px 14px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.dash-gauge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dash-gauge-svg { flex: 0 0 auto; }
+.dash-gauge-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.dash-gauge-pct {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.05;
+}
+.dash-gauge-name {
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dash-gauge-sub {
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  color: var(--dim);
+}
+
+/* Condensed wrapping strip of small stat readouts (Hunger/Morale/Heat/
+   Health/Condition) - reuses statChip()'s .stat-chip/.stat-label, which
+   otherwise only had rules scoped to #truckstop-status. */
+.vitals-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 2px 4px;
+}
+.vitals-strip .stat-chip { display: flex; align-items: baseline; gap: 4px; }
+.vitals-strip .stat-chip .stat-label {
+  color: var(--dim);
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .list-row {
   display: flex;
   align-items: center;
@@ -833,7 +919,7 @@ html, body {
 /* Daily digest - a end-of-day dispatch summary that slides in at
    midnight. Deliberately corner-anchored rather than modal: it reports,
    it doesn't interrupt, and the sim keeps running behind it. */
-#daily-digest {
+#daily-digest, #payroll-alert {
   position: fixed;
   left: max(10px, env(safe-area-inset-left));
   bottom: calc(var(--sheet-visible-h) + 14px);
@@ -848,11 +934,17 @@ html, body {
   cursor: pointer;
   animation: digest-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
+/* Payroll is a distinct card from the Daily Digest (different accent so
+   the two are never mistaken for each other), stacked above it via the
+   ::after left-offset trick if both happen to want the same corner - see
+   showPayrollAlert()'s comment for why that collision can't actually
+   happen in practice. */
+#payroll-alert { border-left-color: var(--info); }
 @keyframes digest-in {
   from { opacity: 0; transform: translateX(-14px); }
   to { opacity: 1; transform: none; }
 }
-#daily-digest .digest-title {
+#daily-digest .digest-title, #payroll-alert .digest-title {
   font-family: var(--font-display);
   font-size: 0.78rem;
   font-weight: 600;
@@ -861,15 +953,16 @@ html, body {
   color: var(--caution);
   margin-bottom: 7px;
 }
-#daily-digest .digest-line {
+#payroll-alert .digest-title { color: var(--info); }
+#daily-digest .digest-line, #payroll-alert .digest-line {
   display: flex;
   justify-content: space-between;
   gap: 10px;
   font-size: 0.76rem;
   padding: 2px 0;
 }
-#daily-digest .digest-line span:first-child { color: var(--dim); }
-#daily-digest .digest-line span:last-child {
+#daily-digest .digest-line span:first-child, #payroll-alert .digest-line span:first-child { color: var(--dim); }
+#daily-digest .digest-line span:last-child, #payroll-alert .digest-line span:last-child {
   font-family: var(--font-mono);
   font-weight: 600;
   color: var(--ink);
@@ -879,7 +972,7 @@ html, body {
    the four operating numbers above. Each is a fixed-width badge column
    plus a two-line body, so both rows' text starts on the same left edge
    regardless of which glyph the badge is. */
-#daily-digest .digest-awards {
+#daily-digest .digest-awards, #payroll-alert .digest-awards {
   margin-top: 7px;
   padding-top: 7px;
   border-top: 1px solid var(--line);
@@ -887,20 +980,21 @@ html, body {
   flex-direction: column;
   gap: 5px;
 }
-#daily-digest .digest-award {
+#daily-digest .digest-award, #payroll-alert .digest-award {
   display: flex;
   align-items: baseline;
   gap: 7px;
   font-size: 0.72rem;
 }
-#daily-digest .digest-badge {
+#daily-digest .digest-badge, #payroll-alert .digest-badge {
   flex: 0 0 0.95rem;
   text-align: center;
   color: var(--caution);
   font-size: 0.8rem;
   line-height: 1;
 }
-#daily-digest .digest-award-title {
+#payroll-alert .digest-badge { color: var(--info); }
+#daily-digest .digest-award-title, #payroll-alert .digest-award-title {
   display: block;
   color: var(--dim);
   font-weight: 700;
@@ -908,13 +1002,13 @@ html, body {
   text-transform: uppercase;
   font-size: 0.62rem;
 }
-#daily-digest .digest-award-val {
+#daily-digest .digest-award-val, #payroll-alert .digest-award-val {
   display: block;
   color: var(--ink);
   font-variant-numeric: tabular-nums lining-nums;
 }
-#daily-digest .digest-award-val strong { color: var(--ink); }
-#daily-digest .digest-star strong { color: var(--ink); }
+#daily-digest .digest-award-val strong, #payroll-alert .digest-award-val strong { color: var(--ink); }
+#daily-digest .digest-star strong, #payroll-alert .digest-star strong { color: var(--ink); }
 
 
 /* ---------------------------------------------------------------------
