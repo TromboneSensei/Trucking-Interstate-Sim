@@ -59,6 +59,7 @@ let onTimeAdvanced = null; // (newGameSeconds) => void - keeps main.js's state.g
 let onRollOut = null; // () => void - main.js re-checks for a pending junction decision after resuming
 let onCareerEnded = null; // () => void - reserved, not fired yet
 let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is the only place that can actually construct a Truck and push it into the live fleet (career.js never touches `trucks`)
+let onSwitchTruck = null; // (truckId) => {ok, reason?} - main.js owns state.decisionTruck/contractTruck (the only thing worth gating on - the truck-stop overlay already makes FLEET structurally unreachable while it's open) and the actual switchActiveTruck + followTruck call
 
 let open = false;
 let activeVendor = "FUEL";
@@ -70,6 +71,7 @@ export function initCareerUI(callbacks) {
   onStartCareer = callbacks.onStartCareer;
   onTimeAdvanced = callbacks.onTimeAdvanced;
   onHireDriver = callbacks.onHireDriver || null;
+  onSwitchTruck = callbacks.onSwitchTruck || null;
   onRollOut = callbacks.onRollOut;
   onCareerEnded = callbacks.onCareerEnded || null;
 
@@ -158,6 +160,11 @@ export function initCareerUI(callbacks) {
       const res = onHireDriver(hireCandidate);
       if (res && res.ok) hireCandidate = null; // hired - next render rolls a fresh candidate
       renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "switch-truck") {
+      if (!onSwitchTruck) return;
+      const res = onSwitchTruck(btn.dataset.arg);
+      if (res && res.ok) renderFleetTab(career.getProfile(), lastTruckById);
+      else if (res && res.reason) toastNow(res.reason);
     } else if (btn.dataset.action === "set-logo-color") {
       const cur = career.getProfile().logo;
       career.setLogo(btn.dataset.arg, cur?.glyph || null);
@@ -1014,14 +1021,29 @@ export function renderFleetTab(profile, truckById) {
       const traits = traitSummary(t.driver).map((tr) =>
         `<span class="chip active" style="cursor:default;background:${tr.color};border-color:${tr.color};padding:2px 6px;font-size:0.6rem;">${tr.label}</span>`
       ).join("");
+      // Visible BEFORE tapping Drive - the real mitigation (alongside the
+      // milesSinceStop reset on switch) for taking over a truck that's
+      // been running unattended and might be low on fuel or exhausted.
+      const fuelPct = Math.round(t.fuel);
+      const fuelColor = fuelPct > 50 ? "var(--go)" : fuelPct > 15 ? "var(--caution)" : "var(--stop)";
+      const fatiguePct = Math.round(t.fatigue);
+      const fatigueColor = fatiguePct > 70 ? "var(--stop)" : fatiguePct > 40 ? "var(--caution)" : "var(--go)";
+      const vitalsHtml = `<div style="margin-top:3px;font-family:var(--font-mono);font-size:0.66rem;font-weight:600;">
+        <span style="color:${fuelColor};">FUEL ${fuelPct}%</span>
+        <span style="color:${fatigueColor};margin-left:10px;">FATIGUE ${fatiguePct}%</span>
+      </div>`;
       return `
-        <div class="list-row" style="border-left-color:var(--info);">
+        <div class="list-row" style="border-left-color:var(--info);align-items:flex-start;">
           <div style="flex:1;">
             <div class="row-main">${t.name} <span class="row-sub">(${h.id})</span></div>
             <div class="row-sub">${status} &bull; ${t.contractsCompleted} loads &bull; $${Math.round(pending).toLocaleString()} pending</div>
+            ${vitalsHtml}
             ${traits ? `<div class="chip-row" style="margin-top:3px;">${traits}</div>` : ""}
           </div>
-          <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+            <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+            <button class="pill-btn" data-action="switch-truck" data-arg="${h.id}" style="background:var(--go);font-size:0.62rem;padding:5px 9px;letter-spacing:0.03em;">Drive This Truck</button>
+          </div>
         </div>`;
     }).join("") || `<div class="placeholder-text">No hired drivers yet.</div>`;
 

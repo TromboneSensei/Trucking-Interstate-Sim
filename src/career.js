@@ -572,6 +572,59 @@ export function detachAgent(truck) {
   if (truck) truck.agent = null;
 }
 
+// Fleet command (Phase 12): free, instant switch between the truck the
+// player is currently driving and any other live truck - an already-hired
+// driver, or an ordinary AI truck being taken over for the first time.
+//
+// Demotes `oldTruck` to an ordinary AI-driven hired truck (it keeps
+// whatever contract it's mid-haul on and just carries on running it),
+// promotes `newTruck` to the player's seat, and - if `newTruck` was already
+// a hired driver - settles its unpaid earnings first so nothing accrued
+// since its last weekly settlement is silently forfeited the instant it's
+// taken over (the same 15% overhead cut checkSettlement's own weekly pass
+// takes, applied once here at the moment of the switch instead).
+//
+// `truck.driver` (DriverDNA) is deliberately NOT reset or swapped on
+// either truck - the player inherits `newTruck`'s own specific handling
+// (skill/aggression/fuelBurnMult/accel/decel), with profile.upgrades/
+// throttle layered on top via agent.recompute() exactly as before. Taking
+// over a rookie's truck genuinely handles like a rookie's truck; this is
+// the intended two-layer model, not a gap to close.
+//
+// Known, accepted gap: a demoted truck that was never hired keeps its
+// original numeric id, not an "H-" one - it quietly falls outside
+// fleet.js's isCompanyTruck string-prefix check (rankings/digest-award
+// exclusion only). Not worth a truck-id migration for this; the map beacon
+// (once it lands) sidesteps it entirely via Set-membership against
+// profile.truckId/hiredTrucks instead of id prefix.
+export function switchActiveTruck(oldTruck, newTruck, gameSeconds) {
+  if (oldTruck) {
+    oldTruck.agent = null;
+    profile.hiredTrucks.push({ id: oldTruck.id, hiredAtGameSeconds: gameSeconds, lastSettledEarnings: oldTruck.earnings });
+    pushLog(`Handed the wheel of ${oldTruck.name} off to autopilot.`);
+  }
+
+  const hiredIdx = profile.hiredTrucks.findIndex((h) => h.id === newTruck.id);
+  if (hiredIdx >= 0) {
+    const entry = profile.hiredTrucks[hiredIdx];
+    const gross = newTruck.earnings - (entry.lastSettledEarnings ?? 0);
+    if (gross > 0) profile.cash += gross * (1 - SETTLEMENT_OVERHEAD_PCT);
+    profile.hiredTrucks.splice(hiredIdx, 1);
+  }
+
+  newTruck.agent = createAgent(newTruck, profile);
+  profile.truckId = newTruck.id;
+  profile.truckName = newTruck.name;
+  lastCreditedContract = null;
+  // Verified real risk (fleet.js's BREAKDOWN_PER_MILE), not speculative: a
+  // hired truck that's been running a long time without a real stop
+  // carries inflated breakdown odds the instant it's taken over - the same
+  // reset every other genuine stop already does, just applied here too.
+  newTruck.milesSinceStop = 0;
+  pushLog(`Took the wheel of ${newTruck.name}.`);
+  return { ok: true };
+}
+
 // --- per-frame tick (LIVE driving only - fastForwardHours' own substeps
 // call this too, via the onSubstep hook passed from sleep()/advance()) ---
 

@@ -440,6 +440,29 @@ function handleHireDriver(driver) {
   return res;
 }
 
+// Fleet command (Phase 12): switching who the player is driving. career.js
+// owns the actual demote/promote/settlement logic (switchActiveTruck) and
+// never touches `trucks` itself; this is the one place that resolves the
+// target truck from its id and updates the camera/details panel, mirroring
+// handleHireDriver's split with confirmHire above.
+//
+// Only state.decisionTruck/contractTruck are worth gating on here - both
+// freeze the whole sim and can currently only reference the career truck,
+// so switching away mid-decision would strand it. The truck-stop overlay
+// is already structurally unreachable while FLEET is open (z-index), so
+// that path needs no check at all.
+function handleSwitchTruck(newTruckId) {
+  if (state.decisionTruck || state.contractTruck) {
+    return { ok: false, reason: "Resolve your current junction/load choice first." };
+  }
+  const newTruck = truckById.get(newTruckId);
+  if (!newTruck) return { ok: false, reason: "That truck is no longer in the fleet." };
+  const oldTruck = getCareerTruck();
+  career.switchActiveTruck(oldTruck, newTruck, state.gameSeconds);
+  followTruck(newTruck);
+  return { ok: true };
+}
+
 function toggleControl() {
   if (career.isActive()) return; // the old spectator Take-Control mechanic is superseded entirely once a career is running
   const followed = getFollowedTruck();
@@ -839,6 +862,7 @@ initCareerUI({
   // the exact same decision panel rather than inventing a second one.
   onRollOut: (waiting) => { if (waiting && waiting.awaitingDecision) showDecisionPanel(waiting); },
   onHireDriver: handleHireDriver,
+  onSwitchTruck: handleSwitchTruck,
 });
 // Autosave on the way out - a career the player forgot to save manually
 // (closing the tab, navigating away) shouldn't just vanish. save() is a
