@@ -167,6 +167,38 @@
     </div>
   </div>
 
+  <!-- Company creation wizard - a separate full-screen overlay from the
+       truck stop above (reuses its shape via the shared .fullscreen-*
+       classes, never the truck-stop element itself). Hidden by default;
+       opened only from the "Set Up My Company" choice below on a fresh
+       career start. -->
+  <div id="wizard-overlay" class="fullscreen-overlay hidden">
+    <div class="fullscreen-header">
+      <div>
+        <div id="wizard-title" class="fullscreen-title">Start Your Company</div>
+        <div id="wizard-step-sub" class="fullscreen-sub"></div>
+      </div>
+      <button id="btn-wizard-close" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&times; Cancel</button>
+    </div>
+    <div id="wizard-tabs" class="fullscreen-tabs"></div>
+    <div id="wizard-content" class="fullscreen-content"></div>
+    <div id="wizard-footer" class="fullscreen-footer">
+      <button id="btn-wizard-back" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&larr; Back</button>
+      <button id="btn-wizard-next" class="pill-btn" style="background:var(--go)">Next &rarr;</button>
+    </div>
+  </div>
+
+  <!-- Fresh-career choice: Quick Start (today's one-tap CAREER behavior,
+       untouched) vs. the wizard above. Never shown for a saved-career
+       reattach, which is unaffected by any of this. -->
+  <div id="career-start-choice" class="hidden">
+    <div class="csc-title">New Career</div>
+    <div class="csc-options">
+      <button id="btn-quick-start" class="pill-btn" style="background:var(--go);width:100%;">Quick Start</button>
+      <button id="btn-setup-company" class="pill-btn" style="background:var(--panel-strong);color:var(--ink);width:100%;">Set Up My Company</button>
+    </div>
+  </div>
+
   <div id="bottom-sheet">
     <div id="sheet-handle"></div>
     <div id="sheet-tabs">

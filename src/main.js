@@ -10,6 +10,7 @@ import { initCB, resetCB, updateCB } from "./cb.js";
 import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
 import * as career from "./career.js";
 import { initCareerUI, updateCareerHud, renderRigTab, renderFleetTab, renderBooksTab, renderWorldTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed } from "./career-ui.js";
+import { initWizardUI, openWizard } from "./wizard-ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 // The load board gets longer than a junction call: picking a haul is a
@@ -463,6 +464,21 @@ function handleSwitchTruck(newTruckId) {
   return { ok: true };
 }
 
+// Company creation wizard's Finish handler - spawns the truck exactly like
+// handleHireDriver already does (a brand-new, otherwise-ordinary Truck at
+// the player's chosen starting city), then runs the same startCareer path
+// Quick Start uses, then layers the wizard's own identity fields on top
+// via career.setupCompany (which overwrites the homeCity startCareer just
+// set, on purpose - see its own doc comment).
+function handleWizardComplete({ companyName, driver, truckHomeCity, homeBaseCity, logo }) {
+  const truck = new Truck(graph, truckHomeCity, Math.random, driver);
+  trucks.push(truck);
+  truckById.set(truck.id, truck);
+  career.startCareer(truck, graph);
+  career.setupCompany(companyName, homeBaseCity, logo);
+  followTruck(truck);
+}
+
 function toggleControl() {
   if (career.isActive()) return; // the old spectator Take-Control mechanic is superseded entirely once a career is running
   const followed = getFollowedTruck();
@@ -863,7 +879,9 @@ initCareerUI({
   onRollOut: (waiting) => { if (waiting && waiting.awaitingDecision) showDecisionPanel(waiting); },
   onHireDriver: handleHireDriver,
   onSwitchTruck: handleSwitchTruck,
+  onOpenWizard: openWizard,
 });
+initWizardUI({ onComplete: handleWizardComplete });
 // Autosave on the way out - a career the player forgot to save manually
 // (closing the tab, navigating away) shouldn't just vanish. save() is a
 // no-op-safe best-effort write (quota/private-mode failures are swallowed

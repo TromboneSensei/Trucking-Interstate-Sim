@@ -1325,3 +1325,125 @@ body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--
 .stat-bar-row.hero { margin-bottom: 14px; }
 .stat-bar-row.hero .stat-bar-label { font-size: 0.82rem; }
 .stat-bar-row.hero .stat-bar { height: 13px; border-radius: 5px; }
+
+/* ---------------------------------------------------------------------
+   Company creation wizard (Phase 12) - its own full-screen overlay
+   (never a repurposing of #truckstop-overlay, which keeps its unrelated
+   job), reusing the exact same shape - header, horizontal step-tabs,
+   scrollable content, footer - as reusable classes so neither overlay
+   duplicates the other's rule bodies. #truckstop-overlay's own markup is
+   untouched; .vendor-tab-btn is shared directly by both tab rows rather
+   than cloned under a second name, since it's genuinely the same
+   "horizontal tab in a fullscreen overlay" component either place.
+   --------------------------------------------------------------------- */
+.fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  background: var(--asphalt);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.fullscreen-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: max(14px, env(safe-area-inset-top)) 16px 12px;
+  background: var(--panel);
+  border-bottom: 2px solid var(--caution);
+}
+.fullscreen-title {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--caution);
+}
+.fullscreen-sub { font-family: var(--font-mono); font-size: 0.76rem; color: var(--dim); margin-top: 2px; }
+.fullscreen-tabs {
+  flex-shrink: 0;
+  display: flex;
+  overflow-x: auto;
+  gap: 2px;
+  padding: 8px 10px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.fullscreen-tabs::-webkit-scrollbar { display: none; }
+.fullscreen-content { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.fullscreen-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 2px solid var(--line);
+}
+
+/* Wizard step content: name input, candidate/logo cards, and the city
+   picker shared by the Truck and Home Base steps (and reused standalone
+   by FLEET's "Change Home Base" setting). */
+.wizard-text-input {
+  width: 100%;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  padding: 11px 12px;
+}
+.wizard-text-input:focus { outline: none; border-color: var(--caution); }
+.city-search-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.city-search-row .wizard-text-input { flex: 1; }
+.city-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
+.city-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-strong);
+  border-left: 3px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.city-row:active { background: #2a3441; }
+.city-row.selected { border-left-color: var(--caution); background: #2a3441; }
+.city-row .city-name { font-weight: 700; font-size: 0.86rem; flex: 1; }
+.city-row .city-tier { font-family: var(--font-mono); font-size: 0.62rem; color: var(--dim); }
+#wizard-footer .pill-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* The tiny "Quick Start vs. Set Up My Company" choice shown on a fresh
+   career start - reuses #decision-overlay's small floating-card geometry
+   (bottom-anchored above the sheet) rather than a second full-screen
+   takeover, since it's a two-button choice, not a multi-step form. */
+#career-start-choice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sheet-visible-h) + 16px);
+  transform: translateX(-50%);
+  width: min(90vw, 360px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 14px 12px 12px;
+  z-index: 8;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+#career-start-choice .csc-title {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--caution);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+#career-start-choice .csc-options { display: flex; flex-direction: column; gap: 8px; }

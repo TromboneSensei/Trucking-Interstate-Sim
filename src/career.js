@@ -1038,6 +1038,43 @@ export function setLogo(color, glyph) {
   pushLog(`Updated the company logo.`);
 }
 
+// ~30% of STARTING_CASH - enough to discourage frivolous renames, well
+// under one medium load's payout, so it's a real but not punishing cost.
+export const RENAME_FEE = 750;
+
+export function renameCompany(name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return { ok: false, reason: "Enter a name first." };
+  if (profile.cash < RENAME_FEE) return { ok: false, reason: `Can't afford it. ($${RENAME_FEE.toLocaleString()})` };
+  profile.cash -= RENAME_FEE;
+  profile.stats.totalSpent += RENAME_FEE;
+  profile.companyName = trimmed;
+  pushLog(`Renamed the company to ${trimmed} for $${RENAME_FEE.toLocaleString()}.`);
+  return { ok: true };
+}
+
+// Free - profile.homeCity is display-only (RIG's "out of X" header line),
+// a wholly different field from truck.homeCity (which Hometown Backhauler
+// actually scores load choices against, fixed at each truck's own spawn) -
+// changing it has zero gameplay effect, so there's no fee to charge.
+export function setHomeBaseCity(city) {
+  profile.homeCity = city;
+  pushLog(`Moved company headquarters to ${city}.`);
+}
+
+// One-time setup at the end of the company creation wizard: sets the three
+// identity fields it collects in a single call, all free (see setLogo's
+// and setHomeBaseCity's own doc comments on why neither costs anything).
+// Deliberately distinct from renameCompany - this is initial setup, not a
+// later change, so it never charges RENAME_FEE.
+export function setupCompany(companyName, homeBaseCity, logo) {
+  const trimmed = (companyName || "").trim();
+  if (trimmed) profile.companyName = trimmed;
+  profile.homeCity = homeBaseCity;
+  if (logo) profile.logo = { color: logo.color, glyph: logo.glyph || null, monogram: logo.monogram || deriveMonogram(profile.companyName || profile.truckName) };
+  pushLog(`${profile.companyName || "The company"} is open for business, headquartered in ${homeBaseCity}.`);
+}
+
 // --- save / load ---------------------------------------------------------
 
 const SAVE_KEY = "interstate-fleet-career-v1";

@@ -13,6 +13,7 @@ import { pumpFuel, estimatedRangeMiles, FATIGUE_RECOVERY_PER_HOUR } from "./flee
 import { generateContractOffers } from "./economy.js";
 import { traitSummary } from "./driver.js";
 import { openTab, preserveScroll } from "./ui.js";
+import { openStandaloneCityPicker } from "./wizard-ui.js";
 
 const careerEl = {
   btnCareer: document.getElementById("btn-career"),
@@ -45,6 +46,9 @@ const careerEl = {
   // (see prevCareerActive below). Never destroyed, only relocated.
   cbFeed: document.getElementById("cb-feed"),
   tabCbHome: document.getElementById("tab-cb"),
+  startChoice: document.getElementById("career-start-choice"),
+  btnQuickStart: document.getElementById("btn-quick-start"),
+  btnSetupCompany: document.getElementById("btn-setup-company"),
 };
 
 // Down from 7 to 5: REST folds Showers+Sleeper (both are "recover" actions),
@@ -60,6 +64,7 @@ let onRollOut = null; // () => void - main.js re-checks for a pending junction d
 let onCareerEnded = null; // () => void - reserved, not fired yet
 let onHireDriver = null; // (driver: DriverDNA) => {ok, reason?} - main.js is the only place that can actually construct a Truck and push it into the live fleet (career.js never touches `trucks`)
 let onSwitchTruck = null; // (truckId) => {ok, reason?} - main.js owns state.decisionTruck/contractTruck (the only thing worth gating on - the truck-stop overlay already makes FLEET structurally unreachable while it's open) and the actual switchActiveTruck + followTruck call
+let onOpenWizard = null; // () => void - opens the company creation wizard (wizard-ui.js); only reachable from the fresh-career (no save) choice card below
 
 let open = false;
 let activeVendor = "FUEL";
@@ -74,6 +79,7 @@ export function initCareerUI(callbacks) {
   onSwitchTruck = callbacks.onSwitchTruck || null;
   onRollOut = callbacks.onRollOut;
   onCareerEnded = callbacks.onCareerEnded || null;
+  onOpenWizard = callbacks.onOpenWizard || null;
 
   careerEl.btnCareer.addEventListener("click", () => {
     if (career.isActive()) {
@@ -88,7 +94,23 @@ export function initCareerUI(callbacks) {
       }
       return;
     }
+    // A saved-career reattach is completely unaffected by any of this - only
+    // the fresh (no-save) branch gets the Quick Start vs. Set Up My Company
+    // choice; onStartCareer itself owns the hasSave()+confirm() reattach
+    // flow already and stays untouched either way.
+    if (career.hasSave()) {
+      if (onStartCareer) onStartCareer();
+      return;
+    }
+    careerEl.startChoice.classList.remove("hidden");
+  });
+  careerEl.btnQuickStart.addEventListener("click", () => {
+    careerEl.startChoice.classList.add("hidden");
     if (onStartCareer) onStartCareer();
+  });
+  careerEl.btnSetupCompany.addEventListener("click", () => {
+    careerEl.startChoice.classList.add("hidden");
+    if (onOpenWizard) onOpenWizard();
   });
   careerEl.careerStatus.addEventListener("click", () => {
     if (career.isActive()) openTab("rig");
@@ -174,6 +196,20 @@ export function initCareerUI(callbacks) {
       const color = cur?.color || career.LOGO_PALETTE[0].color;
       career.setLogo(color, btn.dataset.arg || null);
       renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "rename-company") {
+      const input = document.getElementById("fleet-rename-input");
+      const res = career.renameCompany(input ? input.value : "");
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "change-home-base") {
+      openStandaloneCityPicker({
+        title: "Home Base",
+        currentCity: career.getProfile().homeCity,
+        onSelect: (city) => {
+          career.setHomeBaseCity(city);
+          renderFleetTab(career.getProfile(), lastTruckById);
+        },
+      });
     }
   });
 
@@ -1005,6 +1041,28 @@ function renderLogoPickerSection(profile) {
     </div>`;
 }
 
+// Rename costs RENAME_FEE (career.js: enough to discourage frivolous
+// changes, well under one medium load's payout); Home Base is free -
+// confirmed zero gameplay effect (see career.js's setHomeBaseCity doc
+// comment), so there's nothing to charge a fee against.
+function renderCompanySettingsSection(profile) {
+  return `
+    <div class="section-label">Company Settings</div>
+    <div class="vendor-grid">
+      <div class="vendor-item" style="cursor:default;">
+        <span class="v-name">Rename Company</span>
+        <input type="text" id="fleet-rename-input" class="wizard-text-input" style="margin-top:6px;" placeholder="${profile.companyName || "Company name"}" maxlength="40">
+        <span class="v-meta" style="margin-top:8px;justify-content:flex-start;">
+          <button class="pill-btn" data-action="rename-company" style="background:var(--caution);color:var(--caution-ink);padding:6px 12px;font-size:0.68rem;">Rename &mdash; $${career.RENAME_FEE.toLocaleString()}</button>
+        </span>
+      </div>
+      <button class="vendor-item" data-action="change-home-base">
+        <span class="v-name">Home Base</span>
+        <span class="v-desc">${profile.homeCity || "Not set"} &bull; free to change</span>
+      </button>
+    </div>`;
+}
+
 export function renderFleetTab(profile, truckById) {
   if (truckById) lastTruckById = truckById; else truckById = lastTruckById;
   if (!profile.active) {
@@ -1075,6 +1133,7 @@ export function renderFleetTab(profile, truckById) {
       ${hiredHtml}
       ${renderHiringSection()}
       ${renderLogoPickerSection(profile)}
+      ${renderCompanySettingsSection(profile)}
     `;
   });
 }
