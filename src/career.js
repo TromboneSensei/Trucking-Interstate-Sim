@@ -228,23 +228,34 @@ function levelForXp(xp) {
 // purchase with a real second effect, not the same flag twice.
 export const UPGRADES = {
   ENGINE: { label: "Engine", field: "engine", maxTier: 3, costs: [1500, 3000, 5000], levelReq: [1, 3, 6] },
-  TIRES: { label: "Tires", field: "tires", maxTier: 3, costs: [700, 1500, 2500], levelReq: [1, 2, 4] },
-  SLEEPER: { label: "Sleeper Bunk", field: "sleeper", maxTier: 3, costs: [1000, 2000, 3200], levelReq: [1, 3, 5] },
+  // Tires' wear-reduction used to compound against repairCost's own quadratic
+  // curve into a much bigger real-dollar benefit than the -45%/$4,700 sticker
+  // suggested - cut both the per-tier price break and the per-tier effect.
+  TIRES: { label: "Tires", field: "tires", maxTier: 3, costs: [900, 1900, 3200], levelReq: [1, 2, 4] },
+  // Sleeper Bunk tier 3 + APU used to stack to a 2.01x restMult for $8,600 -
+  // close to halving fatigue management outright for under 5 loads' cash.
+  // Slower per-tier costs/effects here; APU's own price+effect below.
+  SLEEPER: { label: "Sleeper Bunk", field: "sleeper", maxTier: 3, costs: [1200, 2600, 4200], levelReq: [1, 3, 5] },
   AERO: { label: "Aero Kit", field: "aero", maxTier: 1, costs: [1800], levelReq: [2] },
   TANK: { label: "Big Tank", field: "tank", maxTier: 1, costs: [2000], levelReq: [2] },
-  APU: { label: "Auxiliary Power Unit", field: "apu", maxTier: 1, costs: [2400], levelReq: [3] },
-  RADAR: { label: "Scanner Suite", field: "radarTier2", maxTier: 1, costs: [2200], levelReq: [3], requires: "radar", requiresLabel: "the Radar Detector (Store)" },
+  APU: { label: "Auxiliary Power Unit", field: "apu", maxTier: 1, costs: [3200], levelReq: [3] },
+  // Scanner Suite's price/effect rebalanced alongside the Store's basic
+  // Radar Detector below - see RADAR_TIER2_TICKET_MULT/RADAR_TIER2_DUI_MULT.
+  RADAR: { label: "Scanner Suite", field: "radarTier2", maxTier: 1, costs: [3600], levelReq: [3], requires: "radar", requiresLabel: "the Radar Detector (Store)" },
 };
 export const TANK_UPGRADE_CAPACITY_BONUS = 40; // +40% over the stock 100-unit tank
-// Radar Detector (Store, $180 - profile.upgrades.radar) is the basic tier.
-// Scanner Suite (Mechanic, $2,200 - profile.upgrades.radarTier2, requires
+// Radar Detector (Store, $220 - profile.upgrades.radar) is the basic tier.
+// Scanner Suite (Mechanic, $3,600 - profile.upgrades.radarTier2, requires
 // the basic one already owned) is strictly better and supersedes it -
 // tickNeeds/buyStoreItem below check radarTier2 first, falling back to the
-// basic mult only when it isn't owned.
+// basic mult only when it isn't owned. The full stack used to cost $2,380
+// for a ~75%/70% ticket/DUI cut - close to erasing HAMMER's only real
+// deterrent for 1-2 loads' cash. Rebalanced to $3,820 for ~55%, still the
+// best deterrent-softener in the game, no longer near-total.
 export const RADAR_TICKET_MULT = 0.55;
 export const RADAR_DUI_MULT = 0.5;
-export const RADAR_TIER2_TICKET_MULT = 0.25;
-export const RADAR_TIER2_DUI_MULT = 0.3;
+export const RADAR_TIER2_TICKET_MULT = 0.45;
+export const RADAR_TIER2_DUI_MULT = 0.45;
 
 function upgradeTier(def) {
   const v = profile.upgrades[def.field];
@@ -285,14 +296,21 @@ export function buyUpgrade(truck, key) {
 // CAFFEINE / FOOD / BOOZE / GEAR - a flat 15-item grid otherwise makes the
 // player scroll past everything to find one thing.
 export const STORE_ITEMS = {
-  COFFEE: { label: "Coffee", price: 3, cat: "CAFFEINE", immediate: { fatigue: -18 }, buffHours: 3, effects: {} },
-  BOTTOMLESS_CUP: { label: "Bottomless Cup", price: 5, cat: "CAFFEINE", immediate: { fatigue: -30 }, buffHours: 4, effects: {} },
+  // Coffee/Bottomless Cup used to share the same fatigue-per-dollar rate, so
+  // Cup strictly dominated Coffee for $2 more with zero downside on either -
+  // Coffee is now the best $/relief no-frills staple, Cup a real (if small)
+  // sustained effect during its buff instead of just "more coffee."
+  COFFEE: { label: "Coffee", price: 3, cat: "CAFFEINE", immediate: { fatigue: -20 }, buffHours: 3, effects: {} },
+  BOTTOMLESS_CUP: { label: "Bottomless Cup", price: 5, cat: "CAFFEINE", immediate: { fatigue: -28 }, buffHours: 4, effects: { fatigueMult: 0.95 } },
   ENERGY_DRINK: {
     label: "Energy Drink", price: 6, cat: "CAFFEINE", immediate: { fatigue: -35 }, buffHours: 4,
     effects: { speedMult: 1.06 }, crash: { fatigue: 20 },
   },
+  // Was priced UNDER Motel ($60, full fatigue clear + morale/hunger) despite
+  // being spammable with no cooldown - now correctly the pricier "emergency,
+  // no stop needed" option rather than a strictly-better default.
   TRUCKERS_CHOICE: {
-    label: "Trucker's Choice", price: 40, cat: "CAFFEINE", repMin: 10, immediate: { fatigue: -70, health: -4, heat: 8 }, buffHours: 9,
+    label: "Trucker's Choice", price: 85, cat: "CAFFEINE", repMin: 10, immediate: { fatigue: -70, health: -4, heat: 8 }, buffHours: 9,
     effects: {}, crash: { fatigue: 45 },
   },
   JERKY: { label: "Beef Jerky", price: 5, cat: "FOOD", immediate: { hunger: 22, morale: 3 } },
@@ -307,7 +325,7 @@ export const STORE_ITEMS = {
     effects: { fatigueMult: 0.75 }, dui: 0.7,
   },
   CIGARETTES: { label: "Cigarettes", price: 9, cat: "BOOZE", immediate: { morale: 8, health: -2 } },
-  RADAR_DETECTOR: { label: "Radar Detector", price: 180, cat: "GEAR", permanent: "radar", immediate: {} },
+  RADAR_DETECTOR: { label: "Radar Detector", price: 220, cat: "GEAR", permanent: "radar", immediate: {} },
   ROAD_ATLAS: { label: "Road Atlas", price: 25, cat: "GEAR", permanent: "atlas", immediate: {} },
   AUDIOBOOK: { label: "Audiobook", price: 15, cat: "GEAR", permanent: "audiobook", immediate: { morale: 5 } },
   SLEEP_AID: { label: "Sleep Aid", price: 12, cat: "GEAR", immediate: {}, buffHours: 10, effects: { restMult: 1.3 } },
@@ -386,9 +404,9 @@ export function createAgent(truck, profile) {
       const up = profile.upgrades;
       if (up.engine >= 1) speedMult *= 1 + up.engine * 0.02;
       if (up.aero) burnMult *= 0.9;
-      if (up.tires >= 1) wearMult *= 1 - up.tires * 0.15;
-      if (up.sleeper >= 1) restMult *= 1 + up.sleeper * 0.25;
-      if (up.apu) restMult *= 1.15; // Auxiliary Power Unit - idle-free climate control, better sleep quality
+      if (up.tires >= 1) wearMult *= 1 - up.tires * 0.10;
+      if (up.sleeper >= 1) restMult *= 1 + up.sleeper * 0.15;
+      if (up.apu) restMult *= 1.10; // Auxiliary Power Unit - idle-free climate control, better sleep quality
       // Active buffs
       for (const b of profile.buffs) {
         const e = b.effects || {};

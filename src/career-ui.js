@@ -454,7 +454,16 @@ function summarizeEffects(item) {
     if (item.immediate.morale) bits.push(`+${item.immediate.morale} morale`);
   }
   if (item.buffHours) bits.push(`${item.buffHours}h buff`);
+  // A buff's sustained effects (fatigueMult/speedMult) and its expiry crash
+  // used to be entirely invisible here - Energy Drink's and Trucker's
+  // Choice's crash risk, and now Bottomless Cup's small sustained relief,
+  // were all silently dropped from the shop listing despite being real.
+  if (item.effects) {
+    if (item.effects.fatigueMult) bits.push(`-${Math.round((1 - item.effects.fatigueMult) * 100)}% fatigue buildup`);
+    if (item.effects.speedMult) bits.push(`+${Math.round((item.effects.speedMult - 1) * 100)}% speed`);
+  }
   if (item.dui) bits.push(`DUI risk`);
+  if (item.crash?.fatigue) bits.push(`crash: +${item.crash.fatigue} fatigue on wear-off`);
   return bits.join(" &bull; ") || "&nbsp;";
 }
 
@@ -553,11 +562,11 @@ function renderMechanic() {
 // actually do.
 const UPGRADE_EFFECT = {
   ENGINE: () => "+2% cruise speed per tier",
-  TIRES: () => "−15% wear buildup per tier",
-  SLEEPER: () => "+25% rest recovery per tier",
+  TIRES: () => "−10% wear buildup per tier",
+  SLEEPER: () => "+15% rest recovery per tier",
   AERO: () => "−10% fuel burn",
   TANK: () => `+${career.TANK_UPGRADE_CAPACITY_BONUS}% fuel capacity`,
-  APU: () => "+15% rest recovery (stacks with Sleeper Bunk)",
+  APU: () => "+10% rest recovery (stacks with Sleeper Bunk)",
   // Tier 2 - strictly better than (and requires) the Store's own $180
   // Radar Detector, which stays at its own -45%/-50% (see the Store's
   // GEAR category). Buying both is a real upgrade path, not the same
