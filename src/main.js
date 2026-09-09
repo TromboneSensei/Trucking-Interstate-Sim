@@ -7,9 +7,9 @@ import { renderStaticBackground, renderCityGlow, buildEdgeList, drawFrame, truck
 import { createWeather, updateWeather } from "./weather.js";
 import { chooseOffer } from "./economy.js";
 import { initCB, resetCB, updateCB } from "./cb.js";
-import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab } from "./ui.js";
+import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityDetails, renderDispatchTab, renderRankingsTab, renderEconomyTab, resetUIState, visibleTab, setSheetMinimized } from "./ui.js";
 import * as career from "./career.js";
-import { initCareerUI, updateCareerHud, renderRigTab, renderFleetTab, renderBooksTab, renderWorldTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed } from "./career-ui.js";
+import { initCareerUI, updateCareerHud, renderRigTab, renderFleetTab, renderBooksTab, renderWorldTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed, isCareerUIActive, setCommandTabMode } from "./career-ui.js";
 import { initWizardUI, openWizard } from "./wizard-ui.js";
 
 const DECISION_TIMEOUT = 11; // seconds
@@ -18,6 +18,14 @@ const DECISION_TIMEOUT = 11; // seconds
 // chooseOffer() would have picked for it, so an unattended sim never stalls.
 const CONTRACT_TIMEOUT = 20; // seconds
 const TAP_TOLERANCE_PX = 26;
+// Junction/load decisions used to hard-freeze the whole fleet (state.paused
+// skipped updateFleet entirely) while the panel was up. The truck actually
+// asking for input was already independently frozen regardless (fleet.js
+// gates its own movement/decision-generation phases on truck.awaitingDecision/
+// awaitingContract, not on timeScale) - so the full freeze only ever bought
+// camera stillness for the other 9,999 trucks, at the cost of the whole
+// world visibly stopping. Bullet time keeps it breathing at a crawl instead.
+const BULLET_TIME_SCALE = 0.05;
 
 // Settings-panel defaults - also what the form resets to on first open.
 // Everything here is applied at (re)boot time via bootSim(); nothing
@@ -49,6 +57,7 @@ const el = {
   speedPopover: document.getElementById("speed-popover"),
   speedPresets: document.getElementById("speed-presets"),
   btnNavToggle: document.getElementById("btn-nav-toggle"),
+  btnModeToggle: document.getElementById("btn-mode-toggle"),
   decisionOverlay: document.getElementById("decision-overlay"),
   decisionOptions: document.getElementById("decision-options"),
   decisionTimerFill: document.getElementById("decision-timer-fill"),
@@ -148,6 +157,9 @@ const state = {
   // player decision, armed explicitly via the details panel's Take
   // Control button.
   controlledTruckId: null,
+  // Cockpit (driving, the default) vs. Command (fleet management) - only
+  // meaningful while a career is active; see applyCommandMode/btnModeToggle.
+  commandMode: false,
   // What the Unit tab is currently showing - independent of
   // followedTruckId/controlledTruckId, so tapping a city to inspect it
   // doesn't get silently clobbered back to truck stats by the followed
@@ -374,6 +386,38 @@ function unfollow() {
   camera.unfollow();
   el.btnNavToggle.classList.add("hidden");
 }
+
+// Cockpit/Command mode - the Micro/Macro split. Cockpit is the ordinary
+// driving experience (unchanged: FOLLOW camera on the career truck, RIG tab
+// available). Command zooms the camera out to a whole-map view and pulls
+// RIG out of the sheet's tab set (career-ui.js's setCommandTabMode),
+// leaving FLEET/BOOKS/WORLD - a fleet-management view rather than a second
+// driving view. Switching trucks (career.switchActiveTruck, wired
+// elsewhere) still works from FLEET while in Command Mode.
+function applyCommandMode() {
+  el.btnModeToggle.classList.toggle("active", state.commandMode);
+  el.btnModeToggle.textContent = state.commandMode ? "\u{1F69B} COCKPIT" : "\u{1F4E1} COMMAND";
+  setCommandTabMode(state.commandMode);
+  if (state.commandMode) {
+    camera.unfollow();
+    camera.mode = "FREE";
+    const ct = getCareerTruck();
+    if (ct) {
+      const p = truckWorldPos(graph, ct);
+      camera.x = p.x;
+      camera.y = p.y;
+    }
+    camera.zoom = fitZoom(); // same "whole map, room for the sheet" framing the app boots into
+    setSheetMinimized(false); // expand so FLEET/BOOKS/WORLD are actually visible, not peeking
+  } else {
+    const ct = getCareerTruck();
+    if (ct) followTruck(ct); // restores the ordinary FOLLOW camera + details panel, same as tapping the truck
+  }
+}
+el.btnModeToggle.addEventListener("click", () => {
+  state.commandMode = !state.commandMode;
+  applyCommandMode();
+});
 el.dailyDigest.addEventListener("click", hideDigest);
 el.payrollAlert.addEventListener("click", hidePayroll);
 
@@ -585,6 +629,10 @@ function showDecisionPanel(truck) {
   state.paused = true;
   state.decisionTruck = truck;
   state.decisionTimer = DECISION_TIMEOUT;
+  // The bottom sheet, if expanded, otherwise crowds the same screen real
+  // estate this panel needs - collapse it so the two never stack (matches
+  // showContractPanel below).
+  setSheetMinimized(true);
 
   el.decisionOptions.innerHTML = "";
   // rankAndCapOptions puts the truck's own planned next edge first, so
@@ -641,6 +689,7 @@ function showContractPanel(truck) {
   state.paused = true;
   state.contractTruck = truck;
   state.contractTimer = CONTRACT_TIMEOUT;
+  setSheetMinimized(true); // see showDecisionPanel's comment - never stack over an expanded sheet
 
   el.contractCity.textContent = truck.parkedAt || "";
   el.contractOptions.innerHTML = "";
@@ -933,8 +982,8 @@ initCareerUI({
   // this side just needs to let go of the camera the same way tapping off
   // a truck already does. Resuming re-follows the career truck, mirroring
   // what starting a career or switching trucks already does.
-  onBackToMap: unfollow,
-  onResumeCareerUI: () => { const ct = getCareerTruck(); if (ct) followTruck(ct); },
+  onBackToMap: () => { state.commandMode = false; setCommandTabMode(false); unfollow(); },
+  onResumeCareerUI: () => { state.commandMode = false; setCommandTabMode(false); const ct = getCareerTruck(); if (ct) followTruck(ct); },
 });
 initWizardUI({ onComplete: handleWizardComplete });
 // Autosave on the way out - a career the player forgot to save manually
@@ -977,49 +1026,30 @@ function frame(now) {
   }
 
   try {
-    // Freeze precedence, most-exclusive first - exactly one branch below
-    // ever runs per frame. truckStopOpen wins over everything: it's a
-    // full-screen takeover (z-index above the map/sheet/settings, only
-    // #fatal-error sits higher), and its own actions (buy/eat/sleep/roll
-    // out) are what advance time while it's up - see career-ui.js and
-    // career.js's advanceTime. `paused` (junction/load decision) and
-    // `settingsOpen` are unchanged from before career mode existed,
-    // except the decision-timeout branch now also checks whether the
-    // truck waiting is the player's own career truck, which never
-    // auto-times-out (a career player is never resolved against their
-    // will - see the `isCareerDecision` check below).
+    // Freeze precedence, most-exclusive first. truckStopOpen wins over
+    // everything: it's a full-screen takeover (z-index above the
+    // map/sheet/settings, only #fatal-error sits higher), and its own
+    // actions (buy/eat/sleep/roll out) are what advance time while it's up
+    // - see career-ui.js and career.js's advanceTime. `settingsOpen` is a
+    // real hard freeze too - the settings form isn't meant to be watched
+    // live against a moving world. A junction/load decision (`state.paused`)
+    // is NOT a freeze any more - see BULLET_TIME_SCALE above - so it shares
+    // this same branch rather than getting its own. The decision-timeout
+    // logic below also checks whether the truck waiting is the player's own
+    // career truck, which never auto-times-out (a career player is never
+    // resolved against their will - see the `isCareerDecision` check).
     if (isTruckStopOpen()) {
       // Nothing to do - see the comment above.
-    } else if (state.paused) {
-      if (state.contractTruck) {
-        // Can never be the career truck (career mode's own delivery flow
-        // never sets awaitingContract - see fleet.js's _arriveAtDestination
-        // agent branch), so this timeout is unconditionally safe as-is.
-        state.contractTimer -= dt;
-        el.contractTimerFill.style.width = Math.max(0, state.contractTimer / CONTRACT_TIMEOUT) * 100 + "%";
-        if (state.contractTimer <= 0) {
-          // Timed out: fall back to the driver's own preference rather than
-          // just grabbing offer[0], so an unattended truck still behaves in
-          // character.
-          const t = state.contractTruck;
-          resolveContract(chooseOffer(t.pendingOffers, t, graph) || t.pendingOffers[0]);
-        }
-      } else {
-        const isCareerDecision = career.isActive() && state.decisionTruck === getCareerTruck();
-        if (isCareerDecision) {
-          el.decisionTimerFill.style.width = "100%"; // shown full/inert rather than left stale at whatever it last was
-        } else {
-          state.decisionTimer -= dt;
-          const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
-          el.decisionTimerFill.style.width = pct + "%";
-          if (state.decisionTimer <= 0 && state.decisionTruck) {
-            resolveDecision(state.decisionTruck.pendingOptions[0]);
-          }
-        }
-      }
     } else if (!state.settingsOpen) {
-      state.gameSeconds += dt * BASE_TIME_SCALE * state.timeScale;
-      const gameHours = (dt * BASE_TIME_SCALE * state.timeScale) / 3600;
+      // state.paused now means "a decision/contract panel is up," not "the
+      // sim is frozen" - see BULLET_TIME_SCALE's comment above. The truck
+      // actually waiting on input stays put regardless (fleet.js's own
+      // awaitingDecision/awaitingContract gate), so slowing everyone else to
+      // a crawl instead of stopping them dead is safe.
+      const deciding = state.paused;
+      const effectiveTimeScale = deciding ? BULLET_TIME_SCALE : state.timeScale;
+      state.gameSeconds += dt * BASE_TIME_SCALE * effectiveTimeScale;
+      const gameHours = (dt * BASE_TIME_SCALE * effectiveTimeScale) / 3600;
       if (settings.showWeather) updateWeather(weather, gameHours);
       // Everything the simulation needs to know about the world outside
       // the trucks themselves. Passed fresh each tick rather than held in
@@ -1035,7 +1065,7 @@ function frame(now) {
       // updateFleet returns whichever truck needs the player: a junction
       // choice mid-route, or a load choice at the end of a layover. The
       // truck's own flags say which.
-      const waiting = updateFleet(graph, trucks, dt, state.timeScale, getControlledTruck(), env);
+      const waiting = updateFleet(graph, trucks, dt, effectiveTimeScale, getControlledTruck(), env);
       if (waiting && waiting.awaitingContract) showContractPanel(waiting);
       else if (waiting) showDecisionPanel(waiting);
       sampleEconomy();
@@ -1065,10 +1095,45 @@ function frame(now) {
           }
         }
       }
+
+      // Decision/contract timers count down in real (unscaled) time,
+      // independent of bullet time - a slow-mo world shouldn't also mean a
+      // slow-mo countdown to auto-resolve.
+      if (state.contractTruck) {
+        // Can never be the career truck (career mode's own delivery flow
+        // never sets awaitingContract - see fleet.js's _arriveAtDestination
+        // agent branch), so this timeout is unconditionally safe as-is.
+        state.contractTimer -= dt;
+        el.contractTimerFill.style.width = Math.max(0, state.contractTimer / CONTRACT_TIMEOUT) * 100 + "%";
+        if (state.contractTimer <= 0) {
+          // Timed out: fall back to the driver's own preference rather than
+          // just grabbing offer[0], so an unattended truck still behaves in
+          // character.
+          const t = state.contractTruck;
+          resolveContract(chooseOffer(t.pendingOffers, t, graph) || t.pendingOffers[0]);
+        }
+      } else if (state.decisionTruck) {
+        const isCareerDecision = career.isActive() && state.decisionTruck === getCareerTruck();
+        if (isCareerDecision) {
+          el.decisionTimerFill.style.width = "100%"; // shown full/inert rather than left stale at whatever it last was
+        } else {
+          state.decisionTimer -= dt;
+          const pct = Math.max(0, state.decisionTimer / DECISION_TIMEOUT) * 100;
+          el.decisionTimerFill.style.width = pct + "%";
+          if (state.decisionTimer <= 0 && state.decisionTruck) {
+            resolveDecision(state.decisionTruck.pendingOptions[0]);
+          }
+        }
+      }
     }
 
     if (isTruckStopOpen()) refreshTruckStop(state.gameSeconds);
     updateCareerHud(career.getProfile(), getCareerTruck(), state.gameSeconds);
+    // Mirrors career-status's own visibility (career-ui.js's isCareerUIActive) -
+    // the toggle only makes sense while the career HUD/tabs are actually on
+    // screen. Backgrounding (Back to Map) already resets commandMode itself
+    // (onBackToMap above), so this only ever needs to hide/show the button.
+    el.btnModeToggle.classList.toggle("hidden", !isCareerUIActive());
 
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";

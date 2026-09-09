@@ -24,7 +24,6 @@ const careerEl = {
   careerStatusCash: document.getElementById("career-status-cash"),
   careerStatusFuel: document.getElementById("career-status-fuel"),
   careerStatusFatigue: document.getElementById("career-status-fatigue"),
-  careerStatusDest: document.getElementById("career-status-dest"),
   careerStatusHotshot: document.getElementById("career-status-hotshot"),
   careerStatusHeat: document.getElementById("career-status-heat"),
   overlay: document.getElementById("truckstop-overlay"),
@@ -946,6 +945,12 @@ function toastNow(text) {
 let lastHudTruck = null; // refreshed every frame regardless of which tab is open - RIG's throttle/PULL IN handlers need a reference that's never stale
 let lastKnownGameSeconds = 0; // ditto - BOOKS/FLEET's settlement countdown falls back to this when a click-triggered re-render doesn't have gameSeconds on hand
 let prevCareerActive = false; // edge-detects the active flip, for the tab-set swap fallback and the CB-feed reparent-back-on-end below
+let careerUIActive = false; // mirrors updateCareerHud's own `active` local - main.js reads this to gate the Cockpit/Command toggle's visibility
+
+// main.js's Cockpit/Command toggle needs the exact same "career is running
+// AND not backgrounded" visibility rule the status bar itself uses, without
+// duplicating uiBackgrounded's logic in a second module.
+export function isCareerUIActive() { return careerUIActive; }
 
 export function updateCareerHud(profile, truck, gameSeconds) {
   lastHudTruck = truck;
@@ -956,6 +961,7 @@ export function updateCareerHud(profile, truck, gameSeconds) {
   // Back to Map - career.isActive()/profile.active themselves never
   // reflect this, on purpose (see uiBackgrounded's own doc comment).
   const active = profile.active && !uiBackgrounded;
+  careerUIActive = active;
   careerEl.btnBackToMap.classList.toggle("hidden", !active);
   // Stronger mode-shift: career mode was visually just "spectator mode
   // plus a HUD strip" - the status bar/#btn-career.active already use
@@ -1001,12 +1007,14 @@ export function updateCareerHud(profile, truck, gameSeconds) {
   careerEl.careerStatusCash.textContent = "$" + Math.round(profile.cash).toLocaleString();
   careerEl.careerStatusCash.style.color = profile.cash < 0 ? "var(--stop)" : "var(--go)";
   const fuelPct = Math.round(truck.fuel);
-  careerEl.careerStatusFuel.textContent = `FUEL ${fuelPct}%`;
+  careerEl.careerStatusFuel.textContent = `⛽ ${fuelPct}%`;
   careerEl.careerStatusFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
   const fatiguePct = Math.round(truck.fatigue);
-  careerEl.careerStatusFatigue.textContent = `FATIGUE ${fatiguePct}%`;
+  careerEl.careerStatusFatigue.textContent = `\u{1F634} ${fatiguePct}%`;
   careerEl.careerStatusFatigue.style.color = fatiguePct > 70 ? "var(--stop)" : fatiguePct > 40 ? "var(--caution)" : "var(--ink)";
-  careerEl.careerStatusDest.textContent = truck.contract && truck.edge ? `→ ${truck.contract.destination}` : truck.parkedAt || "";
+  // Destination used to live here too ("→ Ellensburg"), crowding a mobile-
+  // width bar - it's permanent in the RIG tab's own header, one tap away,
+  // so this bar stays icons-only: fuel/fatigue/hotshot/heat.
   const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
   careerEl.careerStatusHotshot.classList.toggle("hidden", !hotshot);
   if (hotshot) {
@@ -1018,6 +1026,20 @@ export function updateCareerHud(profile, truck, gameSeconds) {
   // actually looking. Shown once it's high enough to matter (tickNeeds'
   // own ticket-chance roll only starts above 40).
   careerEl.careerStatusHeat.classList.toggle("hidden", profile.heat <= 40);
+}
+
+// Cockpit/Command tab-set filter - Command Mode pulls RIG (driving-only
+// content) out of the career tab set entirely, leaving FLEET/BOOKS/WORLD -
+// the fleet-management view. Cockpit Mode (the default) restores it. Only
+// meaningful once the career tab set is already showing (updateCareerHud's
+// spectator<->career swap above is unrelated and unaffected).
+export function setCommandTabMode(commandActive) {
+  const rigBtn = document.querySelector('.tab-btn[data-tab="rig"]');
+  if (!rigBtn) return;
+  rigBtn.classList.toggle("hidden", commandActive);
+  // Entering Command while RIG was the open tab would otherwise strand the
+  // sheet on a tab that just went hidden.
+  if (commandActive && rigBtn.classList.contains("active")) openTab("fleet");
 }
 
 // Remaining distance to the truck's contract destination: the tail of

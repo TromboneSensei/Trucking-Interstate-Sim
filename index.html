@@ -27,12 +27,16 @@
     <button id="career-status" class="hidden" title="Open your rig">
       <span id="career-status-cash">$0</span>
       <span class="divider">/</span>
-      <span id="career-status-fuel">FUEL 0%</span>
-      <span id="career-status-fatigue">FATIGUE 0%</span>
-      <span id="career-status-dest"></span>
+      <span id="career-status-fuel" title="Fuel">&#9981; 0%</span>
+      <span id="career-status-fatigue" title="Fatigue">&#128564; 0%</span>
       <span id="career-status-hotshot" class="hidden"></span>
-      <span id="career-status-heat" class="hidden">&#128680; HEAT</span>
+      <span id="career-status-heat" class="hidden" title="Police heat">&#128680;</span>
     </button>
+    <!-- Cockpit/Command toggle - only ever shown while a career is active
+         (see updateCareerHud). Cockpit is the default driving view;
+         Command zooms the camera out and swaps the sheet to the
+         fleet-management tabs (FLEET/BOOKS/WORLD), hiding RIG. -->
+    <button id="btn-mode-toggle" class="pill-btn hidden" title="Switch between driving and managing your fleet">&#128665; COMMAND</button>
   </div>
 
   <button id="btn-settings" title="Settings">&#9881;</button>

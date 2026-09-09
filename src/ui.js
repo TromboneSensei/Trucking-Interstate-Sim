@@ -171,7 +171,7 @@ function syncSheetVars() {
   style.setProperty("--sheet-visible-h", el.sheet.classList.contains("minimized") ? SHEET_PEEK_PX + "px" : open);
 }
 
-function setSheetMinimized(minimized) {
+export function setSheetMinimized(minimized) {
   el.sheet.classList.toggle("minimized", minimized);
   syncSheetVars();
   // Expanding reveals a panel that hasn't been refreshed while it was

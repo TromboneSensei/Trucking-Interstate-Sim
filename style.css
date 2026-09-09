@@ -149,6 +149,10 @@ html, body {
    chip/tab "currently selected" convention used elsewhere. */
 #btn-nav-toggle { background: var(--panel-strong); color: var(--ink); }
 #btn-nav-toggle.active { background: var(--caution); color: var(--caution-ink); }
+/* Cockpit/Command toggle - neutral (Cockpit, the default driving view) vs.
+   --go (Command, matching career mode's own "you're in charge" accent). */
+#btn-mode-toggle { background: var(--panel-strong); color: var(--ink); }
+#btn-mode-toggle.active { background: var(--go); color: #06210f; }
 .hidden { display: none !important; }
 
 /* Settings gear - top-right, outside #hud's centered flex column so it
@@ -310,18 +314,33 @@ html, body {
    shields: blue field, red cap band, bold white route number - the one
    piece of genuine interactivity in the sim gets the most on-brand prop.
 --------------------------------------------------------------------- */
+/* GPS-style slide-in from the top-right, below the settings/speed corner
+   buttons, rather than a dead-center takeover - it no longer needs to sit
+   above the bottom sheet (main.js's showDecisionPanel now minimizes the
+   sheet itself, so the two never compete for the same space) and reads
+   more like a nav unit's route prompt than a modal dialog. Bullet time
+   (main.js's BULLET_TIME_SCALE) is what makes this non-blocking framing
+   honest - the world is still moving, just slowly, while it's up. */
 #decision-overlay {
   position: fixed;
-  left: 50%;
-  bottom: calc(var(--sheet-visible-h) + 16px);
-  transform: translateX(-50%);
-  width: min(92vw, 480px);
+  top: calc(max(10px, env(safe-area-inset-top)) + 90px);
+  right: max(10px, env(safe-area-inset-right));
+  left: auto;
+  bottom: auto;
+  width: min(88vw, 320px);
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 14px 12px 12px;
   z-index: 8;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  animation: gps-slide-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes gps-slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 #decision-title {
   font-family: var(--font-display);
@@ -1167,7 +1186,14 @@ body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--
   position: fixed;
   inset: 0;
   z-index: 11;
-  background: var(--asphalt);
+  /* Translucent + blurred rather than the old solid --asphalt: fast-
+     forward (career.js's advanceHours, used by Sleep/Wait/etc.) keeps
+     ticking drawFrame underneath while this is up, so the player can watch
+     the day/night cycle and AI traffic keep moving behind the vendor menus
+     instead of the world visually vanishing while time passes. */
+  background: rgba(15, 20, 28, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   flex-direction: column;
   animation: detail-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);

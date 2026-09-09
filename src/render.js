@@ -213,6 +213,13 @@ const headlightPts = [];
 const COMPANY_BEACON_RADIUS = 6; // world units - scales with zoom like a truck's own dot; see the draw site for the low-zoom floor that keeps it visible zoomed out
 const COMPANY_BEACON_BUMP = 1.2; // 20% bigger than the plain world-scaled size
 const companyBeaconPts = [];
+// One status code per beacon point (same index/2), read off the truck at
+// collection time: "disabled" (broken down/dry tank) beats "parked"
+// (idle, no load) beats "hauling" (moving with somewhere to be) - lets the
+// player manage dispatch visually in Command Mode instead of reading the
+// FLEET tab roster.
+const companyBeaconStatus = [];
+const COMPANY_BEACON_STATUS_COLOR = { hauling: "#3f9e6c", parked: "#e8a33d", disabled: "#d1494a" };
 
 // Multiples of camera.baseZoom at which each additional tier of city
 // labels comes into view. Tier 1 is visible from the spawn/fit zoom
@@ -1686,6 +1693,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     && darkAtMid > 0.22 && roadDetailFactor(camera) >= 1;
   headlightPts.length = 0;
   companyBeaconPts.length = 0;
+  companyBeaconStatus.length = 0;
   const company = renderOpts.company || null;
 
   const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
@@ -1752,7 +1760,10 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // regardless of which id shape it happens to carry. Computed
     // regardless of isArrowedSelected, so the followed truck still gets
     // its own beacon while nav mode is drawing it as a directional arrow.
-    if (company && company.truckIds.has(truck.id)) companyBeaconPts.push(p.x, p.y);
+    if (company && company.truckIds.has(truck.id)) {
+      companyBeaconPts.push(p.x, p.y);
+      companyBeaconStatus.push(truck.disabledHoursLeft > 0 ? "disabled" : truck.parkedAt ? "parked" : "hauling");
+    }
   }
 
   // One path, one fill, for every headlight on screen - the whole reason
@@ -1849,8 +1860,10 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // keyed by exact px and font size here tracks continuously-variable
     // zoom, so caching it would just leak an ever-growing Map.
     ctx.font = `600 ${(beaconFontScreenPx / camera.zoom).toFixed(2)}px "Oswald", sans-serif`;
+    const statusRingW = Math.max(1.5, beaconR * 0.22);
     for (let i = 0; i < companyBeaconPts.length; i += 2) {
       const x = companyBeaconPts[i], y = companyBeaconPts[i + 1];
+      const statusColor = COMPANY_BEACON_STATUS_COLOR[companyBeaconStatus[i / 2]] || COMPANY_BEACON_STATUS_COLOR.hauling;
       if (nav) {
         ctx.save();
         ctx.translate(x, y);
@@ -1866,6 +1879,9 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
         ctx.beginPath();
         ctx.arc(0, -stemH, beaconR, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = statusColor;
+        ctx.lineWidth = statusRingW;
+        ctx.stroke();
         ctx.fillStyle = "#fff";
         ctx.fillText(beaconLabel, 0, -stemH);
         ctx.restore();
@@ -1880,6 +1896,9 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
         ctx.beginPath();
         ctx.arc(x, y - stemH, beaconR, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = statusColor;
+        ctx.lineWidth = statusRingW;
+        ctx.stroke();
         ctx.fillStyle = "#fff";
         ctx.fillText(beaconLabel, x, y - stemH);
       }
