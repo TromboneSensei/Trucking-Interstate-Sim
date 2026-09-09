@@ -525,7 +525,16 @@ function handleHireDriver(driver) {
   if (!ct) return null;
   const res = career.confirmHire(driver);
   if (!res.ok) return res;
-  const t = new Truck(graph, ct.currentNode, Math.random, driver);
+  // A new hire spawns AT and operates out of the company's headquarters
+  // (profile.homeCity), not wherever the player's own rig happens to be
+  // idling - that's what makes truck.homeCity (fixed at construction,
+  // fleet.js) actually mean something for a hired driver: Hometown
+  // Backhauler's homesickness bias in chooseOffer, and the forced-deadhead-
+  // home fallback below it, both read straight from this field. Falls back
+  // to the career truck's own location only for a pre-wizard Quick Start
+  // career that never set a headquarters.
+  const spawnCity = career.getProfile().homeCity || ct.currentNode;
+  const t = new Truck(graph, spawnCity, Math.random, driver);
   t.id = res.id;
   trucks.push(t);
   truckById.set(t.id, t);

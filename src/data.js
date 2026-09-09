@@ -461,8 +461,17 @@ export const interstateRoutes = {
     "I-68": ["Morgantown", "Cumberland", "Hancock"],
     "I-69": ["Houston", "Shreveport", "Pine Bluff", "Memphis", "Paducah", "Evansville", "Indianapolis", "Fort Wayne", "Lansing", "Port Huron"],
     
-    // I-70: High plains gap bridged, Silverthorne mountain choke, New Stanton turnpike choke
-    "I-70": ["Cove Fort", "Price", "Grand Junction", "Silverthorne", "Denver", "Limon", "Colby", "Hays", "Salina", "Topeka", "Kansas City", "Columbia MO", "St. Louis", "Effingham", "Indianapolis", "Columbus", "Wheeling", "New Stanton", "Pittsburgh", "Breezewood", "Hancock", "Hagerstown", "Baltimore"],
+    // I-70: High plains gap bridged, Silverthorne mountain choke, New Stanton turnpike choke.
+    // Real I-70 actually bypasses Pittsburgh via New Stanton, but this sim
+    // deliberately routes it through Pittsburgh proper instead. New Stanton
+    // (lon -79.60) sits SOUTHEAST of Pittsburgh (lon -79.996), not between
+    // Wheeling and Pittsburgh - listing it before Pittsburgh made the edge
+    // sequence double back on itself (Wheeling -> past Pittsburgh's
+    // longitude to New Stanton -> backtrack NW to Pittsburgh -> back SE
+    // through the same area again to Breezewood), which is the zigzag near
+    // Breezewood. Wheeling -> Pittsburgh -> New Stanton -> Breezewood is a
+    // straight west-to-east line with no backtrack.
+    "I-70": ["Cove Fort", "Price", "Grand Junction", "Silverthorne", "Denver", "Limon", "Colby", "Hays", "Salina", "Topeka", "Kansas City", "Columbia MO", "St. Louis", "Effingham", "Indianapolis", "Columbus", "Wheeling", "Pittsburgh", "New Stanton", "Breezewood", "Hancock", "Hagerstown", "Baltimore"],
     
     "I-71": ["Louisville", "Cincinnati", "Columbus", "Seville", "Cleveland"],
     "I-72": ["Hannibal", "Springfield", "Champaign"],

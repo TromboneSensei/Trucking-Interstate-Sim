@@ -11,7 +11,7 @@
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
 import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
-import { generateContract, generateContractOffers, chooseOffer } from "./economy.js";
+import { generateContract, generateContractOffers, generateDeadheadContract, chooseOffer } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
 import { weatherSpeedMultAt } from "./weather.js";
@@ -153,6 +153,36 @@ const RUBBERNECK_WORST_MULT = 0.45; // cruise-speed multiplier right alongside a
 
 // How many loads a parked truck gets to choose between.
 const OFFER_COUNT = 3;
+
+// --- forced deadhead home ---------------------------------------------
+// Hometown Backhauler (economy.js's chooseOffer) only ever nudges an AI
+// driver toward a load that happens to be headed home - it never refuses
+// a paying job. Past a much harder line than that ordinary nudge, a
+// sufficiently home-attached driver can refuse the load board outright and
+// drive straight back empty instead. Gated on driver.homeAttachment (see
+// driver.js) rather than any single trait flag, so it falls out of the
+// same personality spread Hometown Backhauler already uses - an Outlaw's
+// low attachment (aggression>0.7, compliance<0.3 pulls it toward ~0.5,
+// just under the threshold below) naturally never does this, no isOutlaw
+// check needed.
+const DEADHEAD_HOME_MILES_THRESHOLD = 9000; // 1.5x economy.js's HOMESICK_FULL_MILES - the ordinary nudge maxing out isn't enough on its own to trigger this
+const DEADHEAD_HOME_ATTACHMENT_MIN = 0.55; // homeAttachment ranges ~0.35-1.0; only the more attached half of drivers ever force a trip home
+const DEADHEAD_HOME_BASE_CHANCE = 0.35; // rolled once per layover once eligible, not per hour - see the call site
+
+// Pure - true if this truck should refuse the load board this stop and
+// deadhead straight home instead. Chance climbs the further past
+// DEADHEAD_HOME_MILES_THRESHOLD the truck has been driving, scaled by the
+// driver's own homeAttachment, capped well short of certainty so even a
+// very homesick driver doesn't reliably strand every load board.
+function shouldDeadheadHome(truck, rnd) {
+    if (!truck.homeCity || truck.parkedAt === truck.homeCity) return false;
+    const attachment = truck.driver.homeAttachment;
+    if (attachment < DEADHEAD_HOME_ATTACHMENT_MIN) return false;
+    if (truck.milesSinceHome < DEADHEAD_HOME_MILES_THRESHOLD) return false;
+    const over = (truck.milesSinceHome - DEADHEAD_HOME_MILES_THRESHOLD) / DEADHEAD_HOME_MILES_THRESHOLD;
+    const chance = Math.min(0.9, DEADHEAD_HOME_BASE_CHANCE * attachment * (1 + over));
+    return rnd() < chance;
+}
 
 // --- simulation event feed -------------------------------------------
 // Notable things that happened this tick, for anything outside the sim
@@ -1624,6 +1654,18 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, true);
         if (waiting) awaitingResult = waiting;
         continue;
+      }
+
+      // Only ever considered for an AI-driven pick (this branch is never
+      // reached for a live player stop - see the PLAYER continue above),
+      // so a company HQ or a fleet driver's own hometown can actually pull
+      // a truck home even when a paying load was on offer.
+      if (!(truck === controlledTruck && !truck.autoDriver) && shouldDeadheadHome(truck, rnd)) {
+        const deadhead = generateDeadheadContract(graph, truck.parkedAt, truck.homeCity);
+        if (deadhead) {
+          truck._takeContract(graph, deadhead, laneGroups);
+          continue;
+        }
       }
 
       const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT, rnd);

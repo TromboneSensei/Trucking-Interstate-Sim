@@ -160,6 +160,27 @@ export function generateContract(graph, originName, rnd = Math.random) {
     return { origin: originName, destination, cargo, category, truckType, optimalMiles, optimalHours, payout, path };
 }
 
+// A forced trip straight back to `homeCityName` with no cargo and no
+// payout - the "can't take it anymore" version of Hometown Backhauler's
+// ordinary preference-weighting (see chooseOffer below). fleet.js decides
+// WHETHER a truck resorts to this (shouldDeadheadHome, gated on
+// milesSinceHome and the driver's own homeAttachment); this just builds
+// the trip once that call is made. Returns null if already home or
+// unreachable (shouldn't happen on this graph, but a truck should never
+// wedge over it), so the caller can fall back to an ordinary load board.
+export function generateDeadheadContract(graph, originName, homeCityName) {
+    if (!homeCityName || originName === homeCityName) return null;
+    const path = findPath(graph, originName, homeCityName);
+    if (!path || !path.length) return null;
+    const optimalMiles = path.reduce((s, e) => s + e.miles, 0);
+    const optimalHours = path.reduce((s, e) => s + (e.miles / e.speedLimit) * (e.kind === "highway" ? HIGHWAY_ROUTE_PENALTY : 1), 0);
+    return {
+        origin: originName, destination: homeCityName,
+        cargo: "Deadheading Home", category: "Deadhead", truckType: TRUCK_TYPES.DRYVAN,
+        optimalMiles, optimalHours, payout: 0, path, deadhead: true,
+    };
+}
+
 // A small board of distinct offers for a truck sitting at `originName`.
 // Deliberately generated fresh per stop rather than kept as a persistent
 // per-city market: contracts are cheap to make, and a standing board would
