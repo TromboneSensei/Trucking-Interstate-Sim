@@ -406,7 +406,52 @@ export const masterCities = {
     "Ann Arbor": { t: 3, w: 3.5, pop: 123000, lat: 42.2808, lon: -83.7430, ind: ["Edu", "Tech"] },            // Bridges Detroit to Kalamazoo on I-94
     "Raton": { t: 0, w: 0.8, lat: 36.9033, lon: -104.4391, ind: ["Junction", "Mountain Pass"] }, // Vital I-25 choke between Pueblo and Santa Fe
 
-    
+    // --- CITY/ROUTE AUDIT ROUND: notable real cities that were missing,
+    // researched and ranked on request. Each one either sits directly on
+    // an interstate this sim already models (a free insertion, see the
+    // route tables below) or needed one small new spur/segment - see the
+    // per-route comments after interstateRoutes/highwayRoutes.
+    "Virginia Beach": { t: 2, w: 5.0, pop: 459000, lat: 36.8529, lon: -75.9780, ind: ["Tourism", "Navy"] }, // Largest city in VA; twin metro with Norfolk, connected by real I-264
+    "Terre Haute": { t: 4, w: 2.0, pop: 58000, lat: 39.4667, lon: -87.4139, ind: ["Rail", "Edu"] }, // Sits directly on real I-70 between Effingham and Indianapolis - was a genuine gap on our own I-70
+    "Durham": { t: 3, w: 4.5, pop: 283000, lat: 35.9940, lon: -78.8986, ind: ["Pharma", "Edu"] }, // Research Triangle partner to Raleigh; Duke; directly on real I-85
+    "Bowling Green": { t: 4, w: 2.5, pop: 72000, lat: 36.9685, lon: -86.4808, ind: ["Automotive", "Edu"] }, // GM's Corvette assembly plant; directly on real I-65 between Nashville and Louisville
+    "Elkhart": { t: 4, w: 2.5, pop: 53000, lat: 41.6820, lon: -85.9767, ind: ["RV Mfg", "Mfg"] }, // Produces most of the country's RVs; directly on real I-80/90 (Indiana Toll Road) between South Bend and Ohio
+    "Columbus GA": { t: 3, w: 3.5, pop: 206000, lat: 32.4610, lon: -84.9877, ind: ["Military", "Textiles"] }, // Fort Benning; no real 2-digit mainline touches it - served only by spur I-185
+    "Oshkosh": { t: 4, w: 2.5, pop: 66000, lat: 44.0247, lon: -88.5426, ind: ["Trucks", "Mfg"] }, // Oshkosh Corp - builds specialty/military trucks; directly on real I-41 between Milwaukee and Appleton
+    "Lafayette IN": { t: 3, w: 3.5, pop: 100000, lat: 40.4167, lon: -86.8753, ind: ["Automotive", "Edu"] }, // Purdue + a major Subaru assembly plant; directly on real I-65 between Indianapolis and Gary. Named "IN" - Lafayette, LA already exists
+    "Waterloo": { t: 4, w: 2.5, pop: 68000, lat: 42.4928, lon: -92.3426, ind: ["Ag Machinery", "Mfg"] }, // John Deere HQ/plant; extends the existing US-20 stub
+    "Findlay": { t: 4, w: 2.0, pop: 41000, lat: 41.0442, lon: -83.6499, ind: ["Energy HQ", "Rubber"] }, // Marathon Petroleum HQ + Cooper Tire; directly on real I-75 between Toledo and Dayton
+    "Wausau": { t: 4, w: 2.0, pop: 39000, lat: 44.9591, lon: -89.6301, ind: ["Paper", "Insurance"] }, // Real I-39 continues here alone north of Madison - added so I-39 (previously entirely missing) fills genuinely NEW ground; Rockford<->Madison was already covered by I-90
+    "Harlingen": { t: 3, w: 3.5, pop: 65000, lat: 26.1906, lon: -97.6961, ind: ["Aviation", "Medical"] }, // Fixes a real pre-existing bug: I-2's own route table already said "Harlingen" but the city was never defined, so that whole edge silently never existed - found while running the crossing audit below
+
+    // --- INTERCHANGE AUDIT: computed every place two different routes'
+    // straight-line segments cross without already sharing a node (see
+    // scratchpad's crossing_audit.mjs), then checked each against the
+    // nearest existing city - these are the ones far enough from any
+    // existing node (>15mi) that trucks genuinely couldn't transfer
+    // interstates there without an unrealistic detour. Real, populated
+    // interchange towns get a proper tier-4 entry; a couple of genuinely
+    // rural crossings with no real town get pure invisible junctions,
+    // matching the existing "Invisible Choke" convention (New Stanton,
+    // Silverthorne, etc.).
+    "Crestview": { t: 4, w: 2.0, pop: 25000, lat: 30.7619, lon: -86.5708, ind: ["Military", "Junction"] }, // I-10 x US-98, FL panhandle - near Eglin AFB
+    "Fernley": { t: 4, w: 1.5, pop: 22000, lat: 39.6083, lon: -119.2496, ind: ["Distribution", "Junction"] }, // I-11 x US-50, NV
+    "Scipio": { t: 0, w: 0.5, lat: 39.2380, lon: -112.1058, ind: ["Junction"] }, // I-15 x US-50, central UT - genuinely rural crossing
+    "Shelby MT": { t: 4, w: 1.0, pop: 3300, lat: 48.5065, lon: -111.8580, ind: ["Ag", "Junction"] }, // I-15 x US-2, MT - literally named for being the junction town
+    "Sweetwater": { t: 4, w: 2.0, pop: 11000, lat: 32.4709, lon: -100.4059, ind: ["Wind", "Junction"] }, // I-20 x US-87, TX
+    "Spartanburg": { t: 3, w: 4.5, pop: 38000, lat: 34.9496, lon: -81.9320, ind: ["Automotive", "Mfg"] }, // I-26 x I-85, SC - BMW's US plant is nearby; a genuinely notable city this audit surfaced
+    "Walterboro": { t: 4, w: 1.5, pop: 5400, lat: 32.9096, lon: -80.6698, ind: ["Ag", "Junction"] }, // I-26 x I-95, SC
+    "Beeville": { t: 4, w: 1.5, pop: 13000, lat: 28.4008, lon: -97.7475, ind: ["Ag", "Junction"] }, // I-37 x US-59, south TX
+    "Statesville": { t: 4, w: 2.5, pop: 28000, lat: 35.7826, lon: -80.8873, ind: ["Mfg", "Logistics"] }, // I-40 x I-77, NC
+    "Benson": { t: 4, w: 1.0, pop: 3400, lat: 35.3760, lon: -78.5461, ind: ["Ag", "Junction"] }, // I-40 x I-95, NC
+    "Wadesville": { t: 0, w: 0.5, lat: 38.1728, lon: -87.7789, ind: ["Junction"] }, // I-64 x I-69, rural southwest IN - genuinely rural crossing
+    "Angola": { t: 4, w: 1.5, pop: 8500, lat: 41.6389, lon: -84.9994, ind: ["Junction", "Mfg"] }, // I-69 x I-80/90 (Indiana Toll Road), far NE IN
+    "Marshall MI": { t: 4, w: 1.5, pop: 7000, lat: 42.2711, lon: -84.9614, ind: ["Mfg", "Junction"] }, // I-69 x I-94, MI
+    "Cambridge OH": { t: 4, w: 1.5, pop: 10500, lat: 40.0328, lon: -81.5887, ind: ["Junction", "Glass"] }, // I-70 x I-77, OH
+    "Grove City PA": { t: 4, w: 2.0, pop: 8000, lat: 41.1587, lon: -80.0904, ind: ["Retail", "Junction"] }, // I-79 x I-80, PA
+    "Portage": { t: 4, w: 2.0, pop: 10000, lat: 43.5391, lon: -89.4626, ind: ["Junction", "Paper"] }, // I-94 x I-39, WI - the real, famous interchange town where I-39/90/94 actually split
+    "Benton Harbor": { t: 4, w: 2.0, pop: 9000, lat: 42.1167, lon: -86.4542, ind: ["Mfg", "Junction"] }, // I-94 x US-31, MI - Whirlpool HQ
+
 };
 // --- INTERSTATE ROUTES (V16.5 - Updated Topology & Invisible Chokes) ---
 export const interstateRoutes = {
@@ -416,22 +461,22 @@ export const interstateRoutes = {
     "I-8": ["San Diego", "Yuma", "Casa Grande"],
     
     // I-10: Desert void fixed, Quartzsite choke added, Pensacola added (Tucumcari strictly removed)
-    "I-10": ["Santa Monica", "Los Angeles", "Riverside", "San Bernardino", "Quartzsite", "Phoenix", "Casa Grande", "Tucson", "Las Cruces", "El Paso", "Van Horn", "Scroggins Draw", "Fort Stockton", "Kerrville", "San Antonio", "Houston", "Beaumont", "Lake Charles", "Lafayette", "Baton Rouge", "Laplace", "New Orleans", "Slidell", "Gulfport", "Mobile", "Pensacola", "Tallahassee", "Lake City", "Jacksonville"], 
+    "I-10": ["Santa Monica", "Los Angeles", "Riverside", "San Bernardino", "Quartzsite", "Phoenix", "Casa Grande", "Tucson", "Las Cruces", "El Paso", "Van Horn", "Scroggins Draw", "Fort Stockton", "Kerrville", "San Antonio", "Houston", "Beaumont", "Lake Charles", "Lafayette", "Baton Rouge", "Laplace", "New Orleans", "Slidell", "Gulfport", "Mobile", "Pensacola", "Crestview", "Tallahassee", "Lake City", "Jacksonville"],
     
-    "I-11": ["Reno", "Las Vegas", "Kingman", "Phoenix"],
+    "I-11": ["Reno", "Fernley", "Las Vegas", "Kingman", "Phoenix"],
     "I-12": ["Baton Rouge", "Hammond", "Slidell"],
     "I-14": ["Killeen", "Temple"], 
-    "I-15": ["San Diego", "Riverside", "San Bernardino", "Barstow", "Las Vegas", "St. George", "Cove Fort", "Provo", "Salt Lake City", "Ogden", "Tremonton", "Pocatello", "Idaho Falls", "Butte", "Helena", "Great Falls", "Sweetgrass"],
+    "I-15": ["San Diego", "Riverside", "San Bernardino", "Barstow", "Las Vegas", "St. George", "Cove Fort", "Scipio", "Provo", "Salt Lake City", "Ogden", "Tremonton", "Pocatello", "Idaho Falls", "Butte", "Helena", "Great Falls", "Shelby MT", "Sweetgrass"],
     "I-16": ["Macon", "Savannah"],
     "I-17": ["Phoenix", "Flagstaff"],
     "I-19": ["Tucson", "Nogales"], 
-    "I-20": ["Scroggins Draw", "Odessa", "Midland", "Abilene", "Fort Worth", "Dallas", "Tyler", "Shreveport", "Monroe", "Jackson", "Meridian", "Tuscaloosa", "Birmingham", "Atlanta", "Augusta", "Columbia", "Florence"],
+    "I-20": ["Scroggins Draw", "Odessa", "Midland", "Sweetwater", "Abilene", "Fort Worth", "Dallas", "Tyler", "Shreveport", "Monroe", "Jackson", "Meridian", "Tuscaloosa", "Birmingham", "Atlanta", "Augusta", "Columbia", "Florence"],
     "I-22": ["Memphis", "Tupelo", "Birmingham"],
     "I-24": ["Mt Vernon", "Paducah", "Clarksville", "Nashville", "Chattanooga"],
     "I-25": ["Las Cruces", "Albuquerque", "Santa Fe", "Raton", "Pueblo", "Colorado Springs", "Denver", "Fort Collins", "Cheyenne", "Casper", "Buffalo WY"],
     
     // I-26: Appalachian extension with Johnson City
-    "I-26": ["Kingsport", "Johnson City", "Asheville", "Columbia", "Charleston SC"],
+    "I-26": ["Kingsport", "Johnson City", "Asheville", "Spartanburg", "Columbia", "Walterboro", "Charleston SC"],
     
     "I-27": ["Lubbock", "Amarillo"],
     "I-29": ["Kansas City", "St. Joseph", "Sioux City", "Sioux Falls", "Fargo", "Grand Forks", "Pembina"],
@@ -442,12 +487,12 @@ export const interstateRoutes = {
     "I-35W": ["Hillsboro", "Fort Worth", "Denton"], // Connects FW to the spine
     "I-35E": ["Hillsboro", "Dallas", "Denton"], 
     
-    "I-37": ["Corpus Christi", "San Antonio"],
+    "I-37": ["Corpus Christi", "Beeville", "San Antonio"],
     
     // I-40: Voids fixed, West Memphis Mississippi bridge choke added
-    "I-40": ["Barstow", "Kingman", "Flagstaff", "Gallup", "Albuquerque", "Tucumcari", "Amarillo", "Oklahoma City", "Fort Smith", "Little Rock", "West Memphis", "Memphis", "Jackson TN", "Nashville", "Knoxville", "Dandridge", "Asheville", "Winston-Salem", "Greensboro", "Raleigh", "Wilmington"],
+    "I-40": ["Barstow", "Kingman", "Flagstaff", "Gallup", "Albuquerque", "Tucumcari", "Amarillo", "Oklahoma City", "Fort Smith", "Little Rock", "West Memphis", "Memphis", "Jackson TN", "Nashville", "Knoxville", "Dandridge", "Asheville", "Statesville", "Winston-Salem", "Greensboro", "Raleigh", "Benson", "Wilmington"],
     
-    "I-41": ["Milwaukee", "Appleton", "Green Bay"],
+    "I-41": ["Milwaukee", "Oshkosh", "Appleton", "Green Bay"],
     "I-43": ["Milwaukee", "Sheboygan", "Green Bay"],
     "I-44": ["Wichita Falls", "Lawton", "Oklahoma City", "Tulsa", "Joplin", "Springfield MO", "Rolla", "St. Louis"],
     "I-45": ["Galveston", "Houston", "Dallas"],
@@ -455,11 +500,11 @@ export const interstateRoutes = {
     "I-55": ["Laplace", "Hammond", "Jackson", "Memphis", "Sikeston", "St. Louis", "Springfield", "Bloomington", "Joliet", "Chicago"], 
     "I-57": ["Sikeston", "Mt Vernon", "Effingham", "Champaign", "Chicago"],
     "I-59": ["Slidell", "Hattiesburg", "Meridian", "Tuscaloosa", "Birmingham", "Gadsden", "Chattanooga"],
-    "I-64": ["St. Louis", "Mt Vernon", "Louisville", "Lexington", "Charleston WV", "Beckley", "Lexington VA", "Staunton", "Charlottesville", "Richmond", "Norfolk"],
-    "I-65": ["Mobile", "Montgomery", "Birmingham", "Huntsville", "Nashville", "Louisville", "Indianapolis", "Gary"],
+    "I-64": ["St. Louis", "Mt Vernon", "Wadesville", "Louisville", "Lexington", "Charleston WV", "Beckley", "Lexington VA", "Staunton", "Charlottesville", "Richmond", "Norfolk"],
+    "I-65": ["Mobile", "Montgomery", "Birmingham", "Huntsville", "Nashville", "Bowling Green", "Louisville", "Indianapolis", "Lafayette IN", "Gary"],
     "I-66": ["Washington", "Strasburg"],
     "I-68": ["Morgantown", "Cumberland", "Hancock"],
-    "I-69": ["Houston", "Shreveport", "Pine Bluff", "Memphis", "Paducah", "Evansville", "Indianapolis", "Fort Wayne", "Lansing", "Port Huron"],
+    "I-69": ["Houston", "Shreveport", "Pine Bluff", "Memphis", "Paducah", "Evansville", "Wadesville", "Indianapolis", "Fort Wayne", "Angola", "Marshall MI", "Lansing", "Flint", "Port Huron"],
     
     // I-70: High plains gap bridged, Silverthorne mountain choke, New Stanton turnpike choke.
     // Real I-70 actually bypasses Pittsburgh via New Stanton, but this sim
@@ -471,53 +516,58 @@ export const interstateRoutes = {
     // through the same area again to Breezewood), which is the zigzag near
     // Breezewood. Wheeling -> Pittsburgh -> New Stanton -> Breezewood is a
     // straight west-to-east line with no backtrack.
-    "I-70": ["Cove Fort", "Price", "Grand Junction", "Silverthorne", "Denver", "Limon", "Colby", "Hays", "Salina", "Topeka", "Kansas City", "Columbia MO", "St. Louis", "Effingham", "Indianapolis", "Columbus", "Wheeling", "Pittsburgh", "New Stanton", "Breezewood", "Hancock", "Hagerstown", "Baltimore"],
+    "I-70": ["Cove Fort", "Price", "Grand Junction", "Silverthorne", "Denver", "Limon", "Colby", "Hays", "Salina", "Topeka", "Kansas City", "Columbia MO", "St. Louis", "Effingham", "Terre Haute", "Indianapolis", "Dayton", "Columbus", "Cambridge OH", "Wheeling", "Pittsburgh", "New Stanton", "Bedford", "Breezewood", "Hancock", "Hagerstown", "Baltimore"],
     
     "I-71": ["Louisville", "Cincinnati", "Columbus", "Seville", "Cleveland"],
     "I-72": ["Hannibal", "Springfield", "Champaign"],
     "I-74": ["Davenport", "Peoria", "Bloomington", "Champaign", "Indianapolis", "Cincinnati"],
     
     // I-75: Ocala added to naturally break up Florida funnels
-    "I-75": ["Sault Ste. Marie", "Mackinaw City", "Saginaw", "Flint", "Detroit", "Toledo", "Dayton", "Cincinnati", "Lexington", "Knoxville", "Chattanooga", "Atlanta", "Macon", "Valdosta", "Lake City", "Gainesville", "Ocala", "Tampa", "Fort Myers", "Naples", "Miami"],
+    "I-75": ["Sault Ste. Marie", "Mackinaw City", "Saginaw", "Flint", "Detroit", "Toledo", "Findlay", "Dayton", "Cincinnati", "Lexington", "Knoxville", "Chattanooga", "Atlanta", "Macon", "Valdosta", "Lake City", "Gainesville", "Ocala", "Tampa", "Fort Myers", "Naples", "Miami"],
     
     "I-76 (West)": ["Denver", "Sterling", "Big Springs"],
     "I-76 (East)": ["Seville", "Akron", "Pittsburgh", "Bedford", "Breezewood", "Harrisburg", "Reading", "Philadelphia"], 
-    "I-77": ["Columbia", "Charlotte", "Wytheville", "Beckley", "Charleston WV", "Akron", "Cleveland"],
+    "I-77": ["Columbia", "Charlotte", "Statesville", "Wytheville", "Beckley", "Charleston WV", "Cambridge OH", "Akron", "Cleveland"],
     "I-78": ["Harrisburg", "Allentown", "Newark", "New York"],
-    "I-79": ["Charleston WV", "Morgantown", "Pittsburgh", "Erie"],
+    "I-79": ["Charleston WV", "Morgantown", "Pittsburgh", "Grove City PA", "Erie"],
     
     // I-80: Battle Mountain gap bridged, Laramie bypass choke, Council Bluffs paced
-    "I-80": ["San Francisco", "Oakland", "Sacramento", "Reno", "Winnemucca", "Battle Mountain", "Elko", "Wells", "Salt Lake City", "Ogden", "Rock Springs", "Rawlins", "Laramie", "Cheyenne", "Big Springs", "North Platte", "Kearney", "Lincoln", "Council Bluffs", "Omaha", "Des Moines", "Iowa City", "Davenport", "Joliet", "Gary", "South Bend", "Toledo", "Cleveland", "Youngstown", "State College", "Drums", "New York"],
+    "I-80": ["San Francisco", "Oakland", "Sacramento", "Reno", "Winnemucca", "Battle Mountain", "Elko", "Wells", "Salt Lake City", "Ogden", "Rock Springs", "Rawlins", "Laramie", "Cheyenne", "Big Springs", "North Platte", "Kearney", "Lincoln", "Council Bluffs", "Omaha", "Des Moines", "Iowa City", "Davenport", "Joliet", "Gary", "South Bend", "Elkhart", "Angola", "Toledo", "Cleveland", "Youngstown", "Grove City PA", "State College", "Drums", "New York"],
     
     "I-81": ["Dandridge", "Kingsport", "Bristol", "Wytheville", "Roanoke", "Lexington VA", "Staunton", "Strasburg", "Winchester", "Hagerstown", "Harrisburg", "Drums", "Wilkes-Barre", "Scranton", "Binghamton", "Syracuse", "Watertown"],
     "I-82": ["Ellensburg", "Yakima", "Kennewick", "Hermiston"], 
     "I-83": ["Harrisburg", "York", "Baltimore"],
     "I-84 (West)": ["Portland", "The Dalles", "Hermiston", "Pendleton", "Boise", "Twin Falls", "Heyburn", "Tremonton", "Ogden"],
     "I-84 (East)": ["Scranton", "Newburgh", "Danbury", "Hartford", "Sturbridge"], 
-    "I-85": ["Montgomery", "Atlanta", "Athens", "Greenville", "Charlotte", "Greensboro", "Petersburg"],
+    "I-85": ["Montgomery", "Atlanta", "Athens", "Greenville", "Charlotte", "Greensboro", "Durham", "Petersburg"],
     "I-86 (East)": ["Erie", "Jamestown", "Avoca", "Elmira", "Binghamton"],
     "I-86 (West)": ["Heyburn", "Pocatello"],
-    "I-87": ["New York", "Albany", "Plattsburgh"],
+    "I-87": ["New York", "Newburgh", "Albany", "Plattsburgh"],
     "I-88 (West)": ["Davenport", "Chicago"],
     "I-88 (East)": ["Binghamton", "Albany"], 
     "I-89": ["Concord NH", "White River Jct", "Montpelier", "Burlington"],
     
     // I-90: Badlands gap bridged (Mitchell)
-    "I-90": ["Seattle", "Ellensburg", "Spokane", "Coeur dAlene", "Missoula", "Butte", "Bozeman", "Billings", "Buffalo WY","Gillette", "Rapid City", "Mitchell", "Sioux Falls", "Albert Lea", "Madison", "Rockford", "Chicago", "Gary", "South Bend", "Toledo", "Cleveland", "Erie", "Buffalo", "Rochester", "Syracuse", "Albany", "Sturbridge", "Worcester", "Boston"],
+    "I-90": ["Seattle", "Ellensburg", "Spokane", "Coeur dAlene", "Missoula", "Butte", "Bozeman", "Billings", "Buffalo WY","Gillette", "Rapid City", "Mitchell", "Sioux Falls", "Albert Lea", "Madison", "Rockford", "Chicago", "Gary", "South Bend", "Elkhart", "Angola", "Toledo", "Cleveland", "Erie", "Buffalo", "Rochester", "Syracuse", "Albany", "Springfield MA", "Sturbridge", "Worcester", "Boston"],
     
     "I-91": ["New Haven", "Hartford", "Springfield MA", "White River Jct", "St Johnsbury"],
     "I-93": ["Boston", "Manchester NH", "Concord NH", "White River Jct", "St Johnsbury"],
-    "I-94": ["Billings", "Miles City", "Dickinson", "Bismarck", "Fargo", "Minneapolis", "Eau Claire", "Milwaukee", "Chicago", "Gary", "Kalamazoo", "Ann Arbor", "Detroit", "Port Huron"],
+    "I-94": ["Billings", "Miles City", "Dickinson", "Bismarck", "Fargo", "Minneapolis", "Eau Claire", "Portage", "Milwaukee", "Chicago", "Gary", "Benton Harbor", "Kalamazoo", "Marshall MI", "Ann Arbor", "Detroit", "Port Huron"],
     
     // I-95: Rocky Mount pacing choke added
-    "I-95": ["Miami", "Fort Lauderdale", "West Palm Beach", "Melbourne", "Daytona Beach", "Jacksonville", "Brunswick", "Savannah", "Florence", "Fayetteville", "Rocky Mount", "Petersburg", "Richmond", "Fredericksburg", "Washington", "Baltimore", "Wilmington DE", "Philadelphia", "Trenton", "Edison", "Newark", "New York", "Bridgeport", "New Haven", "Providence", "Boston", "Portsmouth", "Portland ME", "Bangor", "Houlton"],
+    "I-95": ["Miami", "Fort Lauderdale", "West Palm Beach", "Melbourne", "Daytona Beach", "Jacksonville", "Brunswick", "Savannah", "Florence", "Fayetteville", "Benson", "Rocky Mount", "Petersburg", "Richmond", "Fredericksburg", "Washington", "Baltimore", "Wilmington DE", "Philadelphia", "Trenton", "Edison", "Newark", "New York", "Bridgeport", "New Haven", "Providence", "Boston", "Portsmouth", "Portland ME", "Bangor", "Houlton"],
     
     "I-96": ["Detroit", "Lansing", "Grand Rapids"],
     "I-97": ["Annapolis", "Baltimore"],
     "I-99": ["State College", "Bedford"], 
     "I-135": ["Salina", "Wichita"],
-    "I-380": ["Iowa City", "Cedar Rapids"], 
-    "I-215": ["San Bernardino", "Riverside"], 
+    "I-380": ["Iowa City", "Cedar Rapids"],
+    "I-215": ["San Bernardino", "Riverside"],
+
+    // Added in the city/route audit round.
+    "I-39": ["Madison", "Portage", "Wausau"], // Real I-39 is concurrent with I-90 Rockford<->Madison (already modeled there) and continues ALONE north of Madison to Wausau - this is the genuinely new stretch
+    "I-185": ["Columbus GA", "Atlanta"], // Columbus GA has no real 2-digit mainline - only this spur, which joins I-85 near LaGrange (not itself a node here); stylized straight to Atlanta rather than inventing a LaGrange node for one interchange
+    "I-264": ["Norfolk", "Virginia Beach"], // Real, short spur off I-64 at Norfolk into Virginia Beach
 };
 
 // --- HIGHWAY ROUTES (V16.5 - The Realism & Triangle Layer) ---
@@ -530,10 +580,10 @@ export const highwayRoutes = {
     "CA-58": ["Bakersfield", "Tehachapi", "Barstow"],
 
     // The "Loneliest Road" (Central Corridor)
-    "US-50": ["Sacramento", "South Lake Tahoe", "Carson City", "Fallon", "Ely", "Delta UT", "Price", "Grand Junction", "Montrose", "Pueblo"],
+    "US-50": ["Sacramento", "South Lake Tahoe", "Carson City", "Fernley", "Fallon", "Ely", "Delta UT", "Scipio", "Price", "Grand Junction", "Montrose", "Pueblo"],
     
     // The Northern Frontier
-    "US-2": ["Everett", "Spokane", "Williston", "Minot", "Grand Forks", "Duluth"],
+    "US-2": ["Everett", "Spokane", "Shelby MT", "Williston", "Minot", "Grand Forks", "Duluth"],
     
     // The Oregon Trail / Northwest Connector
     "US-26": ["Portland", "Madras", "Bend", "Burns", "Boise", "Idaho Falls", "Jackson Hole", "Casper", "Scottsbluff", "North Platte"],
@@ -546,11 +596,11 @@ export const highwayRoutes = {
     "US-98": ["Mobile", "Panama City", "Tallahassee"],
     
     // V16.5 TACTICAL ADDITIONS (Economic Arteries)
-    "US-59": ["Brownsville", "McAllen", "Laredo", "Victoria", "Houston"], // The NAFTA Freight Corridor
+    "US-59": ["Brownsville", "McAllen", "Laredo", "Beeville", "Victoria", "Houston"], // The NAFTA Freight Corridor
     "US-290": ["Austin", "Houston"], // The Texas Triangle Shortcut
-    "US-87": ["San Antonio", "San Angelo", "Lubbock"], // Texas Oil & Ag Connectors
+    "US-87": ["San Antonio", "San Angelo", "Sweetwater", "Lubbock"], // Texas Oil & Ag Connectors
     "US-412": ["Tulsa", "Fayetteville AR"], // Crucial Midwest cross-route
-    "US-20": ["Rockford", "Dubuque"], // Upper Midwest Logistics link
+    "US-20": ["Rockford", "Dubuque", "Waterloo"], // Upper Midwest Logistics link - extended to Waterloo (John Deere) on request
     
     // Atlantic Seaboard
     "US-1": ["Miami", "Key Largo", "Key West"],
@@ -561,6 +611,7 @@ export const highwayRoutes = {
     // Misc
     "US-93": ["Las Vegas", "Ely", "Wells", "Twin Falls"],
     "US-131": ["Grand Rapids", "Traverse City"],
+    "US-31": ["South Bend", "Benton Harbor", "Grand Rapids"], // Added in the city/route audit round - real route; South Bend previously had no modeled connection north into Michigan
     "AC-Expressway": ["Philadelphia", "Atlantic City"]
 };
 
