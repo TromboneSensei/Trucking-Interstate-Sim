@@ -771,6 +771,24 @@ function renderMechanic() {
         <span class="v-meta"><span></span><span class="v-price expense">$${upgradeCost.toLocaleString()}</span></span>
       </button>`;
   }).join("");
+  // Endorsements (Phase 3): the license to accept Hazmat/Oversize special
+  // freight off the Load Board (see career.js's decorateSpecialFreight/
+  // takeOffer). Same vendor-item shape as an upgrade, one-time and never
+  // downgraded once bought.
+  const endorsementRows = Object.entries(career.ENDORSEMENTS).map(([key, def]) => {
+    if (p.endorsements[def.field]) {
+      return `<button class="vendor-item disabled" disabled><span class="v-name">${def.label}</span><span class="v-desc">Already earned</span></button>`;
+    }
+    const locked = p.level < def.levelReq;
+    const disabled = locked || p.cash < def.cost;
+    const reason = locked ? `Requires level ${def.levelReq} (you're ${p.level}).` : p.cash < def.cost ? `Can't afford it. ($${def.cost.toLocaleString()})` : "";
+    return `
+      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="endorsement" data-arg="${key}"${disabled && reason ? ` data-reason="${escAttr(reason)}"` : ""}>
+        <span class="v-name">${def.label}</span>
+        <span class="v-desc">Unlocks that special freight on the Load Board</span>
+        <span class="v-meta"><span></span><span class="v-price expense">$${def.cost.toLocaleString()}</span></span>
+      </button>`;
+  }).join("");
   return `
     <div class="vendor-section-title">Mechanic &mdash; rig condition: ${Math.round(100 - p.wear)}%</div>
     <div class="vendor-grid">
@@ -781,7 +799,9 @@ function renderMechanic() {
       </button>
     </div>
     <div class="vendor-section-title">Upgrades &mdash; Level ${p.level} (${p.xp.toLocaleString()} XP)</div>
-    <div class="vendor-grid">${upgradeRows}</div>`;
+    <div class="vendor-grid">${upgradeRows}</div>
+    <div class="vendor-section-title">Endorsements</div>
+    <div class="vendor-grid">${endorsementRows}</div>`;
 }
 
 // What buying the NEXT tier of each upgrade actually does, in plain terms -
@@ -849,20 +869,34 @@ function renderBoard() {
   if (!stopCtx.boardOffers) {
     const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
     career.decorateHotshot(offers);
+    career.decorateSpecialFreight(offers);
     stopCtx.boardOffers = offers;
   }
   const offers = stopCtx.boardOffers;
   if (!offers.length) return `<div class="vendor-section-title">Load Board</div><div class="placeholder-text">Nothing routable from here right now.</div>`;
+  const p = career.getProfile();
   const rows = offers.map((o, i) => {
     const rpm = o.payout / Math.max(1, o.optimalMiles);
     const hotshotBadge = o.hotshot
       ? `<span class="v-desc" style="color:var(--stop);font-weight:600;">HOTSHOT &bull; ${o.deadlineHours.toFixed(1)}h deadline &bull; +$${o.bonusPayout.toLocaleString()} on time</span>`
       : "";
+    // Special/exclusive freight (Phase 3): only ever appears here, on the
+    // player's own load board - an AI-driven truck's chooseOffer path
+    // never runs decorateSpecialFreight at all (see its own doc comment).
+    const specialDef = o.special ? career.SPECIAL_CARGO_TYPES[o.special] : null;
+    const missingEndorsement = specialDef?.endorsement && !p.endorsements[specialDef.endorsement];
+    const specialBadge = o.special
+      ? `<span class="v-desc" style="color:var(--info);font-weight:600;">${o.specialLabel.toUpperCase()} &bull; ${o.specialFlavor}</span>`
+      : "";
+    const disabled = missingEndorsement;
+    const reason = missingEndorsement ? `Requires the ${career.ENDORSEMENTS[specialDef.endorsement].label}.` : "";
     return `
-      <button class="vendor-item" data-action="take-load" data-arg="${i}" style="--cargo:${o.truckType.color}">
+      <button class="vendor-item${disabled ? " disabled" : ""}" data-action="take-load" data-arg="${i}" style="--cargo:${o.truckType.color}"${disabled && reason ? ` data-reason="${escAttr(reason)}"` : ""}>
         <span class="v-name">${o.cargo}</span>
         <span class="v-desc">&rarr; ${o.destination} &bull; ${Math.round(o.optimalMiles).toLocaleString()} mi &bull; $${rpm.toFixed(2)}/mi</span>
         ${hotshotBadge}
+        ${specialBadge}
+        ${missingEndorsement ? `<span class="v-desc" style="color:var(--stop);">${reason}</span>` : ""}
         <span class="v-meta"><span>${o.truckType.label}</span><span class="v-price">$${o.payout.toLocaleString()}</span></span>
       </button>`;
   }).join("");
@@ -898,10 +932,15 @@ function handleAction(action, arg) {
   } else if (action === "upgrade") {
     career.buyUpgrade(truck, arg);
     renderVendor(); renderStatus();
+  } else if (action === "endorsement") {
+    const res = career.buyEndorsement(arg);
+    if (!res.ok) toastNow(res.reason);
+    renderVendor(); renderStatus();
   } else if (action === "take-load") {
     const offer = careerEl._lastOffers && careerEl._lastOffers[parseInt(arg, 10)];
     if (!offer) return;
-    career.takeOffer(graph, truck, offer, currentGameSeconds);
+    const res = career.takeOffer(graph, truck, offer, currentGameSeconds);
+    if (!res.ok) { toastNow(res.reason); return; } // stale board (endorsement sold since offers were generated) - board stays open, nothing taken
     closeTruckStop();
     if (onRollOut) onRollOut(null); // no junction pending - a fresh contract always starts clean
   }

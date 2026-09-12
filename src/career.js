@@ -189,6 +189,52 @@ export function decorateHotshot(offers, rnd = Math.random) {
   o.deadlineHours = Math.max(1, o.optimalHours * HOTSHOT_DEADLINE_SLACK_MULT);
 }
 
+// --- special/exclusive freight (Career Mode Revamp Phase 3) ----------------
+//
+// Cargo only the player's OWN truck ever sees - decorateSpecialFreight is
+// called by career-ui.js's renderBoard the exact same way decorateHotshot
+// already is, right after generateContractOffers, before the board
+// renders. An AI-driven truck (hired or otherwise) never runs through
+// that code path at all - fleet.js's LAYOVER handling calls
+// generateContractOffers/chooseOffer directly with no decoration step -
+// so this can never end up on a hired truck's load board.
+//
+// Kept mutually exclusive with Hotshot (see the candidates filter below):
+// stacking two payout multipliers on the same load undersells both, and
+// "risky/restricted cargo AND a hard deadline" is a lot to read on one
+// card.
+const SPECIAL_CARGO_CHANCE = 0.3;
+export const SPECIAL_CARGO_TYPES = {
+  HAZMAT: { label: "Hazmat", payoutMult: 1.5, endorsement: "hazmat", flavor: "Placarded load - corrosive or flammable" },
+  // speedMult/wearMult read by createAgent's recompute() below, exactly
+  // like a throttle or upgrade multiplier, for as long as truck.contract
+  // is this load.
+  OVERSIZE: { label: "Oversize Load", payoutMult: 1.4, endorsement: "oversize", flavor: "Wide or tall - pilot-car escort territory", speedMult: 0.85, wearMult: 1.3 },
+  // heatPerHour read by tickNeeds below - a target for thieves draws the
+  // same kind of attention HAMMER throttle does, just from a different
+  // cause.
+  HIGH_VALUE: { label: "High-Value", payoutMult: 1.6, endorsement: null, flavor: "Electronics or pharma - a target for thieves", heatPerHour: 1.5 },
+  // bustChancePerHour/bustFine read by tickNeeds below - the one kind of
+  // special freight with no endorsement gate (there's no legal way to get
+  // certified for it), balanced instead by a real chance of losing the
+  // whole payout mid-haul.
+  CONTRABAND: { label: "Off the Books", payoutMult: 2.2, endorsement: null, flavor: "No manifest, no questions - real risk if you're caught", bustChancePerHour: 0.025, bustFine: 900 },
+};
+
+export function decorateSpecialFreight(offers, rnd = Math.random) {
+  if (!offers.length || rnd() > SPECIAL_CARGO_CHANCE) return;
+  const candidates = offers.filter((o) => !o.hotshot);
+  if (!candidates.length) return;
+  const o = candidates[Math.floor(rnd() * candidates.length)];
+  const kinds = Object.keys(SPECIAL_CARGO_TYPES);
+  const kind = kinds[Math.floor(rnd() * kinds.length)];
+  const def = SPECIAL_CARGO_TYPES[kind];
+  o.special = kind;
+  o.specialLabel = def.label;
+  o.specialFlavor = def.flavor;
+  o.payout = Math.round(o.payout * def.payoutMult);
+}
+
 function clamp01to100(v) { return Math.max(0, Math.min(100, v)); }
 
 // --- progression: XP/levels, upgrades --------------------------------------
@@ -282,6 +328,32 @@ export function buyUpgrade(truck, key) {
   if (truck?.agent) truck.agent.recompute();
   pushLog(`Installed ${def.label}${def.maxTier > 1 ? " Tier " + (tier + 1) : ""} for $${cost.toLocaleString()}.`);
   return { ok: true, cost };
+}
+
+// --- endorsements (Career Mode Revamp Phase 3) -----------------------------
+//
+// profile.endorsements was scaffolding from Phase 10 - a field newProfile()
+// always wrote, that nothing ever read or sold. These make it real: the
+// license to legally accept Hazmat/Oversize special-freight offers
+// (decorateSpecialFreight above). `tanker`/`doubles` stay dormant - there's
+// no tanker-only or doubles-only cargo type yet, and inventing one is out
+// of scope here.
+export const ENDORSEMENTS = {
+  hazmat: { label: "Hazmat Endorsement", field: "hazmat", cost: 2200, levelReq: 2 },
+  oversize: { label: "Oversize/Overweight Permit", field: "oversize", cost: 3400, levelReq: 3 },
+};
+
+export function buyEndorsement(key) {
+  const def = ENDORSEMENTS[key];
+  if (!def) return { ok: false, reason: "Unknown endorsement." };
+  if (profile.endorsements[def.field]) return { ok: false, reason: "Already have it." };
+  if (profile.level < def.levelReq) return { ok: false, reason: `Requires level ${def.levelReq}.` };
+  if (profile.cash < def.cost) return { ok: false, reason: `Can't afford it. ($${def.cost.toLocaleString()})` };
+  profile.cash -= def.cost;
+  profile.stats.totalSpent += def.cost;
+  profile.endorsements[def.field] = true;
+  pushLog(`Earned your ${def.label} for $${def.cost.toLocaleString()} - special freight requiring it is now on the table.`);
+  return { ok: true };
 }
 
 // --- store / diner content ----------------------------------------------
@@ -436,6 +508,13 @@ export function createAgent(truck, profile) {
       if (up.audiobook && truck?.edge && truck.contract && truck.contract.optimalMiles > LONG_HAUL_BOREDOM_MILES) {
         fatigueMult *= AUDIOBOOK_LONG_HAUL_FATIGUE_MULT;
       }
+      // Special/exclusive freight (Phase 3): an Oversize Load's own
+      // speedMult/wearMult apply for as long as it's the active contract -
+      // the pilot-car-escort tax, mechanically identical to a throttle or
+      // upgrade multiplier stacking on top.
+      const specialDef = truck?.contract?.special ? SPECIAL_CARGO_TYPES[truck.contract.special] : null;
+      if (specialDef?.speedMult) speedMult *= specialDef.speedMult;
+      if (specialDef?.wearMult) wearMult *= specialDef.wearMult;
       this.speedMult = speedMult;
       this.wearMult = Math.max(0.1, wearMult);
       this.burnMult = burnMult;
@@ -714,6 +793,29 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
       pushLog(`Pulled over doing ${Math.round(truck.speed)} mph - $${fine.toLocaleString()} ticket.`);
     }
   }
+  // Special/exclusive freight (Phase 3): High-Value draws police/thief
+  // attention for as long as it's rolling (a real, ongoing cost that
+  // Hazmat/Oversize don't carry - they're legitimate, placarded loads);
+  // Off the Books carries a real per-hour chance of getting caught, which
+  // forfeits the whole payout rather than just a fine on top of it -
+  // zeroing c.payout here reaches both the delivery-credit block below AND
+  // fleet.js's _arriveAtDestination (truck.earnings, the gross figure that
+  // feeds fleet-wide rankings), since both read the same object.
+  if (truck?.agent && truck.edge && truck.contract?.special) {
+    const def = SPECIAL_CARGO_TYPES[truck.contract.special];
+    if (def.heatPerHour) {
+      profile.heat = clamp01to100(profile.heat + gameHours * def.heatPerHour);
+    }
+    if (def.bustChancePerHour && !truck.contract.busted && rnd() < def.bustChancePerHour * gameHours) {
+      truck.contract.busted = true;
+      truck.contract.payout = 0;
+      profile.cash -= def.bustFine;
+      profile.stats.totalSpent += def.bustFine;
+      profile.heat = clamp01to100(profile.heat + 30);
+      profile.reputation = clamp01to100(profile.reputation - REP_LOSS_TICKET);
+      pushLog(`Busted hauling cargo off the books - load confiscated, $${def.bustFine.toLocaleString()} fine.`);
+    }
+  }
   expireBuffs(gameSeconds, truck);
   // Delivery payout -> spendable cash. truck.earnings (gross, fleet-wide)
   // is already credited by fleet.js's _arriveAtDestination; this is the
@@ -731,7 +833,12 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
     lastCreditedContract = truck.contract;
     const c = truck.contract;
     profile.cash += c.payout;
-    if (c.hotshot) {
+    if (c.busted) {
+      // Already fined and logged at the moment of the bust (tickNeeds
+      // above) - this arrival just quietly closes out the (now $0) load
+      // with no separate reputation/XP gain, rather than a second
+      // "Delivered ... collected $0" line that would read as a second event.
+    } else if (c.hotshot) {
       const onTime = c.deadlineGameSeconds != null && gameSeconds <= c.deadlineGameSeconds;
       if (onTime) {
         profile.cash += c.bonusPayout;
@@ -1020,14 +1127,26 @@ export function rollOut(graph, truck) {
 // absolute deadline - an ordinary load doesn't need it and callers that
 // omit it just never produce a hotshot deadline (still take the load fine).
 export function takeOffer(graph, truck, offer, gameSeconds) {
+  // Special/exclusive freight (Phase 3): Hazmat/Oversize require the
+  // matching endorsement to even accept - checked here (not just a UI
+  // grey-out) so a stale board can't be worked around by clicking through.
+  if (offer.special) {
+    const def = SPECIAL_CARGO_TYPES[offer.special];
+    if (def.endorsement && !profile.endorsements[def.endorsement]) {
+      return { ok: false, reason: `Requires the ${ENDORSEMENTS[def.endorsement].label}.` };
+    }
+  }
   truck.stopVendor = null;
   truck._takeContract(graph, offer, null);
   if (offer.hotshot && gameSeconds != null) {
     offer.deadlineGameSeconds = gameSeconds + offer.deadlineHours * 3600;
     pushLog(`Took on HOTSHOT ${offer.cargo} bound for ${offer.destination} - ${offer.deadlineHours.toFixed(1)}h to deliver for the $${offer.bonusPayout.toLocaleString()} bonus.`);
+  } else if (offer.special) {
+    pushLog(`Took on ${offer.specialLabel}: ${offer.cargo} bound for ${offer.destination}.`);
   } else {
     pushLog(`Took on ${offer.cargo} bound for ${offer.destination}.`);
   }
+  return { ok: true };
 }
 
 // --- fleet ownership (Phase 11) ------------------------------------------
