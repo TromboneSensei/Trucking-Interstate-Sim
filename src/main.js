@@ -59,6 +59,7 @@ const el = {
   btnNavToggle: document.getElementById("btn-nav-toggle"),
   btnModeToggle: document.getElementById("btn-mode-toggle"),
   decisionOverlay: document.getElementById("decision-overlay"),
+  decisionTitle: document.getElementById("decision-title"),
   decisionOptions: document.getElementById("decision-options"),
   decisionTimerFill: document.getElementById("decision-timer-fill"),
   contractOverlay: document.getElementById("contract-overlay"),
@@ -656,6 +657,14 @@ function showDecisionPanel(truck) {
   // for the player's own truck - it's a personal accessory, not fleet-wide
   // intel available to every AI decision.
   const showAtlas = career.isActive() && truck === getCareerTruck() && career.getProfile().upgrades.atlas && !!truck.contract;
+  // CB reroute (Career Mode Revamp Phase 4): fleet.js already flagged
+  // each option with a real hazard (disabledPositionsOnEdge - a truck
+  // genuinely broken down somewhere on it, not a guess). When the planned
+  // option itself is hazardous, this is exactly the moment a CB call
+  // would come in - reframe the whole panel instead of adding a separate
+  // decision-firing mechanism.
+  const plannedIsHazard = !!(plannedEdge && truck.pendingOptions.some((o) => o.hazard && o.to === plannedEdge.to && o.route === plannedEdge.route));
+  el.decisionTitle.textContent = plannedIsHazard ? "\u{1F4E1} CB — Wreck Ahead, Detour?" : "Junction Ahead — Choose Your Route";
   truck.pendingOptions.forEach((opt, idx) => {
     const btn = document.createElement("button");
     btn.className = "decision-btn";
@@ -670,11 +679,13 @@ function showDecisionPanel(truck) {
       const worstHours = optimalHours / WORST_CASE_SPEED_MULT;
       atlasHtml = `<span class="datlas">\u{1F4D6} ${formatDriveHours(optimalHours)} best &bull; ${formatDriveHours(worstHours)} worst-case</span>`;
     }
+    const hazardHtml = opt.hazard ? `<span class="dhazard">\u{1F6A8} wreck on this route</span>` : "";
     btn.innerHTML = `<div class="shield${isInterstate ? "" : " hwy"}"><span class="shield-num">${label.replace(/^I-/, "")}</span></div>
       <span class="droute">${routeWithDirection(opt)}</span>
       <span class="dcity">${isPlanned ? "Continue to " : "Re-route to "}${opt.control}</span>
       <span class="ddist">${Math.round(opt.miles)} mi to ${opt.to}</span>
       ${atlasHtml}
+      ${hazardHtml}
       <span class="dkey">[${idx + 1}]</span>`;
     btn.addEventListener("click", () => resolveDecision(opt));
     el.decisionOptions.appendChild(btn);

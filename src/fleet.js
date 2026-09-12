@@ -1424,7 +1424,20 @@ function departFromNode(graph, truck, laneGroups, controlledTruck, reverseOfEdge
   if (truck === controlledTruck && !truck.gps && !truck.autoDriver) {
     const options = pickEdgesFrom(graph, truck.currentNode, reverseOfEdge);
     if (options.length > 1) {
-      truck.pendingOptions = rankAndCapOptions(graph, options, truck.remainingPath[0]);
+      const ranked = rankAndCapOptions(graph, options, truck.remainingPath[0]);
+      // CB reroute (Career Mode Revamp Phase 4): flag any option with a
+      // real hazard - a truck actually disabled somewhere along it, the
+      // same ground truth cb.js's own "wreck ahead" lines already read
+      // via disabledPositionsOnEdge (lastDisabledByEdge, refreshed at the
+      // top of this same updateFleet tick). main.js's decision panel
+      // reads `.hazard` to badge the option and, when the truck's own
+      // pre-planned route is the hazardous one, reframes the whole panel
+      // as a CB call instead of an ordinary junction prompt.
+      for (const opt of ranked) {
+        const positions = disabledPositionsOnEdge(opt);
+        opt.hazard = !!(positions && positions.length);
+      }
+      truck.pendingOptions = ranked;
       truck.awaitingDecision = true;
       return truck;
     }
