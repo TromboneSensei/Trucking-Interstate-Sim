@@ -1074,6 +1074,41 @@ export function confirmHire(driver) {
   return { ok: true, id, driver };
 }
 
+// --- dispatch corridors (Career Mode Revamp Phase 1) ----------------------
+// A hired truck normally runs free-roam: chooseOffer picks whatever the
+// load board turns up at each stop, same as any other AI driver. Assigning
+// a corridor pins it to one lane instead - it keeps hauling back and forth
+// between cityA and cityB, taking whatever fresh cargo pickCargo rolls for
+// each leg (see economy.js's generateContractTo) rather than a random
+// destination. profile.hiredTrucks is the only place this is stored;
+// fleet.js never imports career.js (see its own header split), so main.js
+// stamps `.dispatch` onto the live Truck object every frame the exact same
+// way it already does for GPS/fleetWearMult below - fleet.js's Phase-4
+// LAYOVER handling just reads the plain field with no idea career.js
+// exists.
+export function getDispatch(truckId) {
+  const entry = profile.hiredTrucks.find((h) => h.id === truckId);
+  return entry?.dispatch ?? null;
+}
+
+export function setDispatchCorridor(truckId, cityA, cityB) {
+  const entry = profile.hiredTrucks.find((h) => h.id === truckId);
+  if (!entry) return { ok: false, reason: "Not a hired truck." };
+  if (!cityA || !cityB || cityA === cityB) return { ok: false, reason: "Pick two different cities." };
+  entry.dispatch = { mode: "CORRIDOR", a: cityA, b: cityB };
+  pushLog(`${truckId} assigned a recurring ${cityA} ↔ ${cityB} corridor.`);
+  return { ok: true };
+}
+
+export function clearDispatch(truckId) {
+  const entry = profile.hiredTrucks.find((h) => h.id === truckId);
+  if (!entry) return { ok: false, reason: "Not a hired truck." };
+  if (!entry.dispatch) return { ok: false, reason: "Already free-roam." };
+  delete entry.dispatch;
+  pushLog(`${truckId} released back to free-roam dispatch.`);
+  return { ok: true };
+}
+
 // --- company identity (Phase 12) -----------------------------------------
 //
 // `profile.logo` is deliberately absent from newProfile() rather than

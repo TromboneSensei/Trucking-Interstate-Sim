@@ -1215,6 +1215,14 @@ function frame(now) {
       }
       const careerTruck = careerTruckId == null ? null : truckById.get(careerTruckId);
       if (careerTruck) careerTruck.autoDriver = career.hasAIDriver();
+      // Dispatch corridors (Phase 1): only ever set on hiredTrucks entries,
+      // so this is a separate pass rather than folded into the truckIds
+      // loop above (which also covers the career truck, which never carries
+      // a corridor assignment).
+      for (const h of p.hiredTrucks) {
+        const t = truckById.get(h.id);
+        if (t) t.dispatch = h.dispatch || null;
+      }
     }
 
     const frameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {

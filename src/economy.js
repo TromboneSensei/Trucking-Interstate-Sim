@@ -160,6 +160,26 @@ export function generateContract(graph, originName, rnd = Math.random) {
     return { origin: originName, destination, cargo, category, truckType, optimalMiles, optimalHours, payout, path };
 }
 
+// A contract from originName to a SPECIFIC destination rather than a
+// picked one - the same cargo/payout formula as generateContract, just
+// with the leg fixed. Backs career.js's dispatch corridors (a hired
+// truck assigned to run one lane back and forth instead of taking
+// whatever the load board offers); the cargo is still rolled fresh each
+// leg via pickCargo, so a corridor truck still hauls a believable mix of
+// freight, not one repeating fixed load. Returns null if the two cities
+// aren't reachable from each other, so the caller can fall back cleanly.
+export function generateContractTo(graph, originName, destinationName, rnd = Math.random) {
+    if (!destinationName || originName === destinationName) return null;
+    const path = findPath(graph, originName, destinationName);
+    if (!path || !path.length) return null;
+    const { cargo, truckType, category } = pickCargo(originName, rnd);
+    const optimalMiles = path.reduce((s, e) => s + e.miles, 0);
+    const optimalHours = path.reduce((s, e) => s + (e.miles / e.speedLimit) * (e.kind === "highway" ? HIGHWAY_ROUTE_PENALTY : 1), 0);
+    const tierMult = TIER_PAY_MULT[graph.nodes[destinationName].t] ?? 1;
+    const payout = Math.round(optimalMiles * PAY_RATE_PER_MILE * truckType.multiplier * tierMult);
+    return { origin: originName, destination: destinationName, cargo, category, truckType, optimalMiles, optimalHours, payout, path };
+}
+
 // A forced trip straight back to `homeCityName` with no cargo and no
 // payout - the "can't take it anymore" version of Hometown Backhauler's
 // ordinary preference-weighting (see chooseOffer below). fleet.js decides

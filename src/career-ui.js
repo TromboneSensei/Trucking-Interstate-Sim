@@ -272,6 +272,31 @@ export function initCareerUI(callbacks) {
           renderFleetTab(career.getProfile(), lastTruckById);
         },
       });
+    } else if (btn.dataset.action === "set-corridor") {
+      const truckId = btn.dataset.arg;
+      // Two sequential standalone pickers rather than a bespoke two-field
+      // form - the wizard's city picker is already exactly "pick one city
+      // from the master list," so leg A and leg B are just two calls to
+      // it back to back.
+      openStandaloneCityPicker({
+        title: "Corridor - Leg A",
+        currentCity: null,
+        onSelect: (cityA) => {
+          openStandaloneCityPicker({
+            title: "Corridor - Leg B",
+            currentCity: cityA,
+            onSelect: (cityB) => {
+              const res = career.setDispatchCorridor(truckId, cityA, cityB);
+              if (!res.ok) toastNow(res.reason);
+              renderFleetTab(career.getProfile(), lastTruckById);
+            },
+          });
+        },
+      });
+    } else if (btn.dataset.action === "clear-corridor") {
+      const res = career.clearDispatch(btn.dataset.arg);
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
     }
   });
 
@@ -1401,13 +1426,25 @@ export function renderFleetTab(profile, truckById, trucks) {
       const gpsChip = career.hasGPS(t.id)
         ? `<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);padding:2px 6px;font-size:0.6rem;">GPS</span>`
         : `<button class="pill-btn" data-action="buy-gps" data-arg="${t.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">+ GPS $${career.GPS_PRICE_PER_TRUCK.toLocaleString()}</button>`;
+      // Dispatch corridor (Phase 1): a hired truck the player pinned to
+      // one recurring lane instead of the ordinary load board. Read from
+      // profile.hiredTrucks (career.js's own store), not the live truck -
+      // the plain t.dispatch field main.js stamps each frame is the same
+      // data, just one frame staler, and this is only ever a label/button.
+      const corridorHtml = h.dispatch
+        ? `<div class="row-sub" style="margin-top:3px;color:var(--go);">⇄ Corridor: ${h.dispatch.a} ↔ ${h.dispatch.b}</div>`
+        : "";
+      const corridorBtn = h.dispatch
+        ? `<button class="pill-btn" data-action="clear-corridor" data-arg="${h.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">Release Corridor</button>`
+        : `<button class="pill-btn" data-action="set-corridor" data-arg="${h.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">Set Corridor</button>`;
       return `
         <div class="list-row" data-truck="${t.id}" style="border-left-color:var(--info);align-items:flex-start;">
           <div style="flex:1;">
             <div class="row-main">${t.name} <span class="row-sub">(${h.id})</span></div>
             <div class="row-sub">${status} &bull; ${t.contractsCompleted} loads &bull; $${Math.round(pending).toLocaleString()} pending</div>
+            ${corridorHtml}
             ${vitalsHtml}
-            <div class="chip-row" style="margin-top:3px;margin-bottom:0;padding-bottom:0;">${traits}${gpsChip}</div>
+            <div class="chip-row" style="margin-top:3px;margin-bottom:0;padding-bottom:0;">${traits}${gpsChip}${corridorBtn}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
             <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span>

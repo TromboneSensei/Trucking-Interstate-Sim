@@ -11,7 +11,7 @@
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
 import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
-import { generateContract, generateContractOffers, generateDeadheadContract, chooseOffer } from "./economy.js";
+import { generateContract, generateContractOffers, generateDeadheadContract, generateContractTo, chooseOffer } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
 import { weatherSpeedMultAt } from "./weather.js";
@@ -1654,6 +1654,26 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         const waiting = departFromNode(graph, truck, laneGroups, controlledTruck, truck.prevEdge, true);
         if (waiting) awaitingResult = waiting;
         continue;
+      }
+
+      // Dispatch corridor (Career Mode Revamp Phase 1): a hired truck the
+      // player pinned to one recurring A<->B lane (career.js's
+      // setDispatchCorridor, stamped onto this plain field by main.js -
+      // see its own comment for why fleet.js reads it with no import).
+      // Takes priority over both the ordinary load board AND the ambient
+      // deadhead-home behavior below - a deliberate corridor assignment is
+      // a stronger instruction than a driver's own homesickness.
+      if (truck.dispatch && truck.dispatch.mode === "CORRIDOR") {
+        const { a, b } = truck.dispatch;
+        const dest = truck.parkedAt === a ? b : a;
+        const leg = generateContractTo(graph, truck.parkedAt, dest, rnd);
+        if (leg) {
+          truck._takeContract(graph, leg, laneGroups);
+          continue;
+        }
+        // Corridor city unreachable from here (shouldn't happen once
+        // assigned, but never wedge the truck over it) - fall through to
+        // the ordinary load board just this once.
       }
 
       // Only ever considered for an AI-driven pick (this branch is never
