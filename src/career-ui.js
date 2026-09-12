@@ -1187,10 +1187,20 @@ export function renderRigTab(profile, truck, gameSeconds, graph) {
       { key: "HAMMER", label: "Hammer", sub: `+${Math.round((career.THROTTLE_MULT.HAMMER - 1) * 100)}% speed &bull; +15% fuel &bull; +25% wear &bull; draws heat`, color: "var(--stop)" },
     ];
     const activeThrottle = throttleDefs.find((t) => t.key === profile.throttle) || throttleDefs[1];
-    const throttleHtml = `<div class="throttle-row">${throttleDefs.map((t) =>
-      `<button class="throttle-seg${profile.throttle === t.key ? " active" : ""}" data-action="throttle" data-arg="${t.key}" style="--seg-color:${t.color};">${t.label}</button>`
-    ).join("")}</div>
-    <div class="row-sub" style="margin:4px 0 0;">${activeThrottle.sub}</div>`;
+    // AI Driver: throttle is no longer a manual control - autoDriverPickThrottle
+    // (career.js) picks it every tick from the driven truck's own DriverDNA,
+    // so the segmented row goes read-only and says why instead of pretending
+    // a tap would do anything (a tap that got silently overwritten next tick
+    // would just read as broken).
+    const throttleHtml = profile.autoDriver
+      ? `<div class="throttle-row" style="pointer-events:none;opacity:0.85;">${throttleDefs.map((t) =>
+          `<span class="throttle-seg${profile.throttle === t.key ? " active" : ""}" style="--seg-color:${t.color};">${t.label}</span>`
+        ).join("")}</div>
+        <div class="row-sub" style="margin:4px 0 0;">\u{1F916} AI Driver's choice${profile.autoDriverCautious ? " - easing off after a ticket" : ""} &bull; ${activeThrottle.sub}</div>`
+      : `<div class="throttle-row">${throttleDefs.map((t) =>
+          `<button class="throttle-seg${profile.throttle === t.key ? " active" : ""}" data-action="throttle" data-arg="${t.key}" style="--seg-color:${t.color};">${t.label}</button>`
+        ).join("")}</div>
+        <div class="row-sub" style="margin:4px 0 0;">${activeThrottle.sub}</div>`;
 
     // PULL IN's subtitle names the actual next real town ahead (or the
     // existing disabled-state strings when those apply) instead of the

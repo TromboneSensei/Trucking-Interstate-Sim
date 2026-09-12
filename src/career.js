@@ -134,10 +134,43 @@ export function fastForwardHours(graph, trucks, weatherCells, startGameSeconds, 
 const CAREER_SAVE_VERSION = 1;
 const STARTING_CASH = 2500;
 const CRITICAL_FUEL_PCT = 8; // hard safety floor - the player truck can never actually run dry by accident
-const HEAT_COOLDOWN_PER_HOUR = 0.8; // law attention fades on its own, slowly, if you keep clean for a while
-const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat at 100
+const HEAT_COOLDOWN_PER_HOUR = 1.1; // law attention fades on its own, slowly, if you keep clean for a while
+const HEAT_BUILD_PER_HOUR_HAMMER = 9; // ~11h of sustained HAMMER saturates heat at 100 (was 12/~8h - tickets were coming too often)
 const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
-const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
+const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.08; // scales down with (heat/100)^2, so it's negligible below ~40 heat - halved from 0.15, tickets were firing too often
+
+// --- AI Driver auto-throttle -----------------------------------------
+//
+// Once profile.autoDriver is true the rig picks its own throttle too, not
+// just navigation/load-picking - it wasn't touching THROTTLE at all
+// before, so it just kept running whatever HAMMER/CONSERVE the player had
+// set at the moment of purchase forever, tickets and all. The pick comes
+// from the driven truck's own DriverDNA (driver.js) - a hustler/aggressive
+// driver keeps pushing it even after getting caught (they don't learn);
+// anyone else backs off to CONSERVE the first time a ticket lands on
+// their own watch and stays there (profile.autoDriverCautious, absent
+// until first written - same "not in newProfile()" convention as
+// profile.logo/autoDriver themselves).
+const AUTO_DRIVER_HOTHEAD_THRESHOLD = 0.62; // aggression/hustle blend at/above this: never backs off, regardless of tickets
+
+function autoDriverRiskTolerance(driver) {
+  return driver.aggression * 0.6 + driver.hustle * 0.4;
+}
+
+// Recomputes profile.throttle from the driven truck's personality (and
+// whether it's already been caught once) - called every tick while
+// profile.autoDriver is true, so a switch to a different truck (a
+// different DriverDNA) or a fresh "chill out" flip both take effect
+// immediately rather than waiting for the next purchase/decision event.
+function autoDriverPickThrottle(truck) {
+  if (!truck?.driver) return;
+  const riskTolerance = autoDriverRiskTolerance(truck.driver);
+  const desired = profile.autoDriverCautious ? "CONSERVE" : riskTolerance >= AUTO_DRIVER_HOTHEAD_THRESHOLD ? "HAMMER" : "LEGAL";
+  if (profile.throttle !== desired) {
+    profile.throttle = desired;
+    if (truck.agent) truck.agent.recompute();
+  }
+}
 // Hunger/morale/health were removed (Career Mode Revamp Phase 2) - they had
 // exactly one combined effect on anything (a fatigueMult multiplier) despite
 // three separate bars, three vendors, and ~15 store items existing to manage
@@ -725,6 +758,10 @@ export function switchActiveTruck(oldTruck, newTruck, gameSeconds) {
   profile.truckId = newTruck.id;
   profile.truckName = newTruck.name;
   lastCreditedContract = null;
+  // A different driver's own personality/history now applies (see
+  // autoDriverPickThrottle) - the outgoing driver's "chilled out" flag
+  // shouldn't carry over onto whoever's behind the wheel next.
+  profile.autoDriverCautious = false;
   // Verified real risk (fleet.js's BREAKDOWN_PER_MILE), not speculative: a
   // hired truck that's been running a long time without a real stop
   // carries inflated breakdown odds the instant it's taken over - the same
@@ -791,8 +828,16 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
       profile.heat = clamp01to100(profile.heat - 55);
       profile.reputation = clamp01to100(profile.reputation - REP_LOSS_TICKET);
       pushLog(`Pulled over doing ${Math.round(truck.speed)} mph - $${fine.toLocaleString()} ticket.`);
+      // AI Driver: a real consequence like this can change future
+      // behavior, but only for a driver whose own personality allows it -
+      // see autoDriverPickThrottle/autoDriverRiskTolerance above.
+      if (profile.autoDriver && !profile.autoDriverCautious && autoDriverRiskTolerance(truck.driver) < AUTO_DRIVER_HOTHEAD_THRESHOLD) {
+        profile.autoDriverCautious = true;
+        pushLog(`${truck.name} is easing off after that ticket - running Conserve from here on.`);
+      }
     }
   }
+  if (profile.autoDriver) autoDriverPickThrottle(truck);
   // Special/exclusive freight (Phase 3): High-Value draws police/thief
   // attention for as long as it's rolling (a real, ongoing cost that
   // Hazmat/Oversize don't carry - they're legitimate, placarded loads);
@@ -829,7 +874,21 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
   // clears stopVendor), so the reference comparison against
   // lastCreditedContract is what makes this exactly-once despite tickNeeds
   // firing every frame/substep while parked at that stop.
-  if (truck && truck.stopVendor === "BOARD" && truck.contract && truck.contract !== lastCreditedContract) {
+  //
+  // truck.autoDriver && truck.stopReason === "LAYOVER" covers the AI
+  // Driver upgrade's own equivalent moment: _arriveAtDestination takes the
+  // ordinary-AI-truck branch for an autonomous rig (LAYOVER, not PLAYER/
+  // BOARD, since there's no load board to open), and previously nothing
+  // ever credited that delivery to profile.cash/xp at all - the player's
+  // own truck kept completing loads and earning truck.earnings (the
+  // fleet-wide gross figure) while profile.cash and profile.xp both sat
+  // frozen, silently bleeding out to fuel/wear/tickets with zero income.
+  // truck.contract is still the just-finished load for the same window
+  // REST/FUEL relies on (dwellHoursLeft hasn't reached 0 yet, so fleet.js
+  // hasn't auto-picked a new one), so lastCreditedContract still makes
+  // this exactly-once.
+  if (truck && truck.contract && truck.contract !== lastCreditedContract &&
+      (truck.stopVendor === "BOARD" || (truck.autoDriver && truck.stopReason === "LAYOVER"))) {
     lastCreditedContract = truck.contract;
     const c = truck.contract;
     profile.cash += c.payout;
@@ -1161,7 +1220,7 @@ export function takeOffer(graph, truck, offer, gameSeconds) {
 // pushes it into the live array - the same division of labor as
 // startCareer/reattachTruck already have with the truck main.js supplies.
 export const HIRE_COST = 8000;
-export const HIRE_MIN_LEVEL = 5;
+export const HIRE_MIN_LEVEL = 3;
 
 export function canHire() {
   return profile.level >= HIRE_MIN_LEVEL && profile.cash >= HIRE_COST;
@@ -1435,6 +1494,7 @@ export function buyAIDriver() {
   profile.cash -= AI_DRIVER_PRICE;
   profile.stats.totalSpent += AI_DRIVER_PRICE;
   profile.autoDriver = true;
+  profile.autoDriverCautious = false; // a clean slate for whichever driver just took the wheel - see autoDriverPickThrottle
   pushLog(`Hired an AI Driver for $${AI_DRIVER_PRICE.toLocaleString()} - your rig now runs itself end to end.`);
   return { ok: true };
 }
