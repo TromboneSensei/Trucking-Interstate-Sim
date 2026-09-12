@@ -9,7 +9,7 @@
 "use strict";
 
 import * as career from "./career.js";
-import { pumpFuel, estimatedRangeMiles, FATIGUE_RECOVERY_PER_HOUR } from "./fleet.js";
+import { pumpFuel, estimatedRangeMiles, FATIGUE_RECOVERY_PER_HOUR, isCompanyTruck } from "./fleet.js";
 import { generateContractOffers } from "./economy.js";
 import { traitSummary } from "./driver.js";
 import { openTab, preserveScroll } from "./ui.js";
@@ -293,6 +293,7 @@ export function initCareerUI(callbacks) {
 }
 
 let lastTruckById = null; // stashed so FLEET's own hire/reroll re-renders (no main.js round-trip) don't lose every hired truck's live status
+let lastFleetTrucks = null; // ditto, for the fleet-wide $/mi benchmark (Phase 5) - the full live array, not just the company's own
 let lastRigGraph = null; // stashed so RIG's own throttle/pull-in re-renders (no main.js round-trip) keep PULL IN's next-city subtitle working
 let lastSaveOk = null;
 
@@ -545,14 +546,12 @@ function renderStatus() {
   const fuelPct = Math.round(truck.fuel);
   const fuelColor = fuelPct > 50 ? "var(--go)" : fuelPct > 15 ? "var(--caution)" : "var(--stop)";
   const fatigueColor = truck.fatigue > 70 ? "var(--stop)" : truck.fatigue > 40 ? "var(--caution)" : "var(--go)";
-  const hungerColor = p.hunger < 20 ? "var(--stop)" : p.hunger < 45 ? "var(--caution)" : "var(--go)";
-  const moraleColor = p.morale < 30 ? "var(--stop)" : p.morale < 55 ? "var(--caution)" : "var(--go)";
+  const heatColor = p.heat > 60 ? "var(--stop)" : p.heat > 40 ? "var(--caution)" : "var(--go)";
   careerEl.status.innerHTML = [
     statChip("Cash", "$" + Math.round(p.cash).toLocaleString(), p.cash < 0 ? "var(--stop)" : "var(--go)"),
     statChip("Fuel", fuelPct + "%", fuelColor),
     statChip("Fatigue", Math.round(truck.fatigue) + "%", fatigueColor),
-    statChip("Hunger", Math.round(p.hunger) + "%", hungerColor),
-    statChip("Morale", Math.round(p.morale) + "%", moraleColor),
+    statChip("Heat", Math.round(p.heat) + "%", heatColor),
   ].join("");
 
   // ROLL OUT is only meaningful once there's actually somewhere to roll
@@ -637,7 +636,7 @@ function renderRest() {
     <div class="vendor-grid">
       <button class="vendor-item${showerDisabled ? " disabled" : ""}" data-action="shower" data-arg=""${showerDisabled ? ` data-reason="${escAttr("Can't afford it. ($14)")}"` : ""}>
         <span class="v-name">Hot Shower</span>
-        <span class="v-desc">${free ? "Free - you filled up enough this stop" : "+15 morale"}</span>
+        <span class="v-desc">${free ? "Free - you filled up enough this stop" : "-15 fatigue"}</span>
         <span class="v-meta"><span>0.5h</span><span class="v-price ${free ? "" : "expense"}">${free ? "FREE" : "$14"}</span></span>
       </button>
     </div>
@@ -647,7 +646,7 @@ function renderRest() {
     <div class="vendor-grid">
       <button class="vendor-item${motelDisabled ? " disabled" : ""}" data-action="motel" data-arg=""${motelDisabled ? ` data-reason="${escAttr("Can't afford it. ($60)")}"` : ""}>
         <span class="v-name">Motel Room</span>
-        <span class="v-desc">Full fatigue clear, bigger morale/hunger top-up - real function beats a free nap</span>
+        <span class="v-desc">Full fatigue clear + real heat cooldown - off the road and off the radar for a night</span>
         <span class="v-meta"><span>8h</span><span class="v-price expense">$60</span></span>
       </button>
     </div>`;
@@ -657,8 +656,7 @@ function summarizeEffects(item) {
   const bits = [];
   if (item.immediate) {
     if (item.immediate.fatigue) bits.push(`${item.immediate.fatigue} fatigue`);
-    if (item.immediate.hunger) bits.push(`+${item.immediate.hunger} hunger`);
-    if (item.immediate.morale) bits.push(`+${item.immediate.morale} morale`);
+    if (item.immediate.heat) bits.push(`${item.immediate.heat > 0 ? "+" : ""}${item.immediate.heat} heat`);
   }
   if (item.buffHours) bits.push(`${item.buffHours}h buff`);
   // A buff's sustained effects (fatigueMult/speedMult) and its expiry crash
@@ -694,7 +692,7 @@ function renderSupplies() {
     return `
       <button class="vendor-item${disabled ? " disabled" : ""}" data-action="diner" data-arg="${tier}"${disabled ? ` data-reason="${escAttr(`Can't afford it. ($${item.price})`)}"` : ""}>
         <span class="v-name">${item.label}</span>
-        <span class="v-desc">${tier === "SITDOWN" ? "Today's special: " + special : `+${item.immediate.hunger} hunger &bull; ${item.hours}h`}</span>
+        <span class="v-desc">${tier === "SITDOWN" ? "Today's special: " + special + " - " + summarizeEffects(item) : summarizeEffects(item)}</span>
         <span class="v-meta"><span>${item.hours}h</span><span class="v-price expense">$${item.price}</span></span>
       </button>`;
   }).join("");
@@ -862,7 +860,7 @@ function handleAction(action, arg) {
     const res = career.eatAtDiner(truck, arg);
     if (res.ok) advanceAndRefresh(res.hours);
   } else if (action === "shower") {
-    const res = career.takeShower(fuelUnitsThisStop);
+    const res = career.takeShower(truck, fuelUnitsThisStop);
     if (res.ok) advanceAndRefresh(res.hours);
   } else if (action === "sleep") {
     advanceAndRefresh(parseFloat(arg));
@@ -1100,10 +1098,7 @@ export function renderRigTab(profile, truck, gameSeconds, graph) {
     // readouts - these five matter, but not enough to each command a full
     // row under the two dashboard gauges above.
     const vitalsHtml = `<div class="vitals-strip">
-      ${statChip("Hunger", `${Math.round(profile.hunger)}%`, profile.hunger < 20 ? "var(--stop)" : profile.hunger < 45 ? "var(--caution)" : "var(--go)")}
-      ${statChip("Morale", `${Math.round(profile.morale)}%`, profile.morale < 30 ? "var(--stop)" : profile.morale < 55 ? "var(--caution)" : "var(--go)")}
       ${statChip("Heat", `${Math.round(profile.heat)}%`, profile.heat > 60 ? "var(--stop)" : profile.heat > 40 ? "var(--caution)" : "var(--go)")}
-      ${statChip("Health", `${Math.round(profile.health)}%`, profile.health < 50 ? "var(--stop)" : profile.health < 80 ? "var(--caution)" : "var(--go)")}
       ${statChip("Condition", `${Math.round(100 - profile.wear)}%`, profile.wear > 60 ? "var(--stop)" : profile.wear > 30 ? "var(--caution)" : "var(--go)")}
     </div>`;
 
@@ -1293,8 +1288,33 @@ function renderCompanySettingsSection(profile) {
     </div>`;
 }
 
-export function renderFleetTab(profile, truckById) {
+// --- Company Leaderboard (Career Mode Revamp Phase 5) ---------------------
+// fleet.js's isCompanyTruck exists to EXCLUDE the player's own trucks from
+// fleet-wide rankings/digest superlatives (a cash-subsidized rig would
+// otherwise dominate every one of them). This flips that same exclusion
+// into a benchmark instead: the "other 9,999+ trucks" a lone owner-operator
+// never gets to see are exactly what makes a good $/mi mean something. One
+// pass over the whole live fleet, cheap even at 10k trucks.
+function ratePerMile(t) {
+  return t && t.totalMilesDriven > 0 ? t.earnings / t.totalMilesDriven : 0;
+}
+// isCompanyTruck only recognizes the "H-" hired-fleet id namespace - it has
+// no way to know which numeric-id truck the player is currently driving, so
+// that truck must be excluded here explicitly or it contaminates its own
+// benchmark.
+function fleetAverageRatePerMile(trucks, careerTruckId) {
+  let earnings = 0, miles = 0;
+  for (const t of trucks) {
+    if (isCompanyTruck(t) || t.id === careerTruckId) continue;
+    earnings += t.earnings;
+    miles += t.totalMilesDriven;
+  }
+  return miles > 0 ? earnings / miles : 0;
+}
+
+export function renderFleetTab(profile, truckById, trucks) {
   if (truckById) lastTruckById = truckById; else truckById = lastTruckById;
+  if (trucks) lastFleetTrucks = trucks; else trucks = lastFleetTrucks;
   if (!profile.active) {
     careerEl.tabFleet.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
@@ -1312,6 +1332,28 @@ export function renderFleetTab(profile, truckById) {
     </div>`;
     const headerHtml = `<div class="detail-sub" style="margin-bottom:10px;">${profile.hiredTrucks.length} truck${profile.hiredTrucks.length === 1 ? "" : "s"} on payroll &bull; $${Math.round(pendingTotal).toLocaleString()} pending &bull; settles in ~${Math.ceil(settlementIn / 3600)}h</div>`;
 
+    // Company Leaderboard (Phase 5): the 10,000 AI trucks are the one real
+    // benchmark a lone owner-operator never gets to see directly (they're
+    // excluded from every ranking/digest superlative for the opposite
+    // reason - see fleet.js's isCompanyTruck). $/mi across every truck on
+    // the player's own payroll, lifetime, against that same excluded fleet.
+    let companyEarnings = truck ? truck.earnings : 0, companyMiles = truck ? truck.totalMilesDriven : 0;
+    for (const h of profile.hiredTrucks) {
+      const t = truckById?.get(h.id);
+      if (t) { companyEarnings += t.earnings; companyMiles += t.totalMilesDriven; }
+    }
+    const companyRate = ratePerMile({ earnings: companyEarnings, totalMilesDriven: companyMiles });
+    const fleetRate = trucks ? fleetAverageRatePerMile(trucks, truck?.id) : 0;
+    const vsFleetPct = fleetRate > 0 ? Math.round((companyRate / fleetRate - 1) * 100) : 0;
+    const leaderboardHtml = companyMiles < 1 || fleetRate <= 0 ? "" : `
+      <div class="metric-grid" style="margin-bottom:10px;">
+        <div class="metric-card${companyRate >= fleetRate ? " good" : " bad"}">
+          <div class="metric-title">Your $/mi vs. the Road</div>
+          <div class="metric-value">$${companyRate.toFixed(2)}</div>
+          <div class="metric-sub">${vsFleetPct >= 0 ? "+" : ""}${vsFleetPct}% vs. the other 10,000 (avg $${fleetRate.toFixed(2)}/mi)</div>
+        </div>
+      </div>`;
+
     const yourRigGPS = !truck ? false : career.hasGPS(truck.id);
     const yourRigAI = career.hasAIDriver();
     const yourRigGpsChip = !truck ? "" : yourRigAI
@@ -1326,10 +1368,18 @@ export function renderFleetTab(profile, truckById) {
           <div class="row-sub">${truck.parkedAt ? "parked at " + truck.parkedAt : truck.disabledHoursLeft > 0 ? "disabled roadside" : "hauling"} &bull; ${truck.contractsCompleted} loads</div>
           <div class="chip-row" style="margin-top:5px;margin-bottom:0;padding-bottom:0;">${yourRigGpsChip}</div>
         </div>
-        <div class="row-value">$${Math.round(truck.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+        <div class="row-value">$${Math.round(truck.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span>
+          <div class="row-sub">$${ratePerMile(truck).toFixed(2)}/mi</div>
+        </div>
       </div>`;
 
-    const hiredHtml = profile.hiredTrucks.map((h) => {
+    // Ranked best-$/mi-first - "which driver is actually making me money"
+    // is exactly the question a dispatcher (not a passenger) asks first.
+    const rankedHired = profile.hiredTrucks.slice().sort((a, b) => {
+      const ta = truckById?.get(a.id), tb = truckById?.get(b.id);
+      return ratePerMile(tb) - ratePerMile(ta);
+    });
+    const hiredHtml = rankedHired.map((h) => {
       const t = truckById?.get(h.id);
       if (!t) return `<div class="row-sub" style="padding:3px 0;">${h.id} - no longer in the fleet.</div>`;
       const status = t.parkedAt ? `parked at ${t.parkedAt}` : t.disabledHoursLeft > 0 ? "disabled roadside" : "hauling";
@@ -1360,7 +1410,9 @@ export function renderFleetTab(profile, truckById) {
             <div class="chip-row" style="margin-top:3px;margin-bottom:0;padding-bottom:0;">${traits}${gpsChip}</div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-            <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span></div>
+            <div class="row-value">$${Math.round(t.earnings).toLocaleString()}<span class="row-value-unit">lifetime</span>
+              <div class="row-sub">$${ratePerMile(t).toFixed(2)}/mi</div>
+            </div>
             <button class="pill-btn" data-action="switch-truck" data-arg="${h.id}" style="background:var(--go);font-size:0.62rem;padding:5px 9px;letter-spacing:0.03em;">Drive This Truck</button>
           </div>
         </div>`;
@@ -1369,6 +1421,7 @@ export function renderFleetTab(profile, truckById) {
     careerEl.tabFleet.innerHTML = `
       ${companyHeaderHtml}
       ${headerHtml}
+      ${leaderboardHtml}
       <div class="section-label">Your Company</div>
       ${yourRigHtml}
       ${hiredHtml}

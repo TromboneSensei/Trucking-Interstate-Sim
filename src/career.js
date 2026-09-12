@@ -134,14 +134,20 @@ export function fastForwardHours(graph, trucks, weatherCells, startGameSeconds, 
 const CAREER_SAVE_VERSION = 1;
 const STARTING_CASH = 2500;
 const CRITICAL_FUEL_PCT = 8; // hard safety floor - the player truck can never actually run dry by accident
-const HUNGER_DECAY_PER_HOUR = 1.6; // ~2.6 days between meals before it bites
-const LOW_HUNGER_THRESHOLD = 20;
 const HEAT_COOLDOWN_PER_HOUR = 0.8; // law attention fades on its own, slowly, if you keep clean for a while
 const HEAT_BUILD_PER_HOUR_HAMMER = 12; // ~8h of sustained HAMMER saturates heat at 100
 const TICKET_FINE_BASE = 180; // + up to ~400 more scaled by how hot you were when caught
 const TICKET_CHANCE_PER_HOUR_AT_MAX_HEAT = 0.15; // scales down with (heat/100)^2, so it's negligible below ~40 heat
-const LONG_HAUL_BOREDOM_MILES = 400; // legs shorter than this don't grind on morale at all
-const LONG_HAUL_MORALE_DECAY_PER_HOUR = 0.6; // ~a full night's rest worth of morale over one long haul, halved+ by the Audiobook upgrade
+// Hunger/morale/health were removed (Career Mode Revamp Phase 2) - they had
+// exactly one combined effect on anything (a fatigueMult multiplier) despite
+// three separate bars, three vendors, and ~15 store items existing to manage
+// them. Fatigue survives as the one real driver-condition stat; heat and
+// wear survive as the two systems with a genuine, distinct consequence
+// (tickets/DUIs and repair bills). LONG_HAUL_BOREDOM_MILES survives too,
+// repurposed onto fatigue directly (see recompute()'s Audiobook branch)
+// instead of a morale decay nothing else read.
+const LONG_HAUL_BOREDOM_MILES = 400; // legs shorter than this don't grind on fatigue at all (Audiobook upgrade)
+const AUDIOBOOK_LONG_HAUL_FATIGUE_MULT = 0.85; // staying alert on a long stretch - the real replacement for the old "slows morale decay" effect
 
 // Reputation (profile.reputation) previously had exactly one reader
 // (STORE_ITEMS.TRUCKERS_CHOICE's repMin gate) and zero sources - it could
@@ -154,13 +160,6 @@ const REP_LOSS_HOTSHOT_MISSED = 3;
 const REP_LOSS_TICKET = 2;
 const REP_LOSS_DUI = 3;
 
-// Health (profile.health) previously only ever went DOWN (Trucker's
-// Choice, Cigarettes) with nothing reading it beyond the RIG vitals
-// display. Below this threshold it makes fatigue worse AND puts a real
-// ceiling on morale (see recompute()'s fatigueMult and tickNeeds' cap
-// below) - so letting it slide has a cost beyond a sad number in a bar.
-const LOW_HEALTH_THRESHOLD = 50;
-const LOW_HEALTH_FATIGUE_MULT = 1.2;
 export const SETTLEMENT_INTERVAL_HOURS = 168; // 1 game-week, elapsed GAME time - same convention as every other career.js timer, not real/wall-clock time
 const SETTLEMENT_OVERHEAD_PCT = 0.15; // insurance/permits/truck payment - the ongoing cost of OWNING a rig you don't personally drive, taken off the top before it reaches profile.cash
 
@@ -295,6 +294,12 @@ export function buyUpgrade(truck, key) {
 // `cat` groups the store shelf for display (career-ui.js's SUPPLIES vendor):
 // CAFFEINE / FOOD / BOOZE / GEAR - a flat 15-item grid otherwise makes the
 // player scroll past everything to find one thing.
+// Career Mode Revamp Phase 2: every item here used to carry a hunger/morale/
+// health "immediate" whose only downstream effect, anywhere, was nudging
+// fatigueMult by a fixed amount once those three bars crossed a threshold -
+// three meters, three vendors, ~15 items, one real consequence between all
+// of them. They're buff dispensers now: you buy one for what it actually
+// DOES (a real, timed, priced effect), not to top up a bar back to full.
 export const STORE_ITEMS = {
   // Coffee/Bottomless Cup used to share the same fatigue-per-dollar rate, so
   // Cup strictly dominated Coffee for $2 more with zero downside on either -
@@ -306,39 +311,48 @@ export const STORE_ITEMS = {
     label: "Energy Drink", price: 6, cat: "CAFFEINE", immediate: { fatigue: -35 }, buffHours: 4,
     effects: { speedMult: 1.06 }, crash: { fatigue: 20 },
   },
-  // Was priced UNDER Motel ($60, full fatigue clear + morale/hunger) despite
-  // being spammable with no cooldown - now correctly the pricier "emergency,
-  // no stop needed" option rather than a strictly-better default.
+  // Was priced UNDER Motel ($60, full fatigue clear) despite being
+  // spammable with no cooldown - now correctly the pricier "emergency, no
+  // stop needed" option rather than a strictly-better default.
   TRUCKERS_CHOICE: {
-    label: "Trucker's Choice", price: 85, cat: "CAFFEINE", repMin: 10, immediate: { fatigue: -70, health: -4, heat: 8 }, buffHours: 9,
+    label: "Trucker's Choice", price: 85, cat: "CAFFEINE", repMin: 10, immediate: { fatigue: -70, heat: 8 }, buffHours: 9,
     effects: {}, crash: { fatigue: 45 },
   },
-  JERKY: { label: "Beef Jerky", price: 5, cat: "FOOD", immediate: { hunger: 22, morale: 3 } },
-  SUNFLOWER_SEEDS: { label: "Sunflower Seeds", price: 3, cat: "FOOD", immediate: { hunger: 8, morale: 6 } },
-  CANDY: { label: "Candy Bar", price: 4, cat: "FOOD", immediate: { hunger: 10, morale: 4 } },
+  // FOOD: a quick, cheap fatigue top-off with no crash risk - the "snack,
+  // not a stop" option next to CAFFEINE's stronger but riskier buffs.
+  JERKY: { label: "Beef Jerky", price: 5, cat: "FOOD", immediate: { fatigue: -12 }, buffHours: 2, effects: { fatigueMult: 0.97 } },
+  SUNFLOWER_SEEDS: { label: "Sunflower Seeds", price: 3, cat: "FOOD", immediate: { fatigue: -8 } },
+  CANDY: { label: "Candy Bar", price: 4, cat: "FOOD", immediate: { fatigue: -6 }, buffHours: 1.5, effects: { speedMult: 1.03 } },
+  // BOOZE: the buzz masks tiredness for a while (fatigueMult), at real DUI
+  // risk if you're caught rolling on it.
   SIX_PACK: {
-    label: "Six-Pack", price: 12, cat: "BOOZE", parkedOnly: true, immediate: { morale: 25 }, buffHours: 6,
+    label: "Six-Pack", price: 12, cat: "BOOZE", parkedOnly: true, immediate: { fatigue: -15 }, buffHours: 6,
     effects: { fatigueMult: 0.9 }, dui: 0.35,
   },
   WHISKEY_PINT: {
-    label: "Whiskey Pint", price: 22, cat: "BOOZE", parkedOnly: true, immediate: { morale: 40 }, buffHours: 10,
+    label: "Whiskey Pint", price: 22, cat: "BOOZE", parkedOnly: true, immediate: { fatigue: -25 }, buffHours: 10,
     effects: { fatigueMult: 0.75 }, dui: 0.7,
   },
-  CIGARETTES: { label: "Cigarettes", price: 9, cat: "BOOZE", immediate: { morale: 8, health: -2 } },
+  // Repurposed from a pure downside (morale/health, neither of which exist
+  // now) into its own niche: cools you off after a close call, distinct
+  // from every other item here being about fatigue.
+  CIGARETTES: { label: "Cigarettes", price: 9, cat: "BOOZE", immediate: { heat: -10 } },
   RADAR_DETECTOR: { label: "Radar Detector", price: 220, cat: "GEAR", permanent: "radar", immediate: {} },
   ROAD_ATLAS: { label: "Road Atlas", price: 25, cat: "GEAR", permanent: "atlas", immediate: {} },
-  AUDIOBOOK: { label: "Audiobook", price: 15, cat: "GEAR", permanent: "audiobook", immediate: { morale: 5 } },
+  AUDIOBOOK: { label: "Audiobook", price: 15, cat: "GEAR", permanent: "audiobook", immediate: {} },
   SLEEP_AID: { label: "Sleep Aid", price: 12, cat: "GEAR", immediate: {}, buffHours: 10, effects: { restMult: 1.3 } },
   CB_ANTENNA: { label: "CB Antenna", price: 90, cat: "GEAR", permanent: "cbAntenna", immediate: {} },
 };
 
 // DINER: three tiers, plus a regional headline pulled from whatever the
 // city's own `ind` tags (data.js) suggest - reuses existing city data
-// rather than inventing a parallel flavor table.
+// rather than inventing a parallel flavor table. SITDOWN is the one that
+// actually earns the regional-special framing (a real timed buff); FAST and
+// BUFFET are plain fatigue relief at two different price/time points.
 export const DINER_MENU = {
-  FAST: { label: "Fast Bite", price: 8, hours: 0.25, immediate: { hunger: 30, morale: 2 } },
-  SITDOWN: { label: "Sit-Down Plate", price: 18, hours: 1, immediate: { hunger: 55, morale: 12 } },
-  BUFFET: { label: "All-You-Can-Eat", price: 14, hours: 1.25, immediate: { hunger: 80, morale: 8 } },
+  FAST: { label: "Fast Bite", price: 8, hours: 0.25, immediate: { fatigue: -15 } },
+  SITDOWN: { label: "Sit-Down Plate", price: 18, hours: 1, immediate: { fatigue: -30 }, buffHours: 4, effects: { fatigueMult: 0.92 } },
+  BUFFET: { label: "All-You-Can-Eat", price: 14, hours: 1.25, immediate: { fatigue: -45 } },
 };
 
 const REGIONAL_SPECIALS = [
@@ -356,15 +370,15 @@ export function regionalSpecialFor(cityNode) {
 
 const SHOWER_PRICE = 14, SHOWER_HOURS = 0.5;
 const SHOWER_FREE_FUEL_UNITS = 40; // fill this much or more at the same stop and the shower's free, same as a real truck stop loyalty perk
+const SHOWER_FATIGUE_RELIEF = 15;
 // A real bed genuinely beats the bunk - previously the $60 motel just
-// called the same advanceTime(8) a free 8h nap would, with nothing to
-// show for the money. Now it clears fatigue completely (a nap only ever
+// called the same advanceTime(8) a free 8h nap would, with nothing to show
+// for the money. Now it clears fatigue completely (a nap only ever
 // projects down toward 0, never guaranteed to reach it - see career-ui.js's
-// REST tab preview) and tops up morale/hunger well past what a nap alone
-// touches at all.
+// REST tab preview) AND cools off heat by a real amount a nap never touches
+// - a night off the road is a night off the radar too.
 const MOTEL_PRICE = 60, MOTEL_HOURS = 8;
-const MOTEL_MORALE_BONUS = 30;
-const MOTEL_HUNGER_BONUS = 25;
+const MOTEL_HEAT_RELIEF = 25;
 
 // Repair: cheap to keep clean, punishing to neglect - mirrors the real
 // tradeoff (preventive maintenance vs. gambling on a roadside breakdown).
@@ -414,10 +428,14 @@ export function createAgent(truck, profile) {
         if (e.fatigueMult) fatigueMult *= e.fatigueMult;
         if (e.restMult) restMult *= e.restMult;
       }
-      // Low morale makes for a tired, sloppy driver.
-      if (profile.morale < 30) fatigueMult *= 1.15;
-      if (profile.hunger < LOW_HUNGER_THRESHOLD) fatigueMult *= 1.1;
-      if (profile.health < LOW_HEALTH_THRESHOLD) fatigueMult *= LOW_HEALTH_FATIGUE_MULT;
+      // Audiobook (STORE_ITEMS.AUDIOBOOK, profile.upgrades.audiobook): a
+      // long haul under way (truck.edge, not parked at a stop on the same
+      // contract) grinds on alertness less with something to listen to.
+      // Replaces the old "slows a morale decay nothing else read" effect
+      // with one that touches fatigue, the stat that actually matters.
+      if (up.audiobook && truck?.edge && truck.contract && truck.contract.optimalMiles > LONG_HAUL_BOREDOM_MILES) {
+        fatigueMult *= AUDIOBOOK_LONG_HAUL_FATIGUE_MULT;
+      }
       this.speedMult = speedMult;
       this.wearMult = Math.max(0.1, wearMult);
       this.burnMult = burnMult;
@@ -497,10 +515,7 @@ function newProfile() {
     xp: 0,
     level: 1,
     reputation: 0,
-    hunger: 80,
-    morale: 70,
     heat: 0,
-    health: 100,
     wear: 0,
     throttle: "LEGAL",
     upgrades: { engine: 0, aero: false, tires: 0, sleeper: 0, tank: 0, apu: false, radar: false, radarTier2: false, atlas: false, audiobook: false, cbAntenna: false },
@@ -658,39 +673,15 @@ function expireBuffs(gameSeconds, truck) {
 function applyImmediate(effects, truck) {
   if (!effects) return;
   if (effects.fatigue && truck) truck.fatigue = Math.max(0, Math.min(100, truck.fatigue + effects.fatigue));
-  if (effects.hunger != null) profile.hunger = clamp01to100(profile.hunger + effects.hunger);
-  if (effects.morale != null) profile.morale = clamp01to100(profile.morale + effects.morale);
-  if (effects.health != null) profile.health = clamp01to100(profile.health + effects.health);
   if (effects.heat != null) profile.heat = clamp01to100(profile.heat + effects.heat);
 }
 
 // Called once per real (unpaused, non-truck-stop) frame by main.js when
 // career mode is active, and once per fastForwardHours substep during a
-// truck-stop wait/sleep - the one place profile needs (hunger decay, heat
-// cooldown, buff expiry, multiplier recompute) actually advance with the
-// clock, regardless of whether time is passing live or fast-forwarded.
+// truck-stop wait/sleep - the one place profile needs (heat cooldown, wear,
+// buff expiry, multiplier recompute) actually advance with the clock,
+// regardless of whether time is passing live or fast-forwarded.
 export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
-  profile.hunger = clamp01to100(profile.hunger - gameHours * HUNGER_DECAY_PER_HOUR);
-  if (profile.hunger < LOW_HUNGER_THRESHOLD) profile.morale = clamp01to100(profile.morale - gameHours * 2);
-  // Long-haul boredom: a leg over LONG_HAUL_BOREDOM_MILES grinds on morale
-  // while actually underway (truck.edge - not while parked at a stop on
-  // the same contract). Audiobook upgrade (STORE_ITEMS.AUDIOBOOK,
-  // profile.upgrades.audiobook) previously set a flag nothing read; it
-  // now cuts this decay rather than eliminating it outright ("slows",
-  // per the design note on making dead content real).
-  if (truck?.edge && truck.contract && truck.contract.optimalMiles > LONG_HAUL_BOREDOM_MILES) {
-    const audiobookMult = profile.upgrades.audiobook ? 0.4 : 1;
-    profile.morale = clamp01to100(profile.morale - gameHours * LONG_HAUL_MORALE_DECAY_PER_HOUR * audiobookMult);
-  }
-  // Poor health puts a real ceiling on morale - a purchase can still push
-  // morale up (a six-pack, a good meal), but it can't buy past what a
-  // battered body allows. Re-applied every tick rather than at the point
-  // of each individual gain, so it also catches health dropping BELOW an
-  // already-high morale (the ceiling closes in on it, not just holds it back).
-  if (profile.health < LOW_HEALTH_THRESHOLD) {
-    const moraleCap = 50 + profile.health;
-    if (profile.morale > moraleCap) profile.morale = moraleCap;
-  }
   profile.heat = clamp01to100(profile.heat - gameHours * HEAT_COOLDOWN_PER_HOUR);
   // wearMult means "wears faster" everywhere else it's used (fleet.js
   // multiplies it straight into the breakdown-probability roll) - it must
@@ -972,14 +963,14 @@ export function eatAtDiner(truck, tier) {
   return { ok: true, hours: item.hours };
 }
 
-export function takeShower(fuelUnitsThisStop) {
+export function takeShower(truck, fuelUnitsThisStop) {
   const free = fuelUnitsThisStop >= SHOWER_FREE_FUEL_UNITS;
   if (!free) {
     if (profile.cash < SHOWER_PRICE) return { ok: false, reason: "Can't afford it." };
     profile.cash -= SHOWER_PRICE;
     profile.stats.totalSpent += SHOWER_PRICE;
   }
-  profile.morale = clamp01to100(profile.morale + 15);
+  if (truck) truck.fatigue = Math.max(0, truck.fatigue - SHOWER_FATIGUE_RELIEF);
   pushLog(free ? "Free shower - filled up enough for it." : `Showered for $${SHOWER_PRICE}.`);
   return { ok: true, hours: SHOWER_HOURS, free };
 }
@@ -989,8 +980,10 @@ export function stayAtMotel(truck) {
   profile.cash -= MOTEL_PRICE;
   profile.stats.totalSpent += MOTEL_PRICE;
   if (truck) truck.fatigue = 0;
-  profile.morale = clamp01to100(profile.morale + MOTEL_MORALE_BONUS);
-  profile.hunger = clamp01to100(profile.hunger + MOTEL_HUNGER_BONUS);
+  // Off the road and off the radar for a night - real function beyond a
+  // free nap: full fatigue clear (a nap only ever projects DOWN toward 0)
+  // plus a real heat cooldown a nap doesn't touch.
+  profile.heat = clamp01to100(profile.heat - MOTEL_HEAT_RELIEF);
   pushLog(`Got a real bed at the motel for $${MOTEL_PRICE} - woke up fully rested.`);
   return { ok: true, hours: MOTEL_HOURS };
 }

@@ -1018,7 +1018,7 @@ const TAB_RENDERERS = {
   rankings: () => renderRankingsTab(trucks, graph),
   economy: () => renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo),
   rig: () => renderRigTab(career.getProfile(), getCareerTruck(), state.gameSeconds, graph),
-  fleet: () => renderFleetTab(career.getProfile(), truckById),
+  fleet: () => renderFleetTab(career.getProfile(), truckById, trucks),
   books: () => renderBooksTab(career.getProfile(), getCareerTruck()),
   world: () => renderWorldTab(trucks),
 };
