@@ -301,6 +301,24 @@ export function initCareerUI(callbacks) {
       const res = career.clearDispatch(btn.dataset.arg);
       if (!res.ok) toastNow(res.reason);
       renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "buy-city") {
+      openStandaloneCityPicker({
+        title: "Buy a City",
+        currentCity: null,
+        onSelect: (city) => {
+          const res = career.buyCity(lastFleetGraph, city);
+          if (!res.ok) toastNow(res.reason);
+          renderFleetTab(career.getProfile(), lastTruckById);
+        },
+      });
+    } else if (btn.dataset.action === "buy-city-direct") {
+      const res = career.buyCity(lastFleetGraph, btn.dataset.arg);
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
+    } else if (btn.dataset.action === "buy-corridor") {
+      const res = career.buyCorridor(lastFleetGraph, btn.dataset.arg);
+      if (!res.ok) toastNow(res.reason);
+      renderFleetTab(career.getProfile(), lastTruckById);
     }
   });
 
@@ -324,6 +342,7 @@ export function initCareerUI(callbacks) {
 let lastTruckById = null; // stashed so FLEET's own hire/reroll re-renders (no main.js round-trip) don't lose every hired truck's live status
 let lastFleetTrucks = null; // ditto, for the fleet-wide $/mi benchmark (Phase 5) - the full live array, not just the company's own
 let lastRigGraph = null; // stashed so RIG's own throttle/pull-in re-renders (no main.js round-trip) keep PULL IN's next-city subtitle working
+let lastFleetGraph = null; // same stash pattern, for the Network section's pricing/corridor lookups
 let lastSaveOk = null;
 
 export function isTruckStopOpen() { return open; }
@@ -1347,6 +1366,73 @@ function renderLogoPickerSection(profile) {
 // and AI Driver hands the player's own currently-driven rig over to full
 // autopilot. Reuses the exact .vendor-grid/.vendor-item vocabulary the
 // truck stop and Company Settings above already use - a shop shelf is a
+// --- Network (Network Expansion) ------------------------------------------
+//
+// "A load only exists between two cities the company owns" - this is the
+// one place that state gets bought. Progress counter + owned-city chips
+// up top (the cheapest, most legible reward for a growing network),
+// suggested next buys priced for real against the graph (a Buy Corridor
+// button whenever the road there passes through real unowned stops worth
+// bundling - see career.js's corridorQuote), and a full-map search as the
+// fallback for reaching further than the suggestions do. Absent entirely
+// for a legacy (pre-network) career - see career.js's newProfile comment.
+const NETWORK_SUGGESTION_COUNT = 5;
+
+function renderNetworkSection(profile, graph) {
+  if (!profile.networkMode || !graph) return "";
+  const owned = profile.ownedCities || [];
+  const total = career.networkCityCount(graph);
+  const pct = total ? Math.round((owned.length / total) * 100) : 0;
+  const ownedChips = owned.map((c) =>
+    `<span class="chip active" style="cursor:default;">${c}</span>`
+  ).join("");
+
+  const candidates = [];
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    if (node.t <= 0 || owned.includes(name)) continue;
+    if (!graph.adjacency[name] || !graph.adjacency[name].length) continue;
+    candidates.push({ name, price: career.cityPrice(graph, name) });
+  }
+  candidates.sort((a, b) => a.price - b.price);
+  const suggestionsHtml = candidates.slice(0, NETWORK_SUGGESTION_COUNT).map((c) => {
+    const quote = career.corridorQuote(graph, c.name);
+    // A corridor quote only beats the plain price when the road there
+    // actually passes through real, unowned stops worth bundling - a
+    // direct neighbor (quote.cities.length === 1) is just the same city
+    // at the same price, so the plain Buy button is the honest one there.
+    const isCorridor = quote.ok && quote.cities.length > 1;
+    return isCorridor ? `
+      <button class="vendor-item" data-action="buy-corridor" data-arg="${c.name}">
+        <span class="v-name">Corridor to ${c.name}</span>
+        <span class="v-desc">${quote.cities.length} cities via ${quote.anchor} &bull; saves $${quote.savings.toLocaleString()}</span>
+        <span class="v-meta"><span class="v-price expense">$${quote.bundlePrice.toLocaleString()}</span></span>
+      </button>` : `
+      <button class="vendor-item" data-action="buy-city-direct" data-arg="${c.name}">
+        <span class="v-name">${c.name}</span>
+        <span class="v-desc">Tier ${graph.nodes[c.name].t}</span>
+        <span class="v-meta"><span class="v-price expense">$${c.price.toLocaleString()}</span></span>
+      </button>`;
+  }).join("");
+
+  return `
+    <div class="section-label">Network</div>
+    <div class="vendor-item" style="cursor:default;margin-bottom:8px;">
+      <span class="v-name">${owned.length} / ${total} Cities Owned</span>
+      <div style="height:8px;border-radius:4px;background:var(--panel-strong);overflow:hidden;margin-top:6px;">
+        <div style="height:100%;border-radius:4px;background:var(--go);width:${pct}%;"></div>
+      </div>
+      <div class="chip-row" style="margin-top:8px;margin-bottom:0;padding-bottom:0;">${ownedChips}</div>
+    </div>
+    <div class="vendor-grid">
+      ${suggestionsHtml}
+      <button class="vendor-item" data-action="buy-city">
+        <span class="v-name">Buy a City</span>
+        <span class="v-desc">Search the full map</span>
+      </button>
+    </div>`;
+}
+
 // shop shelf whether it's parked at one city or covers the whole company.
 function renderFleetShopSection(profile) {
   const gpsOwned = profile.gpsFleetWide;
@@ -1420,9 +1506,10 @@ function fleetAverageRatePerMile(trucks, careerTruckId) {
   return miles > 0 ? earnings / miles : 0;
 }
 
-export function renderFleetTab(profile, truckById, trucks) {
+export function renderFleetTab(profile, truckById, trucks, graph) {
   if (truckById) lastTruckById = truckById; else truckById = lastTruckById;
   if (trucks) lastFleetTrucks = trucks; else trucks = lastFleetTrucks;
+  if (graph) lastFleetGraph = graph; else graph = lastFleetGraph;
   if (!profile.active) {
     careerEl.tabFleet.innerHTML = `<div class="placeholder-text">Not driving right now. Tap CAREER to sign on as an owner-operator.</div>`;
     return;
@@ -1546,6 +1633,7 @@ export function renderFleetTab(profile, truckById, trucks) {
       ${yourRigHtml}
       ${hiredHtml}
       ${renderHiringSection()}
+      ${renderNetworkSection(profile, graph)}
       ${renderFleetShopSection(profile)}
       ${renderLogoPickerSection(profile)}
       ${renderCompanySettingsSection(profile)}

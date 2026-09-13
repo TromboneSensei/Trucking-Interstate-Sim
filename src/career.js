@@ -1346,8 +1346,11 @@ const NETWORK_OWNED_ESCALATOR = 0.15; // each city already owned raises the pric
 export const NETWORK_CORRIDOR_DISCOUNT = 0.15;
 export const NETWORK_CORRIDOR_MAX_MILES = 400;
 export const NETWORK_CORRIDOR_MAX_HOPS = 6;
-const FIRST_LANE_MIN_MILES = 150;
-const FIRST_LANE_MAX_MILES = 400;
+// Exported so wizard-ui.js's own First Lane step can filter to the exact
+// same band Quick Start's autoGrantFirstLane picks from below, rather than
+// each keeping its own copy that could quietly drift apart.
+export const FIRST_LANE_MIN_MILES = 150;
+export const FIRST_LANE_MAX_MILES = 400;
 
 // Every tradeable (non-junction) city on the current graph - the
 // denominator for the FLEET tab's "X / N owned" progress counter.

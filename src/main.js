@@ -577,17 +577,18 @@ function handleSwitchTruck(newTruckId) {
 // Quick Start uses, then layers the wizard's own identity fields on top
 // via career.setupCompany (which overwrites the homeCity startCareer just
 // set, on purpose - see its own doc comment).
-function handleWizardComplete({ companyName, driver, truckHomeCity, homeBaseCity, logo }) {
+function handleWizardComplete({ companyName, driver, truckHomeCity, homeBaseCity, firstLaneCity, logo }) {
   const truck = new Truck(graph, truckHomeCity, Math.random, driver);
   trucks.push(truck);
   truckById.set(truck.id, truck);
   career.startCareer(truck, graph);
-  // TODO(Network Expansion Phase 4): the wizard should gain its own "pick
-  // your first lane" step (same founding-distance band autoGrantFirstLane
-  // uses) so the player chooses rather than the game auto-picking - this
-  // auto-grant is a placeholder standing in for that until the wizard step
-  // ships, so a wizard-created company isn't left with zero legal loads.
-  career.autoGrantFirstLane(graph);
+  // The wizard's own "First Lane" step lets the player choose (from the
+  // same founding-distance band Quick Start auto-picks within) rather than
+  // the game deciding for them - falls back to the auto-pick only if
+  // something upstream left it unset, so a wizard-created company is never
+  // stranded with zero legal loads.
+  if (firstLaneCity) career.grantFirstLane(firstLaneCity);
+  else career.autoGrantFirstLane(graph);
   career.setupCompany(companyName, homeBaseCity, logo);
   followTruck(truck);
 }
@@ -1041,7 +1042,7 @@ const TAB_RENDERERS = {
   rankings: () => renderRankingsTab(trucks, graph),
   economy: () => renderEconomyTab(trucks, graph, econHistory, state.spotlightCargo),
   rig: () => renderRigTab(career.getProfile(), getCareerTruck(), state.gameSeconds, graph),
-  fleet: () => renderFleetTab(career.getProfile(), truckById, trucks),
+  fleet: () => renderFleetTab(career.getProfile(), truckById, trucks, graph),
   books: () => renderBooksTab(career.getProfile(), getCareerTruck()),
   world: () => renderWorldTab(trucks),
 };

@@ -8,6 +8,7 @@
 "use strict";
 
 import { masterCities } from "./data.js";
+import { haversineMiles } from "./geo.js";
 import { traitSummary } from "./driver.js";
 import * as career from "./career.js";
 
@@ -22,7 +23,7 @@ const wizEl = {
   btnNext: document.getElementById("btn-wizard-next"),
 };
 
-const STEPS = ["Name", "Truck", "Home Base", "Logo"];
+const STEPS = ["Name", "Truck", "Home Base", "First Lane", "Logo"];
 const TIER_LABELS = { 1: "Major Hub", 2: "Regional", 3: "Secondary", 4: "Local" };
 
 let onComplete = null;
@@ -157,6 +158,52 @@ function renderHomeBaseStep() {
   `;
 }
 
+// Where the truck itself actually starts (the Truck step's own city
+// choice, defaulting to Home Base if never set) - the real hub the
+// network's first lane gets measured from, per career.js's startCareer
+// (profile.ownedCities seeds from truck.currentNode, not the cosmetic
+// homeCity display field setupCompany sets afterward).
+function effectiveTruckHomeCity() {
+  return wiz.candidate.city || wiz.homeBaseCity;
+}
+
+function firstLaneRowsHTML(search, currentCity) {
+  const hub = effectiveTruckHomeCity();
+  if (!hub) return `<div class="placeholder-text">Pick a Home Base first.</div>`;
+  const s = (search || "").toLowerCase();
+  // Same band career.js's own autoGrantFirstLane (Quick Start's founding
+  // lane) picks from - imported rather than duplicated, so the two paths
+  // can never quietly drift apart.
+  const { FIRST_LANE_MIN_MILES: MIN, FIRST_LANE_MAX_MILES: MAX } = career;
+  const list = Object.entries(masterCities)
+    .filter(([name, c]) => name !== hub && (c.t === 2 || c.t === 3) && name.toLowerCase().includes(s))
+    .map(([name, c]) => ({ name, c, miles: haversineMiles(masterCities[hub], c) }))
+    .filter((e) => e.miles >= MIN && e.miles <= MAX)
+    .sort((a, b) => b.c.w - a.c.w)
+    .slice(0, 60);
+  if (!list.length) return `<div class="placeholder-text">No cities in range (${MIN}-${MAX}mi of ${hub}) match.</div>`;
+  return list.map(({ name, c, miles }) => `
+    <div class="city-row${name === currentCity ? " selected" : ""}" data-city="${name}">
+      <span class="city-name">${name}</span>
+      <span class="city-tier">${TIER_LABELS[c.t]} &bull; ${Math.round(miles)}mi</span>
+    </div>`).join("");
+}
+
+function refreshFirstLaneResults() {
+  const resultsEl = document.getElementById("wizard-city-results");
+  if (resultsEl) resultsEl.innerHTML = firstLaneRowsHTML(wiz.firstLanePicker.search, wiz.firstLaneCity);
+}
+
+function renderFirstLaneStep() {
+  const hub = effectiveTruckHomeCity();
+  wizEl.content.innerHTML = `
+    <div class="section-label">First Lane</div>
+    <div class="row-sub" style="margin-bottom:8px;">Your company only trades between cities it owns - ${hub || "your hub"} comes free, but it needs a second city to actually haul anything. Free, one-time - what the company was founded on.</div>
+    <div class="city-search-row"><input type="text" id="wizard-city-search" class="wizard-text-input" placeholder="Search cities…" value="${escAttr(wiz.firstLanePicker.search || "")}"></div>
+    <div class="city-list" id="wizard-city-results">${firstLaneRowsHTML(wiz.firstLanePicker.search, wiz.firstLaneCity)}</div>
+  `;
+}
+
 function effectiveWizLogo() {
   return {
     color: wiz.logo.color,
@@ -216,6 +263,7 @@ function handleContentAction(action, arg) {
 function stepValid(s) {
   if (s === 0) return (wiz.companyName || "").trim().length > 0;
   if (s === 2) return !!wiz.homeBaseCity;
+  if (s === 3) return !!wiz.firstLaneCity;
   return true; // Truck (a candidate always exists once the wizard is open) and Logo (defaults are always valid) never block Next
 }
 
@@ -255,6 +303,7 @@ function render() {
   if (step === 0) renderNameStep();
   else if (step === 1) renderTruckStep();
   else if (step === 2) renderHomeBaseStep();
+  else if (step === 3) renderFirstLaneStep();
   else renderLogoStep();
   renderFooter();
 }
@@ -265,6 +314,7 @@ function finish() {
     driver: wiz.candidate.driver,
     truckHomeCity: wiz.candidate.city || wiz.homeBaseCity,
     homeBaseCity: wiz.homeBaseCity,
+    firstLaneCity: wiz.firstLaneCity,
     logo: { ...wiz.logo, monogram: career.deriveMonogram(wiz.companyName.trim()) },
   };
   closeWizard();
@@ -277,6 +327,8 @@ export function openWizard() {
     candidate: { driver: career.rollHireCandidate(), city: null },
     homeBaseCity: null,
     homeBasePicker: { search: "", tierFilter: null },
+    firstLaneCity: null,
+    firstLanePicker: { search: "" },
     logo: { color: career.LOGO_PALETTE[0].color, glyph: null },
   };
   step = 0;
@@ -325,6 +377,7 @@ export function initWizardUI(callbacks) {
     if (e.target.id !== "wizard-city-search") return;
     if (subPicker) { subPicker.search = e.target.value; refreshSubPickerResults(); }
     else if (step === 2) { wiz.homeBasePicker.search = e.target.value; refreshHomeBaseResults(); }
+    else if (step === 3) { wiz.firstLanePicker.search = e.target.value; refreshFirstLaneResults(); }
   });
 
   wizEl.content.addEventListener("click", (e) => {
@@ -349,6 +402,12 @@ export function initWizardUI(callbacks) {
       if (step === 2) {
         wiz.homeBaseCity = city;
         refreshHomeBaseResults();
+        wizEl.btnNext.disabled = !stepValid(step);
+        return;
+      }
+      if (step === 3) {
+        wiz.firstLaneCity = city;
+        refreshFirstLaneResults();
         wizEl.btnNext.disabled = !stepValid(step);
         return;
       }
