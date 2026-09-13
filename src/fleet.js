@@ -1330,7 +1330,22 @@ function nodeStopReason(graph, truck, node, env) {
   if (truck.agent) {
     const reason = truck.agent.stopReasonAt(graph.nodes[node]);
     if (reason) truck.stopVendor = "PUMPS";
-    return reason;
+    if (reason) return reason;
+    // AI Driver (career.js's autoDriver upgrade): once fully autonomous,
+    // the rig joins the exact same automatic dwell/rest discipline every
+    // other AI-driven truck below already follows - no separate penalty
+    // system, no player intervention, just this same REST gate applied
+    // to a career truck too. A manually-driven career truck (no AI
+    // Driver) is untouched: it still never auto-rests, on purpose - a
+    // human player decides when to stop, same as always.
+    if (truck.autoDriver && env && !truck.driver.isOutlaw && truck.fatigue > FATIGUE_REST_THRESHOLD) {
+      const m = localMinutesAtX(graph.nodes[node].x, env.gameSeconds);
+      const inWindow = truck.driver.isNightOwl
+        ? isInWindow(m, NIGHT_OWL_SLEEP_START_MIN, NIGHT_OWL_SLEEP_END_MIN)
+        : isInWindow(m, STANDARD_SLEEP_START_MIN, STANDARD_SLEEP_END_MIN);
+      if (inWindow) return "REST";
+    }
+    return null;
   }
 
   const nextEdge = truck.remainingPath[0];

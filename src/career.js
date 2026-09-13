@@ -575,7 +575,16 @@ export function createAgent(truck, profile) {
     // route around here.
     stopReasonAt(node) {
       if (!node || node.t === 0) return null;
-      if (truck.fuel <= CRITICAL_FUEL_PCT) return "PLAYER";
+      if (truck.fuel <= CRITICAL_FUEL_PCT) {
+        // AI Driver: a critical-fuel stop is a genuine safety floor, not
+        // a UI convenience - it still has to happen, but "your rig now
+        // runs itself end to end" should mean it actually does, without
+        // popping the manual truck stop and waiting on you. "FUEL" (not
+        // "PLAYER") routes it through fleet.js's ordinary auto-dwell/
+        // auto-refuel/resume-same-contract path instead - the exact same
+        // one a ordinary hired truck already uses.
+        return profile.autoDriver ? "FUEL" : "PLAYER";
+      }
       if (this.pullInRequested) return "PLAYER";
       return null;
     },

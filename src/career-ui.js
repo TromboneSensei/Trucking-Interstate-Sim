@@ -142,7 +142,11 @@ export function initCareerUI(callbacks) {
     if (onOpenWizard) onOpenWizard();
   });
   careerEl.careerStatus.addEventListener("click", () => {
-    if (career.isActive()) openTab("rig");
+    if (!career.isActive()) return;
+    // The bar itself now says which world it's showing (company snapshot
+    // vs. your own rig's vitals - see updateCareerHud) - tapping it should
+    // land on whichever tab actually matches that.
+    openTab(career.getProfile().autoDriver ? "fleet" : "rig");
   });
   careerEl.btnClose.addEventListener("click", closeTruckStop);
   careerEl.btnRollOut.addEventListener("click", handleRollOut);
@@ -1034,7 +1038,17 @@ export function updateCareerHud(profile, truck, gameSeconds) {
   // while a career is active, instead of introducing a new color.
   document.body.classList.toggle("career-mode", active);
   careerEl.btnCareer.classList.toggle("active", active);
-  careerEl.btnCareer.textContent = active ? "\u{1F69B} " + (truck ? truck.name : "CAREER") : "\u{1F69B} CAREER";
+  // Once AI Driver is bought, this rig isn't "yours" to watch drive
+  // anymore - the button naming it (and the status bar below showing its
+  // personal fuel/fatigue) was a leftover from before Fleet Command
+  // existed, when there was only ever one truck to name. Company name
+  // (or a generic fallback) replaces it; the truck itself is still one
+  // tap away in FLEET, same as any hired driver.
+  const auto = active && profile.autoDriver;
+  careerEl.btnCareer.textContent = !active ? "\u{1F69B} CAREER"
+    : auto ? "\u{1F69B} " + (profile.companyName || "FLEET")
+    : "\u{1F69B} " + (truck ? truck.name : "CAREER");
+  careerEl.careerStatus.title = auto ? "Open your fleet" : "Open your rig";
 
   if (active !== prevCareerActive) {
     // Tab-set swap: spectator (Dispatch/Rankings/Economy/CB) and career
@@ -1068,20 +1082,34 @@ export function updateCareerHud(profile, truck, gameSeconds) {
 
   careerEl.careerStatusCash.textContent = "$" + Math.round(profile.cash).toLocaleString();
   careerEl.careerStatusCash.style.color = profile.cash < 0 ? "var(--stop)" : "var(--go)";
-  const fuelPct = Math.round(truck.fuel);
-  careerEl.careerStatusFuel.textContent = `⛽ ${fuelPct}%`;
-  careerEl.careerStatusFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
-  const fatiguePct = Math.round(truck.fatigue);
-  careerEl.careerStatusFatigue.textContent = `\u{1F634} ${fatiguePct}%`;
-  careerEl.careerStatusFatigue.style.color = fatiguePct > 70 ? "var(--stop)" : fatiguePct > 40 ? "var(--caution)" : "var(--ink)";
-  // Destination used to live here too ("→ Ellensburg"), crowding a mobile-
-  // width bar - it's permanent in the RIG tab's own header, one tap away,
-  // so this bar stays icons-only: fuel/fatigue/hotshot/heat.
-  const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
-  careerEl.careerStatusHotshot.classList.toggle("hidden", !hotshot);
-  if (hotshot) {
-    const hoursLeft = (truck.contract.deadlineGameSeconds - gameSeconds) / 3600;
-    careerEl.careerStatusHotshot.textContent = hoursLeft > 0 ? `HOTSHOT ${hoursLeft.toFixed(1)}h` : "HOTSHOT LATE";
+  if (auto) {
+    // Company snapshot instead of one truck's personal vitals - fuel/
+    // fatigue/hotshot only ever meant something for a truck a human is
+    // actually driving. Reuses the same two spans rather than adding new
+    // DOM; fleet size counts the career truck itself, still yours, just
+    // no longer the one thing this bar is about.
+    careerEl.careerStatusFuel.textContent = `\u{1F69A} ${profile.hiredTrucks.length + 1} truck${profile.hiredTrucks.length ? "s" : ""}`;
+    careerEl.careerStatusFuel.style.color = "var(--ink)";
+    const settlementIn = Math.max(0, career.SETTLEMENT_INTERVAL_HOURS * 3600 - (gameSeconds - (profile.lastSettlementGameSeconds ?? gameSeconds)));
+    careerEl.careerStatusFatigue.textContent = `\u{1F4B0} settles ~${Math.ceil(settlementIn / 3600)}h`;
+    careerEl.careerStatusFatigue.style.color = "var(--ink)";
+    careerEl.careerStatusHotshot.classList.add("hidden"); // never applies to an autopilot-picked load - decorateHotshot only ever runs off the manual board
+  } else {
+    const fuelPct = Math.round(truck.fuel);
+    careerEl.careerStatusFuel.textContent = `⛽ ${fuelPct}%`;
+    careerEl.careerStatusFuel.style.color = fuelPct > 20 ? "var(--ink)" : "var(--stop)";
+    const fatiguePct = Math.round(truck.fatigue);
+    careerEl.careerStatusFatigue.textContent = `\u{1F634} ${fatiguePct}%`;
+    careerEl.careerStatusFatigue.style.color = fatiguePct > 70 ? "var(--stop)" : fatiguePct > 40 ? "var(--caution)" : "var(--ink)";
+    // Destination used to live here too ("→ Ellensburg"), crowding a mobile-
+    // width bar - it's permanent in the RIG tab's own header, one tap away,
+    // so this bar stays icons-only: fuel/fatigue/hotshot/heat.
+    const hotshot = truck.contract && truck.contract.hotshot && truck.contract.deadlineGameSeconds != null && truck.stopVendor !== "BOARD";
+    careerEl.careerStatusHotshot.classList.toggle("hidden", !hotshot);
+    if (hotshot) {
+      const hoursLeft = (truck.contract.deadlineGameSeconds - gameSeconds) / 3600;
+      careerEl.careerStatusHotshot.textContent = hoursLeft > 0 ? `HOTSHOT ${hoursLeft.toFixed(1)}h` : "HOTSHOT LATE";
+    }
   }
   // Heat only appeared in the old Career tab, so a ticket used to arrive
   // with zero warning while driving - the one place the player was
