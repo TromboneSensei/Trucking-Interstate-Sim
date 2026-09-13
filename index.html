@@ -17,13 +17,13 @@
       <span id="fleet-count">0 UNITS</span>
     </div>
 
-    <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
-    <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
     <!-- Read-only status while driving - no controls live here anymore
          (throttle/PULL IN moved into the RIG tab, full-size, where a
          thumb can actually hit them; see career-ui.js's renderRigTab).
          Tapping anywhere on the bar opens RIG - it's a shortcut into the
-         cockpit, not a second place to act from up here. -->
+         cockpit, not a second place to act from up here. Sits directly
+         under #top-bar so the two weld into one instrument cluster in
+         career mode (see body.career-mode rules in style.css). -->
     <button id="career-status" class="hidden" title="Open your rig">
       <span id="career-status-cash">$0</span>
       <span class="divider">/</span>
@@ -32,11 +32,28 @@
       <span id="career-status-hotshot" class="hidden"></span>
       <span id="career-status-heat" class="hidden" title="Police heat">&#128680;</span>
     </button>
-    <!-- Cockpit/Command toggle - only ever shown while a career is active
-         (see updateCareerHud). Cockpit is the default driving view;
-         Command zooms the camera out and swaps the sheet to the
-         fleet-management tabs (FLEET/BOOKS/WORLD), hiding RIG. -->
-    <button id="btn-mode-toggle" class="pill-btn hidden" title="Switch between driving and managing your fleet">&#128665; COMMAND</button>
+
+    <!-- These three used to stack one-per-row beneath the bar above,
+         which in career mode put five separate elements down the middle
+         of the screen, right where a followed truck reads best. One
+         wrapping row instead. -->
+    <div id="hud-actions">
+      <!-- Only shown while the career UI view (career tab set + status
+           bar) is on screen. Backgrounds that view back to the spectator
+           top bar/tabs WITHOUT ending the career - the CAREER pill
+           reappears and resumes it. It used to be pinned to the top-left
+           corner, where at phone width it sat directly on top of the
+           clock/status cluster; it's an action, so it lives with the
+           other actions. -->
+      <button id="btn-back-to-map" class="pill-btn hidden">&larr; MAP</button>
+      <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
+      <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
+      <!-- Cockpit/Command toggle - only ever shown while a career is
+           active (see updateCareerHud). Cockpit is the default driving
+           view; Command zooms the camera out and swaps the sheet to the
+           fleet-management tabs (FLEET/BOOKS/WORLD), hiding RIG. -->
+      <button id="btn-mode-toggle" class="pill-btn hidden" title="Switch between driving and managing your fleet">&#128665; COMMAND</button>
+    </div>
   </div>
 
   <button id="btn-settings" title="Settings">&#9881;</button>
@@ -60,14 +77,6 @@
     <input type="range" id="time-slider" min="0" max="8" step="0.5" value="1" title="Simulation speed">
   </div>
   <div id="fps-counter">60 FPS</div>
-  <!-- Only shown while the career UI view (RIG/FLEET/BOOKS/WORLD tabs +
-       career status bar) is on screen. Backgrounds that view back to the
-       spectator top bar/tab set WITHOUT ending the career itself - the
-       CAREER pill reappears clickable and resumes it. Replaces the old
-       always-there RELEASE button, which only ever unfollowed the camera
-       (redundant - dragging the map already does that, see main.js's
-       per-frame camera-mode resync). -->
-  <button id="btn-back-to-map" class="pill-btn hidden">&larr; Back to Map</button>
 
   <div id="settings-overlay" class="hidden">
     <div id="settings-panel">
@@ -219,14 +228,19 @@
            forces a fallback selection if the active tab is the one just
            hidden. Both sets are declared up front (not injected later) so
            el's static-vs-live query concerns never come up. -->
-      <button class="tab-btn active spectator-tab" data-tab="overview">Dispatch</button>
-      <button class="tab-btn spectator-tab" data-tab="rankings">Rankings</button>
-      <button class="tab-btn spectator-tab" data-tab="economy">Economy</button>
-      <button class="tab-btn spectator-tab" data-tab="cb">CB Feed<span id="cb-unread" class="tab-badge hidden"></span></button>
-      <button class="tab-btn career-tab hidden" data-tab="rig">Rig</button>
-      <button class="tab-btn career-tab hidden" data-tab="fleet">Fleet</button>
-      <button class="tab-btn career-tab hidden" data-tab="books">Books</button>
-      <button class="tab-btn career-tab hidden" data-tab="world">World</button>
+      <!-- Icon over label: four condensed uppercase words competing for a
+           400px-wide row was the whole tab bar's legibility problem. The
+           glyph is what you actually aim at; the word confirms it. The
+           click handler reads .closest(".tab-btn"), so nested spans are
+           transparent to it. -->
+      <button class="tab-btn active spectator-tab" data-tab="overview"><span class="tab-icon">&#128203;</span><span class="tab-label">Dispatch</span></button>
+      <button class="tab-btn spectator-tab" data-tab="rankings"><span class="tab-icon">&#127942;</span><span class="tab-label">Rankings</span></button>
+      <button class="tab-btn spectator-tab" data-tab="economy"><span class="tab-icon">&#128200;</span><span class="tab-label">Economy</span></button>
+      <button class="tab-btn spectator-tab" data-tab="cb"><span class="tab-icon">&#128251;</span><span class="tab-label">CB Feed</span><span id="cb-unread" class="tab-badge hidden"></span></button>
+      <button class="tab-btn career-tab hidden" data-tab="rig"><span class="tab-icon">&#128667;</span><span class="tab-label">Rig</span></button>
+      <button class="tab-btn career-tab hidden" data-tab="fleet"><span class="tab-icon">&#128101;</span><span class="tab-label">Fleet</span></button>
+      <button class="tab-btn career-tab hidden" data-tab="books"><span class="tab-icon">&#128181;</span><span class="tab-label">Books</span></button>
+      <button class="tab-btn career-tab hidden" data-tab="world"><span class="tab-icon">&#127760;</span><span class="tab-label">World</span></button>
     </div>
     <div class="tab-content">
       <div id="tab-overview" class="content-panel active"></div>

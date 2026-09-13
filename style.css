@@ -1,15 +1,92 @@
+/* =====================================================================
+   Interstate Fleet - visual system
+
+   The subject is American interstate freight, and the interface borrows
+   its vocabulary from real highway infrastructure rather than generic
+   dashboard chrome: gantry-sign panels, retroreflective sheen on raised
+   surfaces, FHWA sign colors used for the jobs they do on the road.
+
+   Sign-color semantics (this is a real system, not decoration):
+     --guide   green  - destinations, routing, distances (guide signs)
+     --info    blue   - services: fuel, food, lodging (service signs)
+     --caution amber  - warnings, work zones, the app's own chrome accent
+     --stop    red    - regulatory / hazard
+     --go      green  - "this reading is healthy" (status, NOT routing)
+   --go and --guide are deliberately different greens: one reports a
+   state, the other names a place. Mixing them is how a status bar starts
+   looking like a road sign and vice versa.
+===================================================================== */
+
 :root {
-  --asphalt: #12161c;
-  --panel: #1b212a;
-  --panel-strong: #232b36;
-  --line: rgba(255, 240, 214, 0.10);
-  --ink: #f1f3f5;
-  --dim: #8994a3;
-  --caution: #e8a33d;
+  /* --- surfaces -----------------------------------------------------
+     Four tiers, not two. Everything used to be --panel or --panel-strong
+     with the raised state hardcoded as #2a3441 in ten separate rules;
+     --panel-lift is that state, named. */
+  --asphalt: #0f1318;
+  --panel: #1a212b;
+  --panel-strong: #232c38;
+  --panel-lift: #2d3846;
+
+  /* Hairlines carry a warm bias toward the amber accent rather than a
+     neutral white - a pure-white rule over this ground reads blue. */
+  --line: rgba(255, 238, 209, 0.09);
+  --line-strong: rgba(255, 238, 209, 0.16);
+
+  --ink: #f2f4f7;
+  --ink-soft: #c3ccd8;
+  --dim: #8b96a6;
+
+  /* --- sign colors --------------------------------------------------- */
+  --caution: #f0a93c;
   --caution-ink: #2a1a03;
-  --go: #3f9e6c;
-  --stop: #d1494a;
-  --info: #3f6fb0;
+  --go: #46ac7a;
+  --go-ink: #06210f;
+  --stop: #e05658;
+  --info: #4d84cb;
+  --guide: #2e8257;
+
+  /* Tinted washes - an accent at low alpha over the panel, so an active
+     state can read as "lit" without a second opaque surface color. */
+  --wash-caution: rgba(240, 169, 60, 0.13);
+  --wash-go: rgba(70, 172, 122, 0.13);
+  --wash-stop: rgba(224, 86, 88, 0.13);
+  --wash-info: rgba(77, 132, 203, 0.13);
+
+  /* --- type scale ----------------------------------------------------
+     Replaces twelve ad-hoc sizes that sat between 0.6 and 0.82rem. */
+  --fs-micro: 0.625rem;
+  --fs-tiny: 0.6875rem;
+  --fs-sm: 0.75rem;
+  --fs-base: 0.8125rem;
+  --fs-md: 0.9375rem;
+  --fs-lg: 1.125rem;
+  --fs-xl: 1.375rem;
+
+  --font-display: "Oswald", "Arial Narrow", sans-serif;
+  --font-body: "Public Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
+
+  /* --- geometry ------------------------------------------------------ */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* --- elevation -----------------------------------------------------
+     Spent by role, never stamped uniformly: e1 for things resting on the
+     sheet, e2 for things floating over the map, e3 for true takeovers.
+     --sheen is the retroreflective top edge a raised sign panel catches. */
+  --e1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --e2: 0 6px 20px -6px rgba(0, 0, 0, 0.6);
+  --e3: 0 20px 52px -14px rgba(0, 0, 0, 0.75);
+  --sheen: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+
+  /* --- motion -------------------------------------------------------- */
+  --dur-1: 110ms;
+  --dur-2: 190ms;
+  --dur-3: 300ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* Bottom-sheet geometry, owned by ui.js's drag handler. --sheet-h is
      how tall the sheet is when open; --sheet-visible-h is how much of it
@@ -20,11 +97,8 @@
   --sheet-h: 45vh;
   --sheet-visible-h: 45vh;
 
-  --font-display: "Oswald", "Arial Narrow", sans-serif;
-  --font-body: "Public Sans", system-ui, -apple-system, sans-serif;
-  --font-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
-
   font-size: 16px;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -40,6 +114,15 @@ html, body {
   user-select: none;
 }
 
+/* Keyboard focus was invisible everywhere in this app. One ring, applied
+   once, on every focusable thing - and only for keyboard focus, so it
+   never fires on a thumb tap. */
+:focus-visible {
+  outline: 2px solid var(--caution);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
 #map {
   position: fixed;
   inset: 0;
@@ -48,6 +131,10 @@ html, body {
   display: block;
   background: var(--asphalt);
 }
+
+/* =====================================================================
+   HUD - the instrument cluster over the map
+===================================================================== */
 
 #hud {
   position: fixed;
@@ -61,32 +148,69 @@ html, body {
   gap: 8px;
 }
 
-/* Top bar reads like an overhead gantry sign: dark panel, a thin amber
-   rule underneath instead of a soft shadow, condensed caps for labels,
-   tabular mono digits for the clock. */
+/* Reads like an overhead gantry sign: dark panel, a thin amber rule
+   underneath instead of a soft shadow, condensed caps, tabular digits. */
 #top-bar {
   pointer-events: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-bottom: 2px solid var(--caution);
-  border-radius: 3px;
-  padding: 9px 16px;
+  border-radius: var(--r-md);
+  padding: 8px 16px;
   display: flex;
   align-items: center;
   gap: 10px;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--fs-sm);
   font-weight: 600;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  box-shadow: var(--e2), var(--sheen);
 }
-.divider { color: var(--dim); font-family: var(--font-display); }
+.divider { color: var(--dim); font-family: var(--font-display); opacity: 0.7; }
 
-/* Sim-speed corner chip + popover - top-right, stacked directly under
-   #btn-settings (same 38px/10px geometry so the two read as one corner
-   cluster). The chip IS #time-readout (not a separate label next to a
-   toggle button) so the existing "1.0x" text-content write already
-   keeps it current with zero extra JS. */
+/* The three map-level toggles used to stack vertically under the top bar,
+   one pill per row - in career mode that put five separate elements down
+   the middle of the screen, directly over the truck you're following.
+   They're one wrapping row now; the cluster above them is two rows tall
+   instead of four. */
+#hud-actions {
+  pointer-events: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 96vw;
+}
+
+/* --- corner controls: settings / sim speed, top-right ---------------- */
+#btn-settings {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  z-index: 5;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--caution);
+  border-radius: var(--r-md);
+  color: var(--ink);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--e2), var(--sheen);
+  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+#btn-settings:hover { background: var(--panel-lift); }
+#btn-settings:active { transform: scale(0.94); }
+
+/* The chip IS #time-readout (not a label beside a toggle) so main.js's
+   existing "1.0x" text write keeps it current with zero extra JS. */
 #time-readout {
   position: fixed;
   top: calc(max(10px, env(safe-area-inset-top)) + 46px);
@@ -101,14 +225,17 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--line);
   border-bottom: 2px solid var(--caution);
-  border-radius: 3px;
+  border-radius: var(--r-md);
   color: var(--caution);
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: var(--fs-tiny);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+  box-shadow: var(--e2), var(--sheen);
+  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
+#time-readout:hover { background: var(--panel-lift); }
 #time-readout:active { transform: scale(0.94); }
 #speed-popover {
   position: fixed;
@@ -118,69 +245,23 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--line);
   border-bottom: 2px solid var(--caution);
-  border-radius: 3px;
+  border-radius: var(--r-md);
   padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   align-items: stretch;
+  box-shadow: var(--e2), var(--sheen);
+  animation: pop-in var(--dur-2) var(--ease-out);
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to { opacity: 1; transform: none; }
 }
 #speed-presets { display: flex; gap: 4px; }
-#speed-presets .chip { padding: 5px 7px; font-size: 0.62rem; }
+#speed-presets .chip { padding: 5px 7px; font-size: var(--fs-micro); }
 #speed-popover #time-slider { width: 148px; accent-color: var(--caution); }
 
-.pill-btn {
-  pointer-events: auto;
-  background: var(--stop);
-  border: 1px solid rgba(0, 0, 0, 0.25);
-  border-radius: 3px;
-  color: #fff;
-  padding: 8px 14px;
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 0.78rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-.pill-btn:active { transform: scale(0.96); }
-
-/* Nav-view toggle - neutral until engaged, amber/active to match the
-   chip/tab "currently selected" convention used elsewhere. */
-#btn-nav-toggle { background: var(--panel-strong); color: var(--ink); }
-#btn-nav-toggle.active { background: var(--caution); color: var(--caution-ink); }
-/* Cockpit/Command toggle - neutral (Cockpit, the default driving view) vs.
-   --go (Command, matching career mode's own "you're in charge" accent). */
-#btn-mode-toggle { background: var(--panel-strong); color: var(--ink); }
-#btn-mode-toggle.active { background: var(--go); color: #06210f; }
-.hidden { display: none !important; }
-
-/* Settings gear - top-right, outside #hud's centered flex column so it
-   can pin to a corner independent of the top-bar's own layout. */
-#btn-settings {
-  position: fixed;
-  top: max(10px, env(safe-area-inset-top));
-  right: max(10px, env(safe-area-inset-right));
-  z-index: 5;
-  width: 38px;
-  height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-bottom: 2px solid var(--caution);
-  border-radius: 3px;
-  color: var(--ink);
-  font-size: 1.15rem;
-  line-height: 1;
-  cursor: pointer;
-}
-#btn-settings:active { transform: scale(0.94); }
-
-/* FPS counter - deliberately unobtrusive (no border/background chrome
-   like #btn-settings/#top-bar get), top-left mirror of the settings
-   gear's corner-pinning. */
 #fps-counter {
   position: fixed;
   top: max(8px, env(safe-area-inset-top));
@@ -188,53 +269,74 @@ html, body {
   z-index: 5;
   pointer-events: none;
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: var(--fs-micro);
   color: var(--dim);
-  opacity: 0.7;
+  opacity: 0.6;
 }
 
-/* Back to Map - top-left, tucked under the FPS counter's line so the two
-   never collide. Only shown while the career UI view is actually on
-   screen (see career-ui.js's updateCareerHud); backgrounds that view
-   back to spectator without ending the career itself. */
+/* Lives in #hud-actions with the other map-level toggles. Neutral fill
+   with the --go underline that marks every "you're in a career" control. */
 #btn-back-to-map {
-  position: fixed;
-  top: calc(max(8px, env(safe-area-inset-top)) + 20px);
-  left: max(8px, env(safe-area-inset-left));
-  z-index: 5;
-  pointer-events: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-bottom: 2px solid var(--go);
-  border-radius: 3px;
+  background: var(--panel-strong);
   color: var(--ink);
-  padding: 6px 10px;
+  border-bottom: 2px solid var(--go);
+}
+#btn-back-to-map:hover { background: var(--panel-lift); }
+
+/* =====================================================================
+   Buttons
+===================================================================== */
+
+.pill-btn {
+  pointer-events: auto;
+  background: var(--stop);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: var(--r-md);
+  color: #fff;
+  padding: 8px 14px;
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 0.66rem;
-  letter-spacing: 0.05em;
+  font-size: var(--fs-sm);
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   cursor: pointer;
+  /* A two-word label breaking across lines reads as a broken control -
+     "ROLL OUT" in the truck-stop footer was splitting whenever the
+     status line beside it wrapped. */
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: var(--e1), var(--sheen);
+  transition: transform var(--dur-1) var(--ease), filter var(--dur-1) var(--ease),
+              background var(--dur-1) var(--ease);
 }
-#btn-back-to-map:active { transform: scale(0.94); }
+.pill-btn:hover { filter: brightness(1.12); }
+.pill-btn:active { transform: scale(0.96); }
+.pill-btn:disabled { opacity: 0.4; cursor: default; filter: none; transform: none; }
 
-/* ---------------------------------------------------------------------
-   Settings modal - centered card over a dimmed backdrop (distinct from
-   the bottom-anchored decision overlay since this holds a full form,
-   not a handful of route-choice buttons). Opening it pauses the sim
-   (see main.js's state.settingsOpen); Apply tears the fleet down and
-   rebuilds it fresh under the new settings.
---------------------------------------------------------------------- */
+#btn-nav-toggle { background: var(--panel-strong); color: var(--ink); }
+#btn-nav-toggle.active { background: var(--caution); color: var(--caution-ink); }
+#btn-mode-toggle { background: var(--panel-strong); color: var(--ink); }
+#btn-mode-toggle.active { background: var(--go); color: var(--go-ink); }
+.hidden { display: none !important; }
+
+/* =====================================================================
+   Settings modal
+===================================================================== */
+
 #settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(4, 7, 11, 0.62);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
+  animation: fade-in var(--dur-2) var(--ease);
 }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 #settings-panel {
   pointer-events: auto;
   width: min(92vw, 420px);
@@ -243,20 +345,25 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--line);
   border-top: 3px solid var(--caution);
-  border-radius: 4px;
-  padding: 16px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  border-radius: var(--r-lg);
+  padding: 18px;
+  box-shadow: var(--e3), var(--sheen);
+  animation: lift-in var(--dur-3) var(--ease-out);
+}
+@keyframes lift-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: none; }
 }
 #settings-title {
   font-family: var(--font-display);
-  font-size: 1rem;
+  font-size: var(--fs-lg);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--ink);
   margin-bottom: 12px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-strong);
 }
 .settings-row {
   display: flex;
@@ -266,61 +373,62 @@ html, body {
   padding: 11px 0;
   border-bottom: 1px solid var(--line);
 }
-.settings-row label { font-family: var(--font-body); font-size: 0.85rem; font-weight: 600; color: var(--ink); }
+.settings-row:last-of-type { border-bottom: none; }
+.settings-row label { font-family: var(--font-body); font-size: var(--fs-base); font-weight: 600; color: var(--ink); }
 .settings-row input[type="number"],
 .settings-row select {
   background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: var(--r-sm);
   color: var(--ink);
   font-family: var(--font-mono);
-  font-size: 0.85rem;
-  padding: 6px 8px;
+  font-size: var(--fs-base);
+  padding: 7px 9px;
   width: 100px;
+  transition: border-color var(--dur-1) var(--ease);
 }
+.settings-row input[type="number"]:focus,
+.settings-row select:focus { outline: none; border-color: var(--caution); }
 .settings-row input[type="range"] { flex: 1; margin-left: 14px; accent-color: var(--caution); }
 #setting-default-speed-val { color: var(--caution); font-family: var(--font-mono); font-weight: 600; }
 
-.switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
 .switch-track {
   position: absolute;
   inset: 0;
   background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   pointer-events: none;
-  transition: background 0.15s;
+  transition: background var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease);
 }
 .switch-track::before {
   content: "";
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   left: 2px;
   top: 2px;
   background: var(--dim);
   border-radius: 50%;
-  transition: transform 0.15s, background 0.15s;
+  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
 }
-.switch input:checked + .switch-track { background: rgba(232, 163, 61, 0.25); border-color: var(--caution); }
+.switch input:checked + .switch-track { background: var(--wash-caution); border-color: var(--caution); }
 .switch input:checked + .switch-track::before { transform: translateX(18px); background: var(--caution); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--caution); outline-offset: 2px; }
 
 #settings-actions { display: flex; gap: 8px; margin-top: 16px; }
 #settings-actions .pill-btn { flex: 1; text-align: center; }
 
-/* ---------------------------------------------------------------------
-   Decision overlay - the junction call. Options render as real interstate
-   shields: blue field, red cap band, bold white route number - the one
-   piece of genuine interactivity in the sim gets the most on-brand prop.
---------------------------------------------------------------------- */
-/* GPS-style slide-in from the top-right, below the settings/speed corner
-   buttons, rather than a dead-center takeover - it no longer needs to sit
-   above the bottom sheet (main.js's showDecisionPanel now minimizes the
-   sheet itself, so the two never compete for the same space) and reads
-   more like a nav unit's route prompt than a modal dialog. Bullet time
-   (main.js's BULLET_TIME_SCALE) is what makes this non-blocking framing
-   honest - the world is still moving, just slowly, while it's up. */
+/* =====================================================================
+   Decision overlay - the junction call.
+
+   A GPS-style slide-in from the top-right rather than a dead-center
+   takeover: bullet time (main.js's BULLET_TIME_SCALE) keeps the world
+   moving slowly while it's up, so a nav-prompt framing is the honest one.
+===================================================================== */
+
 #decision-overlay {
   position: fixed;
   top: calc(max(10px, env(safe-area-inset-top)) + 90px);
@@ -332,24 +440,26 @@ html, body {
   overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-lg);
   padding: 14px 12px 12px;
   z-index: 8;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-  animation: gps-slide-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  box-shadow: var(--e3), var(--sheen);
+  animation: gps-slide-in var(--dur-3) var(--ease-out);
 }
 @keyframes gps-slide-in {
   from { transform: translateX(24px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
 }
-#decision-title {
+#decision-title,
+#contract-title,
+#career-start-choice .csc-title {
   font-family: var(--font-display);
-  font-size: 0.82rem;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--caution);
   text-align: center;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   margin-bottom: 10px;
 }
 #decision-options {
@@ -364,13 +474,16 @@ html, body {
   gap: 6px;
   background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-md);
   padding: 10px 6px 8px;
   color: var(--ink);
   cursor: pointer;
   font-family: var(--font-body);
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
 }
-.decision-btn:active, .decision-btn:hover { background: #2a3441; border-color: var(--caution); }
+.decision-btn:hover { background: var(--panel-lift); border-color: var(--line-strong); }
+.decision-btn:active { transform: scale(0.97); }
 
 .shield {
   position: relative;
@@ -399,30 +512,118 @@ html, body {
 .shield .shield-num {
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: var(--fs-md);
   color: #fff;
   line-height: 1.5;
 }
-.shield.hwy { background: var(--panel-strong); clip-path: none; border-radius: 3px; border: 2px solid var(--ink); }
+.shield.hwy { background: var(--panel-strong); clip-path: none; border-radius: var(--r-sm); border: 2px solid var(--ink); }
 .shield.hwy::before { content: ""; display: none; }
 .shield.hwy .shield-num { color: var(--ink); padding-top: 8px; }
 
-.decision-btn .dcity { font-size: 0.8rem; font-weight: 700; text-align: center; }
-.decision-btn .ddist { font-size: 0.65rem; color: var(--dim); font-family: var(--font-mono); }
-.decision-btn .datlas { font-size: 0.6rem; color: var(--caution); font-family: var(--font-mono); text-align: center; }
-/* CB reroute (Career Mode Revamp Phase 4): a genuinely disabled truck
-   somewhere on this option's route (fleet.js's disabledPositionsOnEdge -
-   the same ground truth cb.js's own "wreck ahead" lines read), never a
-   guess. */
-.decision-btn .dhazard { font-size: 0.6rem; color: var(--stop); font-weight: 700; text-align: center; }
-.decision-btn .dkey { font-size: 0.62rem; color: var(--caution); font-family: var(--font-mono); }
-#decision-timer { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); margin-top: 12px; overflow: hidden; }
-#decision-timer-fill { height: 100%; width: 100%; background: var(--caution); transform-origin: left; }
+.decision-btn .dcity { font-size: var(--fs-base); font-weight: 700; text-align: center; }
+.decision-btn .ddist { font-size: var(--fs-micro); color: var(--dim); font-family: var(--font-mono); }
+.decision-btn .datlas { font-size: var(--fs-micro); color: var(--caution); font-family: var(--font-mono); text-align: center; }
+/* A genuinely disabled truck somewhere on this option's route (the same
+   ground truth cb.js's "wreck ahead" lines read), never a guess. */
+.decision-btn .dhazard { font-size: var(--fs-micro); color: var(--stop); font-weight: 700; text-align: center; }
+.decision-btn .dkey { font-size: var(--fs-micro); color: var(--caution); font-family: var(--font-mono); }
+/* The route number plus its signed direction, e.g. "I-25 E". Green here
+   because it names a destination heading - guide-sign duty, not status. */
+.decision-btn .droute {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--caution);
+  letter-spacing: 0.03em;
+}
+/* The truck's pre-planned next leg, marked so "stay the course" reads as
+   the default rather than just happening to be listed first. */
+.decision-btn.planned {
+  border-color: var(--go);
+  background: linear-gradient(var(--wash-go), var(--wash-go)), var(--panel-strong);
+}
+.decision-btn.planned .dcity { color: var(--go); }
 
-/* ---------------------------------------------------------------------
-   Bottom sheet - the dispatch terminal. Hard corners, a caution rule
-   across the top, condensed-caps tab bar.
---------------------------------------------------------------------- */
+#decision-timer, #contract-timer {
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.08);
+  margin-top: 12px;
+  overflow: hidden;
+}
+#decision-timer-fill, #contract-timer-fill {
+  height: 100%;
+  width: 100%;
+  background: var(--caution);
+  transform-origin: left;
+}
+
+/* =====================================================================
+   Load board
+===================================================================== */
+
+#contract-overlay {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sheet-visible-h) + 16px);
+  transform: translateX(-50%);
+  width: min(94vw, 620px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 14px 12px 12px;
+  z-index: 8;
+  box-shadow: var(--e3), var(--sheen);
+  animation: rise-in var(--dur-3) var(--ease-out);
+}
+@keyframes rise-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(14px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+#contract-city { color: var(--ink); }
+#contract-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+/* A load is the one place the cargo-color rail genuinely encodes
+   something the eye needs before the words: which commodity this is. */
+.contract-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cargo, var(--line));
+  border-radius: var(--r-md);
+  padding: 10px 11px 9px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
+}
+.contract-btn:hover { background: var(--panel-lift); }
+.contract-btn:active { transform: scale(0.98); }
+.contract-btn .c-cargo { font-size: var(--fs-base); font-weight: 700; line-height: 1.15; }
+.contract-btn .c-type {
+  font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--cargo, var(--dim));
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.contract-btn .c-dest { font-size: var(--fs-sm); color: var(--ink); }
+.contract-btn .c-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: var(--fs-micro); font-family: var(--font-mono); color: var(--dim);
+}
+.contract-btn .c-pay { color: var(--go); font-weight: 700; font-size: var(--fs-base); }
+.contract-btn .c-key { font-size: var(--fs-micro); color: var(--caution); font-family: var(--font-mono); }
+
+/* =====================================================================
+   Bottom sheet - the dispatch terminal
+===================================================================== */
+
 #bottom-sheet {
   position: fixed;
   left: 0; right: 0; bottom: 0;
@@ -431,18 +632,18 @@ html, body {
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--panel);
   border-top: 2px solid var(--caution);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
   z-index: 6;
   display: flex;
   flex-direction: column;
-  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
-  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
+  transition: transform var(--dur-3) var(--ease);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5), var(--sheen);
 }
-#bottom-sheet.minimized { transform: translateY(calc(var(--sheet-h) - 56px)); }
-/* The grab strip for resizing the sheet. Full width and ~19px tall so
-   there's a real touch target, with the visible pill drawn as a centered
-   pseudo-element - the bar itself was only 4px of hittable area, far too
-   fine to drag with a thumb. Same total vertical footprint as before, so
-   the collapsed peek height is unchanged. */
+#bottom-sheet.minimized { transform: translateY(calc(var(--sheet-h) - 62px)); }
+
+/* Full width and ~19px tall so there's a real touch target, with the
+   visible pill drawn as a centered pseudo-element - the bar itself was
+   only 4px of hittable area, far too fine to drag with a thumb. */
 #sheet-handle {
   position: relative;
   width: 100%;
@@ -455,238 +656,1202 @@ html, body {
   content: "";
   position: absolute;
   left: 50%;
-  top: 9px;
+  top: 8px;
   transform: translateX(-50%);
-  width: 40px;
+  width: 44px;
   height: 4px;
   background: var(--dim);
-  opacity: 0.5;
-  border-radius: 2px;
+  opacity: 0.45;
+  border-radius: var(--r-pill);
+  transition: opacity var(--dur-1) var(--ease), width var(--dur-2) var(--ease);
 }
-#sheet-handle:active::before { opacity: 0.9; }
+#sheet-handle:hover::before { opacity: 0.75; width: 56px; }
+#sheet-handle:active::before { opacity: 1; width: 56px; }
+
+/* --- tab bar --------------------------------------------------------
+   Icon over label. Four uppercase condensed words in a 400px-wide row
+   were competing for the same few pixels; a glyph is scannable at a
+   glance and lets the label sit smaller and quieter beneath it. */
 #sheet-tabs {
   display: flex;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 0 8px;
+  border-bottom: 1px solid var(--line-strong);
+  padding: 0 6px;
+  gap: 2px;
 }
 .tab-btn {
+  position: relative;
   flex: 1;
-  padding: 10px;
+  min-width: 0;
+  padding: 7px 2px 8px;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
   color: var(--dim);
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 0.82rem;
+  font-size: var(--fs-tiny);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  transition: color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
 }
-.tab-btn.active { color: var(--caution); border-bottom-color: var(--caution); }
-.tab-content { flex: 1; min-height: 0; overflow: hidden; position: relative; }
-.content-panel { display: none; height: 100%; overflow-y: auto; padding: 12px; }
-.content-panel.active { display: block; }
-.placeholder-text { color: var(--dim); font-style: italic; text-align: center; padding: 24px 0; }
+.tab-btn .tab-icon {
+  font-size: 1rem;
+  line-height: 1.1;
+  filter: grayscale(1) opacity(0.55);
+  transition: filter var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
+}
+.tab-btn .tab-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The active underline grows out of the center rather than appearing. */
+.tab-btn::after {
+  content: "";
+  position: absolute;
+  left: 8px; right: 8px; bottom: -1px;
+  height: 2px;
+  background: var(--caution);
+  border-radius: var(--r-pill);
+  transform: scaleX(0);
+  transition: transform var(--dur-2) var(--ease);
+}
+.tab-btn:hover { color: var(--ink-soft); background: rgba(255, 255, 255, 0.03); }
+.tab-btn:hover .tab-icon { filter: grayscale(0.4) opacity(0.85); }
+.tab-btn.active { color: var(--caution); background: var(--wash-caution); }
+.tab-btn.active .tab-icon { filter: none; transform: translateY(-1px); }
+.tab-btn.active::after { transform: scaleX(1); }
 
-/* Metric ticket: a manifest-line look - left accent bar instead of a
-   uniform border, condensed number, mono unit. */
+.tab-content { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+.content-panel { display: none; height: 100%; overflow-y: auto; padding: 14px 12px 18px; }
+.content-panel.active { display: block; animation: panel-in var(--dur-2) var(--ease); }
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* An empty panel used to be one line of grey italic floating in space.
+   Given a bounded, dashed plate it reads as "nothing here yet" rather
+   than "something failed to load". */
+.placeholder-text {
+  color: var(--dim);
+  text-align: center;
+  padding: 26px 16px;
+  margin: 8px 0;
+  font-size: var(--fs-base);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+/* =====================================================================
+   Shared components
+===================================================================== */
+
+.section-label {
+  font-family: var(--font-display);
+  font-size: var(--fs-tiny);
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin: 16px 2px 7px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* A rule that runs out from the label to the right edge - a section break
+   you can find while scrolling, without spending a whole divider row. */
+.section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* --- metric card ----------------------------------------------------
+   No accent rail. Tone belongs on the number the tone is about, plus a
+   dot beside the label; a colored edge on every card in a six-card grid
+   makes the grid look striped and says nothing. */
 .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); gap: 8px; }
 .metric-card {
+  /* Untoned is the common case (most cards are just a number), so the
+     default tone is the quiet one - a neutral bullet and white digits.
+     Color arrives only when .good/.info/.bad says the number means
+     something, which is what makes it worth noticing when it does. */
+  --tone: var(--line-strong);
   background: var(--panel-strong);
-  border-left: 3px solid var(--caution);
-  border-radius: 2px;
-  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 11px 12px 10px;
   cursor: pointer;
+  box-shadow: var(--sheen);
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
 }
-.metric-card.good { border-left-color: var(--go); }
-.metric-card.info { border-left-color: var(--info); }
-.metric-card.bad { border-left-color: var(--stop); }
-.metric-card:active { background: #2a3441; }
+.metric-card.good { --tone: var(--go); }
+.metric-card.info { --tone: var(--info); }
+.metric-card.bad { --tone: var(--stop); }
+.metric-card:hover { background: var(--panel-lift); border-color: var(--line-strong); transform: translateY(-1px); }
+.metric-card:active { transform: translateY(0) scale(0.99); }
 .metric-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   font-family: var(--font-body);
-  font-size: 0.64rem;
+  font-size: var(--fs-micro);
   color: var(--dim);
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.07em;
   margin-bottom: 5px;
+}
+/* Sits on the first line's baseline rather than centering against the
+   block, so a title that wraps to two lines keeps its bullet up top. */
+.metric-title::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: var(--tone);
+  flex-shrink: 0;
 }
 .metric-value {
   font-family: var(--font-display);
-  font-size: 1.28rem;
+  font-size: var(--fs-xl);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  line-height: 1.1;
 }
+.metric-card.good .metric-value,
+.metric-card.info .metric-value,
+.metric-card.bad .metric-value { color: var(--tone); }
 .metric-sub {
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: var(--fs-micro);
   color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
-.section-label {
-  font-family: var(--font-display);
-  font-size: 0.7rem;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin: 14px 2px 6px;
-}
-
-/* Sort chip row - the named rankings (Fastest, Top Earners, ...) plus
-   room for more; the active one takes the caution accent. */
+/* --- chips ----------------------------------------------------------- */
 .chip-row {
   display: flex;
   gap: 6px;
   overflow-x: auto;
   padding: 2px 2px 8px;
   margin: 0 -2px 4px;
+  scrollbar-width: none;
 }
 .chip-row::-webkit-scrollbar { display: none; }
 .chip {
   flex: 0 0 auto;
   background: var(--panel-strong);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   color: var(--dim);
   font-family: var(--font-body);
   font-weight: 700;
-  font-size: 0.72rem;
-  padding: 6px 12px;
+  font-size: var(--fs-sm);
+  padding: 6px 13px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
+.chip:hover { background: var(--panel-lift); color: var(--ink-soft); }
+.chip:active { transform: scale(0.95); }
 .chip.active { background: var(--caution); border-color: var(--caution); color: var(--caution-ink); }
 
-/* RIG tab dashboard gauges - tank-shaped fuel gauge + humanoid fatigue
-   gauge, rendered as inline SVG by career-ui.js's tankGaugeSVG/personGaugeSVG.
-   This block only styles their layout/typography; the gauge shapes
-   themselves are drawn entirely in SVG markup. */
-.dash-gauges {
-  display: flex;
-  gap: 20px;
-  justify-content: center;
-  padding: 10px 4px 14px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--line);
-}
-.dash-gauge {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.dash-gauge-svg { flex: 0 0 auto; }
-.dash-gauge-label {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.dash-gauge-pct {
-  font-family: var(--font-display);
-  font-size: 1.5rem;
-  font-weight: 700;
-  line-height: 1.05;
-}
-.dash-gauge-name {
-  font-family: var(--font-body);
-  font-size: 0.68rem;
-  font-weight: 700;
-  color: var(--dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.dash-gauge-sub {
-  font-family: var(--font-body);
-  font-size: 0.68rem;
-  color: var(--dim);
-}
-
-/* Condensed wrapping strip of small stat readouts (Hunger/Morale/Heat/
-   Health/Condition) - reuses statChip()'s .stat-chip/.stat-label, which
-   otherwise only had rules scoped to #truckstop-status. */
-.vitals-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  padding: 8px 2px 4px;
-}
-.vitals-strip .stat-chip { display: flex; align-items: baseline; gap: 4px; }
-.vitals-strip .stat-chip .stat-label {
-  color: var(--dim);
-  font-family: var(--font-body);
-  font-weight: 700;
-  font-size: 0.6rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
+/* --- list row --------------------------------------------------------
+   A roster is a list, not a stack of cards. Twenty trucks each in their
+   own filled panel made a fleet look like twenty unrelated objects; a
+   flat row with a hairline separator reads as one table you scan down,
+   and leaves the filled-surface treatment free to mean "this row is
+   special" (your own rig, a selection) instead of meaning nothing. */
 .list-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
-  background: var(--panel-strong);
-  border-left: 3px solid transparent;
-  border-radius: 2px;
-  margin-bottom: 6px;
+  padding: 10px 10px;
+  background: transparent;
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--r-sm);
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
 }
-.list-row:active { background: #2a3441; }
+.list-row:last-child { border-bottom: none; }
+.list-row:hover { background: var(--panel-strong); }
+.list-row:active { background: var(--panel-lift); }
 .row-rank {
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: var(--fs-sm);
   color: var(--dim);
   min-width: 1.6em;
+  font-variant-numeric: tabular-nums;
 }
-.row-main { font-family: var(--font-body); font-weight: 700; font-size: 0.9rem; color: var(--ink); }
-.row-sub { font-size: 0.7rem; color: var(--dim); font-weight: 600; }
+.row-main { font-family: var(--font-body); font-weight: 700; font-size: var(--fs-md); color: var(--ink); }
+.row-sub { font-size: var(--fs-sm); color: var(--dim); font-weight: 600; }
 .row-value {
   margin-left: auto;
   text-align: right;
   font-family: var(--font-mono);
   font-weight: 600;
+  font-size: var(--fs-base);
   color: var(--caution);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.row-value .row-value-unit { color: var(--dim); font-size: 0.68rem; margin-left: 2px; }
+.row-value .row-value-unit { color: var(--dim); font-size: var(--fs-micro); margin-left: 2px; }
 
-.detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-.detail-title { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; }
-.detail-sub { font-size: 0.8rem; color: var(--dim); }
-.stat-bar-row { margin-bottom: 10px; }
+/* The FLEET roster's rows are a different animal from the scan-list above
+   - multi-line, with trait chips and per-truck buttons inside them - so
+   they take the card treatment, and here the left rail IS load-bearing:
+   it says whose truck this is (--go your own rig, --info a hired driver)
+   across a list where every row is yours in some sense. The rail color
+   arrives as --rail from career-ui.js. */
+.list-row.roster {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rail, var(--line-strong));
+  border-radius: var(--r-md);
+  padding: 11px 12px;
+  margin-bottom: 7px;
+  box-shadow: var(--sheen);
+  /* A roster row carries a name block, a lifetime-earnings column and a
+     Drive button; at phone width those do not fit on one line, and
+     without wrapping the earnings column ran off the right edge and the
+     button crushed to three words tall. Let the button take its own row
+     instead. */
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+/* Flex children default to min-width:auto, so the name block refused to
+   shrink below its longest status line and pushed everything right of it
+   off-screen. */
+.list-row.roster > div { min-width: 0; }
+.list-row.roster .row-value { flex-shrink: 0; }
+.list-row.roster:hover { background: var(--panel-lift); border-color: var(--line-strong); border-left-color: var(--rail, var(--line-strong)); }
+
+/* --- stat bars ------------------------------------------------------- */
+.stat-bar-row { margin-bottom: 11px; }
 .stat-bar-label {
   display: flex; justify-content: space-between;
   font-family: var(--font-mono);
-  font-size: 0.7rem; color: var(--dim); font-weight: 600; margin-bottom: 4px;
+  font-size: var(--fs-sm); color: var(--dim); font-weight: 600; margin-bottom: 5px;
+  font-variant-numeric: tabular-nums;
 }
-.stat-bar { height: 6px; background: rgba(255, 255, 255, 0.08); border-radius: 3px; overflow: hidden; }
-.stat-bar-fill { height: 100%; }
+.stat-bar {
+  height: 7px;
+  background: rgba(255, 255, 255, 0.07);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+.stat-bar-fill {
+  height: 100%;
+  border-radius: var(--r-pill);
+  transition: width var(--dur-3) var(--ease);
+}
+.stat-bar-row.hero { margin-bottom: 15px; }
+.stat-bar-row.hero .stat-bar-label { font-size: var(--fs-base); color: var(--ink-soft); }
+.stat-bar-row.hero .stat-bar { height: 14px; }
+
+.detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.detail-title { font-family: var(--font-display); font-size: var(--fs-xl); font-weight: 600; }
+.detail-sub { font-size: var(--fs-base); color: var(--dim); }
 .archetype-badge {
   font-family: var(--font-display);
-  font-size: 1rem;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
-.archetype-desc { font-size: 0.78rem; color: var(--dim); font-style: italic; }
+.archetype-desc { font-size: var(--fs-base); color: var(--dim); font-style: italic; }
 
-#toast {
+/* =====================================================================
+   Economy charts
+
+   Recessive chrome throughout: hairline axes one shade off the surface,
+   no gridlines, thin marks. Values and labels wear text tokens rather
+   than the series color - the colored mark beside them carries identity.
+===================================================================== */
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+.chart-card {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 10px 12px 5px;
+  box-shadow: var(--sheen);
+}
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.chart-title {
+  font-family: var(--font-body);
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.chart-now {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.spark { display: block; width: 100%; height: 52px; overflow: visible; }
+.spark-axis { stroke: var(--line-strong); stroke-width: 1; }
+.chart-empty {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+
+.cargo-chart { display: flex; flex-direction: column; gap: 2px; }
+.cargo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  background: transparent;
+  transition: background var(--dur-1) var(--ease);
+}
+.cargo-row:hover { background: var(--panel-strong); }
+.cargo-row:active { background: var(--panel-lift); }
+.cargo-row.spotlit { background: var(--wash-caution); box-shadow: inset 0 0 0 1px var(--caution); }
+.cargo-chip { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
+.cargo-name {
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  width: 9.6em;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cargo-track { flex: 1; height: 9px; background: rgba(255, 255, 255, 0.06); border-radius: 2px; overflow: hidden; }
+/* Rounded only on the data end, anchored flat to the baseline. */
+.cargo-bar {
+  display: block;
+  height: 100%;
+  background: #b8802a;
+  border-radius: 0 4px 4px 0;
+  transition: width var(--dur-3) var(--ease);
+}
+.cargo-val {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  width: 4.6em;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* =====================================================================
+   CB radio feed
+
+   Newest at the top, so the thing that just happened is the thing you're
+   already looking at. The severity rail here IS load-bearing - it's the
+   one place a colored left edge encodes a real three-level scale.
+===================================================================== */
+
+#tab-cb { padding: 8px 10px; }
+/* #cb-feed is cb.js's actual scroll container (it reads/writes
+   feedEl.scrollTop directly to preserve position as messages arrive).
+   It's reparented between #tab-cb (spectating) and World's own slot
+   (driving), so it needs its own bounded height wherever it lands. */
+#cb-feed { max-height: 400px; overflow-y: auto; }
+.cb-msg {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 8px 10px;
+  margin-bottom: 5px;
+  background: var(--panel-strong);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
+  animation: cb-in var(--dur-2) var(--ease);
+}
+.cb-msg:hover { background: var(--panel-lift); }
+@keyframes cb-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+.cb-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
+}
+.cb-body { flex: 1; min-width: 0; }
+.cb-handle {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--fs-tiny);
+  display: block;
+}
+.cb-text {
+  display: block;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  color: var(--dim);
+}
+/* A breakdown or a dry tank - the whole reason the feed is worth
+   watching, so it gets the hazard accent and brighter body text. */
+.cb-msg.cb-critical { border-left-color: var(--stop); background: linear-gradient(var(--wash-stop), var(--wash-stop)), var(--panel-strong); }
+.cb-msg.cb-critical .cb-text { color: var(--ink); }
+/* A jam / breakdown-ahead warning - real, but not this truck's own
+   emergency, so it sits a step below critical. */
+.cb-msg.cb-alert { border-left-color: var(--caution); }
+.cb-msg.cb-alert .cb-text { color: var(--ink-soft); }
+.cb-empty {
+  color: var(--dim);
+  font-style: italic;
+  text-align: center;
+  padding: 22px 8px;
+  font-size: var(--fs-base);
+}
+
+/* Unread-critical count, so a breakdown still gets noticed from another
+   tab. Pinned to the tab's corner now that tabs are two lines tall. */
+.tab-badge {
+  position: absolute;
+  top: 3px;
+  right: 50%;
+  transform: translateX(18px);
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--stop);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  line-height: 15px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+/* =====================================================================
+   Detail sheet - a truck's or a city's page. Deliberately NOT a tab: it
+   slides over whatever tab is open and is dismissed with Back, so
+   inspecting one unit is a detour rather than a permanent slot in the
+   tab bar competing with the four things you actually browse.
+===================================================================== */
+
+#detail-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in var(--dur-2) var(--ease-out);
+}
+@keyframes detail-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+#detail-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-strong);
+}
+#detail-back { background: var(--panel-strong); color: var(--ink); padding: 6px 12px; }
+#detail-bar-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+#details-data { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px 18px; }
+
+/* The truck's own last transmission, echoed on its detail page so the
+   handle in the feed and the unit you're inspecting are visibly the same
+   driver. */
+.detail-cb {
+  margin: 12px 0 2px;
+  padding: 9px 11px;
+  background: var(--panel-strong);
+  border-left: 3px solid var(--caution);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.detail-cb-label {
+  font-family: var(--font-body);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 3px;
+}
+.detail-cb-text { font-size: var(--fs-base); line-height: 1.4; color: var(--ink); font-style: italic; }
+.detail-cb-time { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--dim); }
+
+/* =====================================================================
+   Daily digest / payroll - end-of-day dispatch summaries. Corner-
+   anchored rather than modal: they report, they don't interrupt, and the
+   sim keeps running behind them.
+===================================================================== */
+
+#daily-digest, #payroll-alert {
   position: fixed;
-  top: 70px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: max(10px, env(safe-area-inset-left));
+  bottom: calc(var(--sheet-visible-h) + 14px);
+  z-index: 7;
+  width: min(88vw, 292px);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 8px 16px;
-  font-size: 0.85rem;
+  border-top: 2px solid var(--caution);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  box-shadow: var(--e3), var(--sheen);
+  cursor: pointer;
+  animation: digest-in var(--dur-3) var(--ease-out);
+}
+#payroll-alert { border-top-color: var(--info); }
+@keyframes digest-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+#daily-digest .digest-title, #payroll-alert .digest-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--caution);
+  margin-bottom: 8px;
+}
+#payroll-alert .digest-title { color: var(--info); }
+#daily-digest .digest-line, #payroll-alert .digest-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: var(--fs-sm);
+  padding: 2px 0;
+}
+#daily-digest .digest-line span:first-child, #payroll-alert .digest-line span:first-child { color: var(--dim); }
+#daily-digest .digest-line span:last-child, #payroll-alert .digest-line span:last-child {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+/* Driver superlatives, below a rule so they read as a separate block from
+   the operating numbers above. Each is a fixed-width badge column plus a
+   two-line body, so both rows' text starts on the same left edge. */
+#daily-digest .digest-awards, #payroll-alert .digest-awards {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#daily-digest .digest-award, #payroll-alert .digest-award {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+#daily-digest .digest-badge, #payroll-alert .digest-badge {
+  flex: 0 0 0.95rem;
+  text-align: center;
+  color: var(--caution);
+  font-size: var(--fs-base);
+  line-height: 1;
+}
+#payroll-alert .digest-badge { color: var(--info); }
+#daily-digest .digest-award-title, #payroll-alert .digest-award-title {
+  display: block;
+  color: var(--dim);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: var(--fs-micro);
+}
+#daily-digest .digest-award-val, #payroll-alert .digest-award-val {
+  display: block;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+#daily-digest .digest-award-val strong, #payroll-alert .digest-award-val strong { color: var(--ink); }
+#daily-digest .digest-star strong, #payroll-alert .digest-star strong { color: var(--ink); }
+
+/* =====================================================================
+   Career mode
+===================================================================== */
+
+#btn-career.active { background: var(--go); color: #fff; }
+
+/* Read-only instrument strip while driving. No controls live here -
+   throttle and PULL IN are full-size in the RIG tab, where a thumb can
+   actually hit them; this is glanceable, and doubles as a shortcut into
+   the cockpit on tap. */
+#career-status {
+  pointer-events: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom: 2px solid var(--go);
+  border-radius: var(--r-md);
+  padding: 7px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  max-width: 92vw;
+  overflow-x: auto;
+  scrollbar-width: none;
+  box-shadow: var(--e2), var(--sheen);
+  transition: transform var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+#career-status::-webkit-scrollbar { display: none; }
+#career-status:hover { background: var(--panel-strong); }
+#career-status:active { transform: scale(0.98); }
+#career-status-hotshot { color: var(--stop); font-weight: 700; }
+#career-status-heat { color: var(--stop); font-weight: 700; animation: heat-pulse 1.8s ease-in-out infinite; }
+@keyframes heat-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* Career mode-shift: body.career-mode is toggled by career-ui.js's
+   updateCareerHud, on/off with profile.active. Driving used to look
+   identical to spectating apart from the status strip - the app's own
+   chrome stayed amber right beside the strip's green border. This
+   spreads the SAME --go accent already established there across the rest
+   of the shell rather than introducing a new color.
+
+   It also welds the clock bar and the status strip into one instrument
+   cluster: flush edges, shared corners, no gap between them. */
+/* Both halves take the same width so the weld reads as one panel with a
+   divider, not two centred pills of different sizes stacked on top of
+   each other. */
+body.career-mode #top-bar {
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  box-shadow: none;
+  padding-bottom: 7px;
+  width: min(72vw, 320px);
+  justify-content: center;
+}
+body.career-mode #career-status {
+  margin-top: -8px;
+  border-top: none;
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  /* Held clear of the settings gear / speed chip pinned to the right
+     corner, which sit a layer above the HUD and would otherwise clip the
+     cluster's right edge. */
+  width: min(72vw, 320px);
+  justify-content: center;
+  max-width: none;
+}
+body.career-mode #truckstop-header { border-bottom-color: var(--go); }
+body.career-mode #truckstop-city { color: var(--go); }
+body.career-mode .tab-btn.active { color: var(--go); background: var(--wash-go); }
+body.career-mode .tab-btn.active::after { background: var(--go); }
+body.career-mode #sheet-tabs { border-bottom-color: var(--line-strong); }
+body.career-mode #bottom-sheet { border-top-color: var(--go); }
+
+/* =====================================================================
+   Truck stop + wizard - full-screen takeovers.
+
+   On a phone, where the bottom sheet already owns ~45% of the screen, a
+   multi-vendor menu needs the room; it also reads as "you've arrived
+   somewhere" rather than another panel stacked on the map.
+===================================================================== */
+
+.fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  background: var(--asphalt);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in var(--dur-3) var(--ease-out);
+}
+#truckstop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 11;
+  /* Translucent + blurred rather than solid: fast-forward (career.js's
+     advanceHours, used by Sleep/Wait) keeps ticking drawFrame underneath
+     while this is up, so the player watches the day/night cycle and AI
+     traffic keep moving behind the vendor menus instead of the world
+     visually vanishing while time passes. */
+  background: rgba(12, 16, 22, 0.86);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  flex-direction: column;
+  animation: detail-in var(--dur-3) var(--ease-out);
+}
+#truckstop-header, .fullscreen-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: max(14px, env(safe-area-inset-top)) 16px 12px;
+  background: var(--panel);
+  border-bottom: 2px solid var(--caution);
+}
+#truckstop-city, .fullscreen-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--caution);
+}
+#truckstop-clock, .fullscreen-sub {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  margin-top: 3px;
+}
+#truckstop-tabs, .fullscreen-tabs {
+  flex-shrink: 0;
+  display: flex;
+  overflow-x: auto;
+  gap: 2px;
+  padding: 8px 10px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-strong);
+  scrollbar-width: none;
+}
+#truckstop-tabs::-webkit-scrollbar, .fullscreen-tabs::-webkit-scrollbar { display: none; }
+.vendor-tab-btn {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 9px 15px;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  transition: color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.vendor-tab-btn::after {
+  content: "";
+  position: absolute;
+  left: 10px; right: 10px; bottom: -1px;
+  height: 2px;
+  background: var(--caution);
+  border-radius: var(--r-pill);
+  transform: scaleX(0);
+  transition: transform var(--dur-2) var(--ease);
+}
+.vendor-tab-btn:hover { color: var(--ink-soft); background: rgba(255, 255, 255, 0.03); }
+.vendor-tab-btn.active { color: var(--caution); background: var(--wash-caution); }
+.vendor-tab-btn.active::after { transform: scaleX(1); }
+
+#truckstop-content, .fullscreen-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+#truckstop-footer, .fullscreen-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 1px solid var(--line-strong);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.35);
+}
+#truckstop-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+#truckstop-status .stat-chip { display: flex; align-items: baseline; gap: 4px; }
+#truckstop-status .stat-chip .stat-label {
+  color: var(--dim);
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+#btn-roll-out:disabled { opacity: 0.4; cursor: default; }
+
+/* --- vendor shelf ----------------------------------------------------
+   A store shelf and a load board are the same "pick one of several
+   priced things" interaction, so they share a shape - but the shelf item
+   drops the load board's cargo-color rail (there's no commodity to
+   encode) and leads with the price instead, which is the thing the
+   player is actually comparing across the grid. */
+.vendor-section-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 10px;
+}
+.vendor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 22px;
+}
+.vendor-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 11px 12px 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+  box-shadow: var(--sheen);
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
+}
+.vendor-item:hover { background: var(--panel-lift); border-color: var(--line-strong); transform: translateY(-1px); }
+.vendor-item:active { transform: translateY(0) scale(0.985); }
+.vendor-item:disabled, .vendor-item.disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: var(--panel-strong);
+  border-color: var(--line);
+  transform: none;
+}
+.vendor-item .v-name { font-size: var(--fs-base); font-weight: 700; }
+.vendor-item .v-desc { font-size: var(--fs-tiny); color: var(--dim); line-height: 1.35; }
+.vendor-item .v-meta {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: var(--fs-sm); font-family: var(--font-mono); margin-top: 3px;
+}
+.vendor-item .v-price { color: var(--go); font-weight: 700; font-size: var(--fs-base); }
+.vendor-item .v-price.expense { color: var(--caution); }
+
+#truckstop-content .chip-row { margin-bottom: 14px; }
+
+/* =====================================================================
+   Company logo - a filled circle in the company's chosen color with its
+   glyph (or monogram fallback) centered inside. The FLEET header badge
+   and the canvas map beacon share the color/glyph/monogram data shape,
+   not this markup (render.js can't use DOM).
+===================================================================== */
+
+.company-badge {
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3), var(--e1);
+}
+.logo-picker-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.logo-picker-groups { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+.logo-swatch-row, .logo-glyph-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.logo-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.logo-swatch:hover { transform: scale(1.12); }
+.logo-swatch.active { border-color: var(--ink); box-shadow: 0 0 0 2px var(--caution); }
+.logo-glyph-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: var(--fs-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
+}
+.logo-glyph-btn:hover { background: var(--panel-lift); transform: translateY(-1px); }
+.logo-glyph-btn.active { border-color: var(--caution); background: var(--wash-caution); }
+
+/* =====================================================================
+   RIG tab - the cockpit
+
+   Throttle is one segmented row and PULL IN a large two-line button,
+   both at the top of the tab above everything else; Fuel and Fatigue get
+   a "hero" stat-bar variant so the two vitals players actually need are
+   never buried among five identical-looking rows.
+===================================================================== */
+
+.dash-gauges {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  padding: 12px 4px 16px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.dash-gauge { display: flex; align-items: center; gap: 11px; }
+.dash-gauge-svg { flex: 0 0 auto; }
+.dash-gauge-label { display: flex; flex-direction: column; gap: 1px; }
+.dash-gauge-pct {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.dash-gauge-name {
+  font-family: var(--font-body);
+  font-size: var(--fs-tiny);
+  font-weight: 700;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dash-gauge-sub { font-family: var(--font-body); font-size: var(--fs-tiny); color: var(--dim); }
+
+/* Condensed wrapping strip of small stat readouts (Hunger/Morale/Heat/
+   Health/Condition), reusing statChip()'s markup. */
+.vitals-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 16px;
+  padding: 10px 2px 4px;
+}
+.vitals-strip .stat-chip { display: flex; align-items: baseline; gap: 4px; font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; }
+.vitals-strip .stat-chip .stat-label {
+  color: var(--dim);
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.throttle-row {
+  display: flex;
+  gap: 3px;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 3px;
+  box-shadow: var(--sheen);
+}
+.throttle-seg {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-base);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 11px 4px;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+.throttle-seg:hover { color: var(--ink-soft); background: rgba(255, 255, 255, 0.04); }
+.throttle-seg.active {
+  background: var(--seg-color, var(--caution));
+  color: #0b0e13;
+  box-shadow: var(--e1);
+}
+
+.pull-in-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  margin-top: 9px;
+  margin-bottom: 15px;
+  background: var(--go);
+  border: none;
+  border-radius: var(--r-md);
+  padding: 14px;
+  color: #fff;
+  cursor: pointer;
+  font-family: var(--font-display);
+  box-shadow: var(--e1), var(--sheen);
+  transition: transform var(--dur-1) var(--ease), filter var(--dur-1) var(--ease);
+}
+.pull-in-btn:hover { filter: brightness(1.1); }
+.pull-in-btn:active { transform: scale(0.98); }
+.pull-in-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: var(--panel-strong);
+  color: var(--dim);
+  filter: none;
+  transform: none;
+}
+.pull-in-btn .pull-in-title {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pull-in-btn .pull-in-sub { font-size: var(--fs-sm); font-weight: 600; opacity: 0.9; }
+
+/* =====================================================================
+   Wizard step content + the city picker shared by the Truck, Home Base
+   and First Lane steps (and reused standalone by FLEET's settings).
+===================================================================== */
+
+.wizard-text-input {
+  width: 100%;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  padding: 12px 13px;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.wizard-text-input::placeholder { color: var(--dim); }
+.wizard-text-input:focus { outline: none; border-color: var(--caution); background: var(--panel-lift); }
+.city-search-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.city-search-row .wizard-text-input { flex: 1; }
+.city-list { display: flex; flex-direction: column; gap: 3px; max-height: 46vh; overflow-y: auto; }
+.city-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.city-row:hover { background: var(--panel-strong); }
+.city-row:active { background: var(--panel-lift); }
+/* The one selected row in a long list earns a filled surface and a real
+   border - it's the answer to "which did I pick", scanned at a glance. */
+.city-row.selected {
+  background: var(--wash-caution);
+  border-color: var(--caution);
+}
+.city-row .city-name { font-weight: 700; font-size: var(--fs-md); flex: 1; }
+.city-row .city-tier { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--dim); }
+#wizard-footer .pill-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* The "Quick Start vs. Set Up My Company" choice on a fresh career start
+   - a two-button decision, so it reuses the small floating-card geometry
+   rather than a second full-screen takeover. */
+#career-start-choice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sheet-visible-h) + 16px);
+  transform: translateX(-50%);
+  width: min(90vw, 360px);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--caution);
+  border-radius: var(--r-lg);
+  padding: 15px 13px 13px;
+  z-index: 8;
+  box-shadow: var(--e3), var(--sheen);
+  animation: rise-in var(--dur-3) var(--ease-out);
+}
+#career-start-choice .csc-options { display: flex; flex-direction: column; gap: 8px; }
+
+/* =====================================================================
+   Toast + fatal error
+===================================================================== */
+
+/* Clears the HUD stack below the action row - at 74px it used to land
+   directly on top of the NAV VIEW / COMMAND buttons. */
+#toast {
+  position: fixed;
+  top: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel-lift);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  padding: 9px 17px;
+  font-size: var(--fs-base);
+  font-weight: 600;
   z-index: 9;
+  box-shadow: var(--e3), var(--sheen);
+  animation: toast-in var(--dur-3) var(--ease-out);
+  max-width: 90vw;
+  text-align: center;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 #fatal-error {
@@ -701,874 +1866,31 @@ html, body {
   overflow: auto;
 }
 
+/* =====================================================================
+   Narrow screens
+===================================================================== */
+
 @media (max-width: 480px) {
-  #top-bar { font-size: 0.7rem; gap: 6px; padding: 7px 10px; }
+  #top-bar { font-size: var(--fs-tiny); gap: 7px; padding: 7px 12px; }
+  #career-status { font-size: var(--fs-tiny); gap: 8px; padding: 7px 11px; }
   #speed-popover #time-slider { width: 110px; }
+  .pill-btn { padding: 7px 11px; font-size: var(--fs-tiny); }
+  .tab-btn { font-size: 0.5625rem; letter-spacing: 0.03em; }
+  /* Two fixed columns, not auto-fit: at phone width auto-fit packed in a
+     third column ~118px wide, which wrapped nearly every title ("Busiest
+     Interstate", "Congested Segments") onto two lines and left the grid
+     looking ragged. Two columns give the labels room to sit on one. */
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #truckstop-content, .fullscreen-content { padding: 13px; }
 }
 
-/* ---------------------------------------------------------------------
-   Economy tab charts. Recessive chrome throughout: hairline axes one
-   shade off the surface, no gridlines, thin marks. Values and labels wear
-   text tokens rather than the series colour - the coloured mark beside
-   them carries identity.
---------------------------------------------------------------------- */
-.chart-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 8px;
+/* Honour a system-level request for less motion: keep state changes
+   instant rather than animated, but leave the interface otherwise
+   identical - nothing here conveys meaning through movement alone. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
-.chart-card {
-  background: var(--panel-strong);
-  border-radius: 2px;
-  padding: 9px 11px 4px;
-}
-.chart-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-.chart-title {
-  font-family: var(--font-body);
-  font-size: 0.64rem;
-  color: var(--dim);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.chart-now {
-  font-family: var(--font-display);
-  font-size: 0.98rem;
-  font-weight: 600;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.spark { display: block; width: 100%; height: 52px; overflow: visible; }
-.spark-axis { stroke: rgba(255, 255, 255, 0.10); stroke-width: 1; }
-.chart-empty {
-  height: 52px;
-  display: flex;
-  align-items: center;
-  color: var(--dim);
-  font-size: 0.72rem;
-  font-style: italic;
-}
-
-.cargo-chart { display: flex; flex-direction: column; gap: 2px; }
-.cargo-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: 2px;
-  cursor: pointer;
-  background: var(--panel-strong);
-}
-.cargo-row:active, .cargo-row:hover { background: #2a3441; }
-.cargo-row.spotlit { outline: 1px solid var(--caution); }
-.cargo-chip { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
-.cargo-name {
-  font-family: var(--font-body);
-  font-size: 0.76rem;
-  font-weight: 600;
-  color: var(--ink);
-  width: 9.6em;
-  flex-shrink: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.cargo-track { flex: 1; height: 9px; background: rgba(255, 255, 255, 0.06); border-radius: 2px; overflow: hidden; }
-/* Rounded only on the data end, anchored flat to the baseline. */
-.cargo-bar { display: block; height: 100%; background: #b8802a; border-radius: 0 4px 4px 0; }
-.cargo-val {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-  width: 4.6em;
-  text-align: right;
-  flex-shrink: 0;
-}
-
-/* ---------------------------------------------------------------------
-   CB radio - the live chatter feed, now a tab in the sheet rather than a
-   panel floating over the map (it ate far too much of a phone screen
-   there). Newest at the top, so the thing that just happened is the thing
-   you're already looking at, and the whole list is a scrollback you can
-   pull down through rather than three lines that evaporate.
---------------------------------------------------------------------- */
-#tab-cb { padding: 8px 10px; }
-/* #cb-feed is cb.js's actual scroll container (it reads/writes
-   feedEl.scrollTop directly to preserve position as messages arrive) -
-   it used to just BE #tab-cb. Now it's reparented between #tab-cb
-   (spectating) and World's own slot (driving, see career-ui.js's
-   renderWorldTab), so it needs its own bounded height/scroll wherever it
-   lands rather than inheriting the parent panel's, which differs between
-   the two homes (one is the whole sheet, the other shares space with
-   World's metrics grid above it). */
-#cb-feed { max-height: 400px; overflow-y: auto; }
-.cb-msg {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  padding: 7px 9px;
-  margin-bottom: 5px;
-  background: var(--panel-strong);
-  border-left: 3px solid var(--line);
-  border-radius: 2px;
-  cursor: pointer;
-  animation: cb-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-.cb-msg:active { background: #2a3441; }
-@keyframes cb-in {
-  from { opacity: 0; transform: translateY(-6px); }
-  to { opacity: 1; transform: none; }
-}
-.cb-time {
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-  padding-top: 1px;
-}
-.cb-body { flex: 1; min-width: 0; }
-.cb-handle {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 0.68rem;
-  display: block;
-}
-.cb-text {
-  display: block;
-  font-size: 0.74rem;
-  line-height: 1.35;
-  color: var(--dim);
-}
-/* A breakdown or a dry tank - the whole reason the feed is worth
-   watching, so it gets the hazard accent and brighter body text. */
-.cb-msg.cb-critical { border-left-color: var(--stop); background: rgba(58, 26, 28, 0.72); }
-.cb-msg.cb-critical .cb-text { color: var(--ink); }
-/* A jam / breakdown-ahead warning - real, but not this truck's own
-   emergency, so it sits a step below critical. */
-.cb-msg.cb-alert { border-left-color: var(--caution); }
-.cb-msg.cb-alert .cb-text { color: var(--ink); }
-.cb-empty {
-  color: var(--dim);
-  font-style: italic;
-  text-align: center;
-  padding: 22px 8px;
-  font-size: 0.78rem;
-}
-
-/* Unread-critical count on the CB tab, so a breakdown still gets noticed
-   while you're reading another tab. */
-.tab-badge {
-  display: inline-block;
-  min-width: 15px;
-  margin-left: 5px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--stop);
-  color: #fff;
-  font-family: var(--font-mono);
-  font-size: 0.58rem;
-  line-height: 15px;
-  vertical-align: middle;
-}
-
-/* ---------------------------------------------------------------------
-   Detail sheet - a truck's or a city's page. Deliberately NOT a tab: it
-   slides over whatever tab is open and is dismissed with Back, so
-   inspecting one unit is a detour rather than a permanent slot in the
-   tab bar competing with the four things you actually browse.
---------------------------------------------------------------------- */
-#detail-sheet {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  animation: detail-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-@keyframes detail-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-#detail-bar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-}
-#detail-back { background: var(--panel-strong); color: var(--ink); padding: 6px 12px; }
-#detail-bar-title {
-  font-family: var(--font-display);
-  font-size: 0.78rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--dim);
-}
-#details-data { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
-
-/* The truck's own last transmission, echoed on its detail page so the
-   handle in the feed and the unit you're inspecting are visibly the same
-   driver. */
-.detail-cb {
-  margin: 10px 0 2px;
-  padding: 8px 10px;
-  background: var(--panel-strong);
-  border-left: 3px solid var(--caution);
-  border-radius: 2px;
-}
-.detail-cb-label {
-  font-family: var(--font-body);
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--dim);
-  margin-bottom: 3px;
-}
-.detail-cb-text { font-size: 0.78rem; line-height: 1.35; color: var(--ink); font-style: italic; }
-.detail-cb-time { font-family: var(--font-mono); font-size: 0.62rem; color: var(--dim); }
-
-/* Daily digest - a end-of-day dispatch summary that slides in at
-   midnight. Deliberately corner-anchored rather than modal: it reports,
-   it doesn't interrupt, and the sim keeps running behind it. */
-#daily-digest, #payroll-alert {
-  position: fixed;
-  left: max(10px, env(safe-area-inset-left));
-  bottom: calc(var(--sheet-visible-h) + 14px);
-  z-index: 7;
-  width: min(88vw, 292px);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--caution);
-  border-radius: 3px;
-  padding: 11px 13px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
-  cursor: pointer;
-  animation: digest-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-/* Payroll is a distinct card from the Daily Digest (different accent so
-   the two are never mistaken for each other), stacked above it via the
-   ::after left-offset trick if both happen to want the same corner - see
-   showPayrollAlert()'s comment for why that collision can't actually
-   happen in practice. */
-#payroll-alert { border-left-color: var(--info); }
-@keyframes digest-in {
-  from { opacity: 0; transform: translateX(-14px); }
-  to { opacity: 1; transform: none; }
-}
-#daily-digest .digest-title, #payroll-alert .digest-title {
-  font-family: var(--font-display);
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--caution);
-  margin-bottom: 7px;
-}
-#payroll-alert .digest-title { color: var(--info); }
-#daily-digest .digest-line, #payroll-alert .digest-line {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 0.76rem;
-  padding: 2px 0;
-}
-#daily-digest .digest-line span:first-child, #payroll-alert .digest-line span:first-child { color: var(--dim); }
-#daily-digest .digest-line span:last-child, #payroll-alert .digest-line span:last-child {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-}
-/* Driver superlatives, below a rule so they read as a separate block from
-   the four operating numbers above. Each is a fixed-width badge column
-   plus a two-line body, so both rows' text starts on the same left edge
-   regardless of which glyph the badge is. */
-#daily-digest .digest-awards, #payroll-alert .digest-awards {
-  margin-top: 7px;
-  padding-top: 7px;
-  border-top: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-#daily-digest .digest-award, #payroll-alert .digest-award {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  font-size: 0.72rem;
-}
-#daily-digest .digest-badge, #payroll-alert .digest-badge {
-  flex: 0 0 0.95rem;
-  text-align: center;
-  color: var(--caution);
-  font-size: 0.8rem;
-  line-height: 1;
-}
-#payroll-alert .digest-badge { color: var(--info); }
-#daily-digest .digest-award-title, #payroll-alert .digest-award-title {
-  display: block;
-  color: var(--dim);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  font-size: 0.62rem;
-}
-#daily-digest .digest-award-val, #payroll-alert .digest-award-val {
-  display: block;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums lining-nums;
-}
-#daily-digest .digest-award-val strong, #payroll-alert .digest-award-val strong { color: var(--ink); }
-#daily-digest .digest-star strong, #payroll-alert .digest-star strong { color: var(--ink); }
-
-
-/* ---------------------------------------------------------------------
-   Load board: shown when the player-controlled truck finishes its layover
-   and has to pick its next contract. Deliberately mirrors the junction
-   decision overlay's geometry and z-index so the two never fight for the
-   same screen space - only one can ever be open, since both pause the sim.
-   --------------------------------------------------------------------- */
-#contract-overlay {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--sheet-visible-h) + 16px);
-  transform: translateX(-50%);
-  width: min(94vw, 620px);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 14px 12px 12px;
-  z-index: 8;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-}
-#contract-title {
-  font-family: var(--font-display);
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--caution);
-  text-align: center;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 10px;
-}
-#contract-city { color: var(--ink); }
-#contract-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 8px;
-}
-.contract-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 5px;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--cargo, var(--line));
-  border-radius: 4px;
-  padding: 9px 10px 8px;
-  color: var(--ink);
-  cursor: pointer;
-  font-family: var(--font-body);
-  text-align: left;
-}
-.contract-btn:active, .contract-btn:hover { background: #2a3441; border-color: var(--caution); }
-.contract-btn .c-cargo {
-  font-size: 0.78rem; font-weight: 700; line-height: 1.15;
-}
-.contract-btn .c-type {
-  font-size: 0.6rem; font-family: var(--font-mono); color: var(--cargo, var(--dim));
-  text-transform: uppercase; letter-spacing: 0.04em;
-}
-.contract-btn .c-dest { font-size: 0.7rem; color: var(--ink); }
-.contract-btn .c-meta {
-  display: flex; justify-content: space-between; align-items: baseline;
-  font-size: 0.64rem; font-family: var(--font-mono); color: var(--dim);
-}
-.contract-btn .c-pay { color: var(--go); font-weight: 700; font-size: 0.78rem; }
-.contract-btn .c-key { font-size: 0.6rem; color: var(--caution); font-family: var(--font-mono); }
-#contract-timer { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); margin-top: 12px; overflow: hidden; }
-#contract-timer-fill { height: 100%; width: 100%; background: var(--caution); transform-origin: left; }
-
-
-/* Junction call: the route number plus its signed direction (e.g. "I-25 E"),
-   sitting between the shield and the control city. */
-.decision-btn .droute {
-  font-size: 0.72rem;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  color: var(--caution);
-  letter-spacing: 0.03em;
-}
-/* The truck's pre-planned next leg. Marked so "stay the course" is
-   visually the default rather than just happening to be listed first. */
-.decision-btn.planned {
-  border-color: var(--go);
-  box-shadow: inset 0 0 0 1px rgba(53, 201, 107, 0.25);
-}
-.decision-btn.planned .dcity { color: var(--go); }
-
-/* ---------------------------------------------------------------------
-   Owner-Operator career mode.
-   --------------------------------------------------------------------- */
-
-/* HUD: the always-visible CAREER pill that starts a career (and turns
-   green/active once it has), plus the read-only status bar that replaces
-   it once driving. No controls live in the status bar anymore - throttle
-   and PULL IN moved into the RIG tab, full-size (see career-ui.js's
-   renderRigTab); this is purely glanceable, and doubles as a shortcut
-   into RIG on tap. */
-#btn-career.active { background: var(--go); color: #fff; }
-#career-status {
-  pointer-events: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-bottom: 2px solid var(--go);
-  border-radius: 3px;
-  padding: 7px 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--ink);
-  cursor: pointer;
-  max-width: 92vw;
-  overflow-x: auto;
-}
-#career-status:active { transform: scale(0.98); }
-#career-status-hotshot { color: var(--stop); font-weight: 700; }
-#career-status-heat { color: var(--stop); font-weight: 700; }
-
-/* Career mode-shift: body.career-mode is toggled by career-ui.js's
-   updateCareerHud, on/off with profile.active. Without this, "driving"
-   looked identical to spectating except for the status strip - the app's
-   own chrome (top-bar border, truck-stop header) stayed on --caution,
-   the ordinary/spectator accent, right next to the status bar's --go
-   border. This spreads the SAME --go "you're driving" accent already
-   established there to the rest of the top-level chrome instead of
-   introducing a new color. */
-body.career-mode #top-bar { border-bottom-color: var(--go); }
-body.career-mode #truckstop-header { border-bottom-color: var(--go); }
-body.career-mode #truckstop-city { color: var(--go); }
-body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--go); }
-
-/* Career mode-shift: body.career-mode is toggled by career-ui.js's
-   updateCareerHud, on/off with profile.active. Without this, "driving"
-   looked identical to spectating except for the HUD strip - the app's
-   own chrome (top-bar border, truck-stop header) stayed on --caution,
-   the ordinary/spectator accent, right next to #career-hud's --go
-   border. This spreads the SAME --go "you're driving" accent already
-   established there to the rest of the top-level chrome instead of
-   introducing a new color. */
-body.career-mode #top-bar { border-bottom-color: var(--go); }
-body.career-mode #truckstop-header { border-bottom-color: var(--go); }
-body.career-mode #truckstop-city { color: var(--go); }
-body.career-mode .tab-btn.active { color: var(--go); border-bottom-color: var(--go); }
-
-/* ---------------------------------------------------------------------
-   Truck stop - full-screen takeover (map AND dashboard both), the one
-   place in the whole app that goes further than a floating overlay. On a
-   phone, where the bottom sheet already owns ~45% of the screen, a
-   multi-vendor menu needs the room; it also reads as "you've arrived
-   somewhere" rather than another panel stacked on the map.
-   --------------------------------------------------------------------- */
-#truckstop-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 11;
-  /* Translucent + blurred rather than the old solid --asphalt: fast-
-     forward (career.js's advanceHours, used by Sleep/Wait/etc.) keeps
-     ticking drawFrame underneath while this is up, so the player can watch
-     the day/night cycle and AI traffic keep moving behind the vendor menus
-     instead of the world visually vanishing while time passes. */
-  background: rgba(15, 20, 28, 0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  display: flex;
-  flex-direction: column;
-  animation: detail-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-#truckstop-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: max(14px, env(safe-area-inset-top)) 16px 12px;
-  background: var(--panel);
-  border-bottom: 2px solid var(--caution);
-}
-#truckstop-city {
-  font-family: var(--font-display);
-  font-size: 1.3rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  color: var(--caution);
-}
-#truckstop-clock {
-  font-family: var(--font-mono);
-  font-size: 0.76rem;
-  color: var(--dim);
-  margin-top: 2px;
-}
-#truckstop-tabs {
-  flex-shrink: 0;
-  display: flex;
-  overflow-x: auto;
-  gap: 2px;
-  padding: 8px 10px 0;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-}
-#truckstop-tabs::-webkit-scrollbar { display: none; }
-.vendor-tab-btn {
-  flex: 0 0 auto;
-  padding: 9px 14px;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--dim);
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 0.76rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.vendor-tab-btn.active { color: var(--caution); border-bottom-color: var(--caution); }
-#truckstop-content {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 16px;
-}
-#truckstop-footer {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
-  background: var(--panel);
-  border-top: 2px solid var(--line);
-}
-#truckstop-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-#truckstop-status .stat-chip { display: flex; align-items: baseline; gap: 4px; }
-#truckstop-status .stat-chip .stat-label { color: var(--dim); font-family: var(--font-body); font-weight: 700; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.04em; }
-#btn-roll-out:disabled { opacity: 0.4; cursor: default; }
-
-/* Vendor content: a section headline plus a card grid, reusing the exact
-   same visual language as the load board's .contract-btn (accent stripe
-   via --cargo, cargo/dest/meta/pay line shape) - a store shelf and a load
-   board are the same "pick one of several priced things" interaction. */
-.vendor-section-title {
-  font-family: var(--font-display);
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--ink);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 0 0 10px;
-}
-.vendor-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 8px;
-  margin-bottom: 20px;
-}
-.vendor-item {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 5px;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--cargo, var(--caution));
-  border-radius: 4px;
-  padding: 10px 11px 9px;
-  color: var(--ink);
-  cursor: pointer;
-  font-family: var(--font-body);
-  text-align: left;
-}
-.vendor-item:active, .vendor-item:hover { background: #2a3441; border-color: var(--caution); }
-.vendor-item:disabled, .vendor-item.disabled {
-  opacity: 0.4;
-  cursor: default;
-  background: var(--panel-strong);
-  border-color: var(--line);
-}
-.vendor-item .v-name { font-size: 0.82rem; font-weight: 700; }
-.vendor-item .v-desc { font-size: 0.68rem; color: var(--dim); }
-.vendor-item .v-meta {
-  display: flex; justify-content: space-between; align-items: baseline;
-  font-size: 0.7rem; font-family: var(--font-mono); margin-top: 2px;
-}
-.vendor-item .v-price { color: var(--go); font-weight: 700; }
-.vendor-item .v-price.expense { color: var(--caution); }
-
-/* Sleeper's nap-length picker: a horizontal chip row (reuses .chip/.chip-row) */
-#truckstop-content .chip-row { margin-bottom: 14px; }
-
-/* Career tab (Dispatch/Rankings/Economy/CB's sibling in the bottom sheet)
-   reuses .metric-grid/.metric-card/.section-label/.stat-bar wholesale -
-   no new component classes needed there beyond what's already shared. */
-
-/* ---------------------------------------------------------------------
-   Company logo (Phase 12) - a filled circle in the company's chosen color
-   with its glyph (or monogram fallback) centered inside. Renders
-   identically wherever it appears: the FLEET tab header and, once the map
-   beacon lands, a canvas-drawn equivalent using the same color/glyph/
-   monogram fields (career-ui.js's badge is DOM-only; render.js can't share
-   this markup, only the underlying data shape).
-   --------------------------------------------------------------------- */
-.company-badge {
-  flex-shrink: 0;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 700;
-  line-height: 1;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
-}
-.logo-picker-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-.logo-picker-groups { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
-.logo-swatch-row, .logo-glyph-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.logo-swatch {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  padding: 0;
-}
-.logo-swatch.active { border-color: var(--ink); box-shadow: 0 0 0 1px var(--caution); }
-.logo-glyph-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 4px;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font-size: 0.95rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  padding: 0;
-}
-.logo-glyph-btn.active { border-color: var(--caution); background: #2a3441; }
-
-/* ---------------------------------------------------------------------
-   RIG redesign (Phase 12) - throttle condensed into one segmented row and
-   PULL IN as a large two-line button, both moved to the top of the tab
-   above everything else; a "hero" variant of the shared stat-bar for
-   Fuel/Fatigue so the two vitals players actually need are never buried
-   among five other identical-looking rows.
-   --------------------------------------------------------------------- */
-.throttle-row {
-  display: flex;
-  gap: 3px;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 3px;
-}
-.throttle-seg {
-  flex: 1;
-  background: none;
-  border: none;
-  border-radius: 3px;
-  color: var(--dim);
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 10px 4px;
-  cursor: pointer;
-}
-.throttle-seg.active { background: var(--seg-color, var(--caution)); color: #0b0e13; }
-
-.pull-in-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  margin-top: 8px;
-  margin-bottom: 14px;
-  background: var(--go);
-  border: none;
-  border-radius: 4px;
-  padding: 13px;
-  color: #fff;
-  cursor: pointer;
-  font-family: var(--font-display);
-}
-.pull-in-btn:active { transform: scale(0.98); }
-.pull-in-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-  background: var(--panel-strong);
-  color: var(--dim);
-}
-.pull-in-btn .pull-in-title {
-  font-size: 1.02rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.pull-in-btn .pull-in-sub { font-size: 0.74rem; font-weight: 600; opacity: 0.9; }
-
-.stat-bar-row.hero { margin-bottom: 14px; }
-.stat-bar-row.hero .stat-bar-label { font-size: 0.82rem; }
-.stat-bar-row.hero .stat-bar { height: 13px; border-radius: 5px; }
-
-/* ---------------------------------------------------------------------
-   Company creation wizard (Phase 12) - its own full-screen overlay
-   (never a repurposing of #truckstop-overlay, which keeps its unrelated
-   job), reusing the exact same shape - header, horizontal step-tabs,
-   scrollable content, footer - as reusable classes so neither overlay
-   duplicates the other's rule bodies. #truckstop-overlay's own markup is
-   untouched; .vendor-tab-btn is shared directly by both tab rows rather
-   than cloned under a second name, since it's genuinely the same
-   "horizontal tab in a fullscreen overlay" component either place.
-   --------------------------------------------------------------------- */
-.fullscreen-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 11;
-  background: var(--asphalt);
-  display: flex;
-  flex-direction: column;
-  animation: detail-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-.fullscreen-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: max(14px, env(safe-area-inset-top)) 16px 12px;
-  background: var(--panel);
-  border-bottom: 2px solid var(--caution);
-}
-.fullscreen-title {
-  font-family: var(--font-display);
-  font-size: 1.3rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  color: var(--caution);
-}
-.fullscreen-sub { font-family: var(--font-mono); font-size: 0.76rem; color: var(--dim); margin-top: 2px; }
-.fullscreen-tabs {
-  flex-shrink: 0;
-  display: flex;
-  overflow-x: auto;
-  gap: 2px;
-  padding: 8px 10px 0;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-}
-.fullscreen-tabs::-webkit-scrollbar { display: none; }
-.fullscreen-content { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
-.fullscreen-footer {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
-  background: var(--panel);
-  border-top: 2px solid var(--line);
-}
-
-/* Wizard step content: name input, candidate/logo cards, and the city
-   picker shared by the Truck and Home Base steps (and reused standalone
-   by FLEET's "Change Home Base" setting). */
-.wizard-text-input {
-  width: 100%;
-  background: var(--panel-strong);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 0.95rem;
-  padding: 11px 12px;
-}
-.wizard-text-input:focus { outline: none; border-color: var(--caution); }
-.city-search-row { display: flex; gap: 8px; margin-bottom: 8px; }
-.city-search-row .wizard-text-input { flex: 1; }
-.city-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
-.city-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  background: var(--panel-strong);
-  border-left: 3px solid transparent;
-  border-radius: 2px;
-  cursor: pointer;
-}
-.city-row:active { background: #2a3441; }
-.city-row.selected { border-left-color: var(--caution); background: #2a3441; }
-.city-row .city-name { font-weight: 700; font-size: 0.86rem; flex: 1; }
-.city-row .city-tier { font-family: var(--font-mono); font-size: 0.62rem; color: var(--dim); }
-#wizard-footer .pill-btn:disabled { opacity: 0.4; cursor: default; }
-
-/* The tiny "Quick Start vs. Set Up My Company" choice shown on a fresh
-   career start - reuses #decision-overlay's small floating-card geometry
-   (bottom-anchored above the sheet) rather than a second full-screen
-   takeover, since it's a two-button choice, not a multi-step form. */
-#career-start-choice {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--sheet-visible-h) + 16px);
-  transform: translateX(-50%);
-  width: min(90vw, 360px);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 14px 12px 12px;
-  z-index: 8;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
-}
-#career-start-choice .csc-title {
-  font-family: var(--font-display);
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--caution);
-  text-align: center;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 10px;
-}
-#career-start-choice .csc-options { display: flex; flex-direction: column; gap: 8px; }

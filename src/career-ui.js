@@ -1557,7 +1557,7 @@ export function renderFleetTab(profile, truckById, trucks, graph) {
         ? `<span class="chip active" style="cursor:default;background:var(--info);border-color:var(--info);padding:2px 6px;font-size:0.6rem;">GPS</span>`
         : `<button class="pill-btn" data-action="buy-gps" data-arg="${truck.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">+ GPS $${career.GPS_PRICE_PER_TRUCK.toLocaleString()}</button>`;
     const yourRigHtml = !truck ? "" : `
-      <div class="list-row" data-truck="${truck.id}" style="border-left-color:var(--go);align-items:flex-start;">
+      <div class="list-row roster" data-truck="${truck.id}" style="--rail:var(--go);align-items:flex-start;">
         <div style="flex:1;">
           <div class="row-main">${truck.name} <span class="row-sub">(You)</span></div>
           <div class="row-sub">${truck.parkedAt ? "parked at " + truck.parkedAt : truck.disabledHoursLeft > 0 ? "disabled roadside" : "hauling"} &bull; ${truck.contractsCompleted} loads</div>
@@ -1608,7 +1608,7 @@ export function renderFleetTab(profile, truckById, trucks, graph) {
         ? `<button class="pill-btn" data-action="clear-corridor" data-arg="${h.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">Release Corridor</button>`
         : `<button class="pill-btn" data-action="set-corridor" data-arg="${h.id}" style="background:var(--panel-strong);color:var(--ink);font-size:0.58rem;padding:3px 7px;letter-spacing:0.02em;">Set Corridor</button>`;
       return `
-        <div class="list-row" data-truck="${t.id}" style="border-left-color:var(--info);align-items:flex-start;">
+        <div class="list-row roster" data-truck="${t.id}" style="--rail:var(--info);align-items:flex-start;">
           <div style="flex:1;">
             <div class="row-main">${t.name} <span class="row-sub">(${h.id})</span></div>
             <div class="row-sub">${status} &bull; ${t.contractsCompleted} loads &bull; $${Math.round(pending).toLocaleString()} pending</div>
