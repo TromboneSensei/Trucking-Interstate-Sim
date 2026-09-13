@@ -11,7 +11,7 @@
 // a city waiting for a gap to pull out into. Highway-kind edges skip
 // all of that and behave like before (single file, straight through).
 import { pickEdgesFrom, findPath, edgeId, localMinutesAtX } from "./geo.js";
-import { generateContract, generateContractOffers, generateDeadheadContract, generateContractTo, chooseOffer } from "./economy.js";
+import { generateContract, generateContractOffers, generateDeadheadContract, generateContractTo, chooseOffer, offersAt } from "./economy.js";
 import { DriverDNA } from "./driver.js";
 import { TRUCK_DOT_RADIUS, LEFT_LANE_OFFSET, RIGHT_LANE_OFFSET } from "./render.js";
 import { weatherSpeedMultAt } from "./weather.js";
@@ -1492,7 +1492,14 @@ export function resumeFromPlayerStop(graph, truck) {
 // caller can pause the whole sim and show the decision panel. `rnd`
 // defaults to Math.random but accepts a seeded generator for the
 // headless soak-test harness.
-export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env = null, rnd = Math.random) {
+// `companyNetwork` (optional, Network Expansion): a Set of owned city
+// names, or null for "unrestricted" - career.js's getNetworkAllowedSet(),
+// stamped in by main.js each frame. Only ever consulted for a COMPANY
+// truck (isCompanyTruck's hired-id check, or truck.agent != null for the
+// player's own rig) - the other ~10,000 ordinary AI trucks never see it,
+// keeping this a purely additive gate with career.js/economy.js's own
+// no-import boundary intact (fleet.js reads the Set with zero new import).
+export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env = null, rnd = Math.random, companyNetwork = null) {
   const gameHours = (dt * BASE_TIME_SCALE * timeScale) / 3600;
   const disabledByEdge = new Map();
   const laneGroups = buildLaneGroups(trucks, disabledByEdge);
@@ -1704,11 +1711,22 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         // the ordinary load board just this once.
       }
 
+      // Network Expansion: only a company truck (this truck's own rig, or
+      // a hired one - isCompanyTruck's "H-" id check) is ever subject to
+      // the network at all; the other ~10,000 ordinary AI trucks always
+      // see allowedSet===null (fully unrestricted), same as before this
+      // feature existed.
+      const isCompanyOwned = isCompanyTruck(truck) || truck.agent != null;
+      const allowedSet = isCompanyOwned ? companyNetwork : null;
+
       // Only ever considered for an AI-driven pick (this branch is never
       // reached for a live player stop - see the PLAYER continue above),
       // so a company HQ or a fleet driver's own hometown can actually pull
-      // a truck home even when a paying load was on offer.
-      if (!(truck === controlledTruck && !truck.autoDriver) && shouldDeadheadHome(truck, rnd)) {
+      // a truck home even when a paying load was on offer. A homesick
+      // driver whose actual hometown falls outside the company's network
+      // has nothing to pull it home TO right now - falls through to the
+      // ordinary (network-gated) load board below instead.
+      if (!(truck === controlledTruck && !truck.autoDriver) && (!allowedSet || allowedSet.has(truck.homeCity)) && shouldDeadheadHome(truck, rnd)) {
         const deadhead = generateDeadheadContract(graph, truck.parkedAt, truck.homeCity);
         if (deadhead) {
           truck._takeContract(graph, deadhead, laneGroups);
@@ -1716,7 +1734,13 @@ export function updateFleet(graph, trucks, dt, timeScale, controlledTruck, env =
         }
       }
 
-      const offers = generateContractOffers(graph, truck.parkedAt, OFFER_COUNT, rnd);
+      // Network Expansion Phase 5: once every owned city is equally
+      // eligible, weight no longer biases WHICH city gets picked (that's
+      // pickDestination's own gravity term, unaffected) - so it does the
+      // one other job left for it, sizing the board itself. Unrestricted
+      // mode is untouched (still the flat OFFER_COUNT it always was).
+      const offerCount = allowedSet ? offersAt(graph.nodes[truck.parkedAt].w) : OFFER_COUNT;
+      const offers = generateContractOffers(graph, truck.parkedAt, offerCount, rnd, allowedSet);
       if (!offers.length) {
         // Nothing routable from here (shouldn't happen on this graph, but
         // don't wedge the truck forever if it ever does) - wait and retry.

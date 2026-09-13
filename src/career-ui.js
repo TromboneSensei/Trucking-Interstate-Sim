@@ -10,7 +10,7 @@
 
 import * as career from "./career.js";
 import { pumpFuel, estimatedRangeMiles, FATIGUE_RECOVERY_PER_HOUR, isCompanyTruck } from "./fleet.js";
-import { generateContractOffers } from "./economy.js";
+import { generateContractOffers, offersAt } from "./economy.js";
 import { traitSummary } from "./driver.js";
 import { openTab, preserveScroll } from "./ui.js";
 import { openStandaloneCityPicker } from "./wizard-ui.js";
@@ -871,7 +871,13 @@ function renderBoard() {
   // this stop (buying fuel, a sandwich) silently re-rolled all three offers
   // and re-rolled whether any of them was a hotshot.
   if (!stopCtx.boardOffers) {
-    const offers = generateContractOffers(graph, truck.parkedAt, 3, Math.random);
+    // Network Expansion: the player's own board is gated exactly like an
+    // AI auto-pick would be (getNetworkAllowedSet), and sized the same way
+    // once gated - a hamlet gives two thin options, a megacity gives five
+    // (see economy.js's offersAt).
+    const allowedSet = career.getNetworkAllowedSet();
+    const count = allowedSet ? offersAt(graph.nodes[truck.parkedAt].w) : 3;
+    const offers = generateContractOffers(graph, truck.parkedAt, count, Math.random, allowedSet);
     career.decorateHotshot(offers);
     career.decorateSpecialFreight(offers);
     stopCtx.boardOffers = offers;

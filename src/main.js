@@ -507,6 +507,12 @@ function handleStartCareer() {
   }
   if (!truck) return;
   career.startCareer(truck, graph);
+  // Network Expansion: startCareer only grants the hub city (free, but
+  // alone it has no legal destination) - Quick Start auto-picks its free
+  // second city instead of asking, which is the whole point of it staying
+  // a one-tap path. The wizard's own equivalent is a player choice; see
+  // handleWizardComplete.
+  career.autoGrantFirstLane(graph);
   followTruck(truck);
 }
 
@@ -576,6 +582,12 @@ function handleWizardComplete({ companyName, driver, truckHomeCity, homeBaseCity
   trucks.push(truck);
   truckById.set(truck.id, truck);
   career.startCareer(truck, graph);
+  // TODO(Network Expansion Phase 4): the wizard should gain its own "pick
+  // your first lane" step (same founding-distance band autoGrantFirstLane
+  // uses) so the player chooses rather than the game auto-picking - this
+  // auto-grant is a placeholder standing in for that until the wizard step
+  // ships, so a wizard-created company isn't left with zero legal loads.
+  career.autoGrantFirstLane(graph);
   career.setupCompany(companyName, homeBaseCity, logo);
   followTruck(truck);
 }
@@ -1085,7 +1097,7 @@ function frame(now) {
       // updateFleet returns whichever truck needs the player: a junction
       // choice mid-route, or a load choice at the end of a layover. The
       // truck's own flags say which.
-      const waiting = updateFleet(graph, trucks, dt, effectiveTimeScale, getControlledTruck(), env);
+      const waiting = updateFleet(graph, trucks, dt, effectiveTimeScale, getControlledTruck(), env, undefined, career.getNetworkAllowedSet());
       if (waiting && waiting.awaitingContract) showContractPanel(waiting);
       else if (waiting) showDecisionPanel(waiting);
       sampleEconomy();
@@ -1251,6 +1263,7 @@ function frame(now) {
       gameSeconds: state.gameSeconds,
       timeScale: state.timeScale,
       company: companyRenderOpts,
+      network: career.getNetworkAllowedSet(),
     });
     lastCongestedSegments = frameStats.congestedSegments;
     el.clock.textContent = formatClock(state.gameSeconds);

@@ -93,7 +93,12 @@ function pickCargo(cityName, rnd) {
 // make every military load run the same handful of city pairs.
 const PREFER_MULT = 14;
 
-function pickDestination(graph, originName, rnd, preferSet = null) {
+// `restrictSet` (optional): a Set of city names that HARD-filters
+// candidates to exactly that membership - Network Expansion's "a load only
+// exists between two cities the company owns" rule (career.js's
+// getNetworkAllowedSet). Unlike preferSet's soft weight bump, a name
+// outside restrictSet is never a candidate at all, no matter its score.
+function pickDestination(graph, originName, rnd, preferSet = null, restrictSet = null) {
     const origin = graph.nodes[originName];
     const tripRoll = rnd();
     const candidates = [];
@@ -101,6 +106,7 @@ function pickDestination(graph, originName, rnd, preferSet = null) {
 
     for (const name in graph.nodes) {
         if (name === originName) continue;
+        if (restrictSet && !restrictSet.has(name)) continue;
         const node = graph.nodes[name];
         if (node.t === 0) continue; // pure junction filler nodes aren't real destinations
         if (!graph.adjacency[name] || !graph.adjacency[name].length) continue; // a handful of data-entry cities never got wired into any route
@@ -122,6 +128,11 @@ function pickDestination(graph, originName, rnd, preferSet = null) {
     }
 
     if (!candidates.length) {
+        // Network mode: no legal destination from here right now is a real,
+        // expected outcome (a two-city network only ever has one), so this
+        // must return null rather than silently escape the network with an
+        // unrestricted random pick.
+        if (restrictSet) return null;
         const names = Object.keys(graph.nodes).filter((n) => n !== originName && graph.nodes[n].t > 0);
         return names[Math.floor(rnd() * names.length)];
     }
@@ -141,12 +152,20 @@ const TIER_PAY_MULT = { 1: 1.35, 2: 1.15, 3: 1.0, 4: 0.85 };
 // then a destination, its A* route, and a payout fixed now (based on
 // optimal distance) so a detour later costs the driver real fuel/time
 // without changing what the job pays.
-export function generateContract(graph, originName, rnd = Math.random) {
+export function generateContract(graph, originName, rnd = Math.random, restrictSet = null) {
     const { cargo, truckType, category } = pickCargo(originName, rnd);
     // Military loads route between installations; everything else uses the
     // plain gravity/distance picker.
     const prefer = truckType.id === "MILITARY" ? MILITARY_CITIES : null;
-    const destination = pickDestination(graph, originName, rnd, prefer);
+    const destination = pickDestination(graph, originName, rnd, prefer, restrictSet);
+    if (!destination) {
+        // Network mode with no legal destination from here right now (a
+        // small network, or a truck sitting somewhere with only one other
+        // owned city reachable) - a real, expected outcome, not an error.
+        // generateContractOffers' own `if (!c.path...) continue` discards
+        // this cleanly.
+        return { origin: originName, destination: null, cargo, category, truckType, optimalMiles: 0, optimalHours: 0, payout: 0, path: null };
+    }
     const path = findPath(graph, originName, destination);
     const optimalMiles = path ? path.reduce((s, e) => s + e.miles, 0) : haversineMiles(graph.nodes[originName], graph.nodes[destination]);
     // Same cost the A* router itself minimizes (geo.js's findPath) - a
@@ -209,17 +228,27 @@ export function generateDeadheadContract(graph, originName, homeCityName) {
 // Offers are de-duplicated by destination so the player is never asked to
 // choose between three loads to the same city, and any contract whose A*
 // route came back empty is discarded rather than offered.
-export function generateContractOffers(graph, originName, count = 3, rnd = Math.random) {
+export function generateContractOffers(graph, originName, count = 3, rnd = Math.random, restrictSet = null) {
     const offers = [];
     const seenDest = new Set();
     for (let attempt = 0; attempt < count * 6 && offers.length < count; attempt++) {
-        const c = generateContract(graph, originName, rnd);
+        const c = generateContract(graph, originName, rnd, restrictSet);
         if (!c.path || !c.path.length) continue;
         if (seenDest.has(c.destination)) continue;
         seenDest.add(c.destination);
         offers.push(c);
     }
     return offers;
+}
+
+// Network Expansion (Phase 5): board size scales with a city's economic
+// weight - a hamlet gives two thin options, a megacity gives five, which is
+// the actual reason weight still matters once every owned city is equally
+// eligible (in a closed network, w no longer biases WHICH city gets picked
+// as a destination the way it does for the unrestricted 10,000-truck fleet -
+// see pickDestination's own gravity term).
+export function offersAt(w) {
+    return 2 + Math.round((w ?? 1) / 3);
 }
 
 // Hometown Backhauler: chooseOffer also biases toward whichever offer

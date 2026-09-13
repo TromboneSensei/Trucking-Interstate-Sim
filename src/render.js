@@ -657,7 +657,13 @@ const CONGESTION_BANDS = [
 // semi-transparent, so anything painted over them a second time
 // double-composites into a visibly darker blob at every junction.
 const BAND_CAP = "round";
-export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, congestion) {
+// Network Expansion: fraction of full strength an out-of-network road
+// segment renders at - dim enough to read as "not yours" against the
+// full-strength roads reaching your owned cities, never so dim it reads
+// as broken/missing (it's still a perfectly real, drivable road).
+const NETWORK_DIM_ALPHA = 0.35;
+
+export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, congestion, network) {
   const k = roadDetailFactor(camera);
   ctx.lineCap = BAND_CAP;
   ctx.lineJoin = "round";
@@ -704,61 +710,80 @@ export function drawRoads(ctx, edgeList, camera, cull, colorT, showMedians, cong
     const drawFog = onScreen(FOG_LINE_WIDTH);
     const drawMedian = onScreen(MEDIAN_WIDTH);
 
-    ctx.globalAlpha = k;
     for (const kind of ["highway", "interstate"]) {
-      const list = visible[kind];
-      if (!list.length) continue;
+      const all = visible[kind];
+      if (!all.length) continue;
       const half = kind === "interstate" ? BAND_HALF : HWY_BAND_HALF;
       const fog = kind === "interstate" ? FOG_OFFSET : HWY_FOG;
       const dayC = ROAD_DAY[kind], nightC = ROAD_NIGHT[kind];
 
-      // Asphalt band. Round-capped (see BAND_CAP) so the pavement closes
-      // over every junction; the lane markings below go back to butt caps
-      // so they stop at the node instead of bulging past it into the
-      // intersection.
-      ctx.lineCap = BAND_CAP;
-      ctx.strokeStyle = lerpRgba(dayC.band, nightC.band, colorT);
-      ctx.lineWidth = half * 2;
-      ctx.beginPath();
-      for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
-      ctx.stroke();
-      ctx.lineCap = "butt";
+      // Network Expansion: an edge counts as "in network" if EITHER
+      // endpoint is an owned city - drawn at full strength; everything
+      // else (including a corridor between two owned cities that happens
+      // to run through unowned filler towns) dims, but is still a
+      // perfectly real road underneath (see nodeStopReason - stop
+      // decisions never look at ownership, only fuel/fatigue). Drawn as
+      // two passes (dim first, full on top) rather than a per-segment
+      // alpha, since a single batched stroke can't vary alpha per edge -
+      // unrestricted mode (network===null) skips the split entirely and
+      // draws exactly the one pass it always has.
+      const lists = network ? [
+        { list: all.filter((e) => !network.has(e.from) && !network.has(e.to)), mult: NETWORK_DIM_ALPHA },
+        { list: all.filter((e) => network.has(e.from) || network.has(e.to)), mult: 1 },
+      ] : [{ list: all, mult: 1 }];
 
-      // Shoulder outlines, both sides
-      if (drawShoulders) {
-        ctx.strokeStyle = lerpColor(dayC.shoulder, nightC.shoulder, colorT);
-        ctx.lineWidth = SHOULDER_LINE_WIDTH;
-        ctx.beginPath();
-        for (const e of list) {
-          ctx.moveTo(e.ax + e.px * half, e.ay + e.py * half);
-          ctx.lineTo(e.bx + e.px * half, e.by + e.py * half);
-          ctx.moveTo(e.ax - e.px * half, e.ay - e.py * half);
-          ctx.lineTo(e.bx - e.px * half, e.by - e.py * half);
-        }
-        ctx.stroke();
-      }
+      for (const { list, mult } of lists) {
+        if (!list.length) continue;
 
-      // Fog lines, both sides
-      if (drawFog) {
-        ctx.strokeStyle = lerpColor(dayC.fog, nightC.fog, colorT);
-        ctx.lineWidth = FOG_LINE_WIDTH;
-        ctx.beginPath();
-        for (const e of list) {
-          ctx.moveTo(e.ax + e.px * fog, e.ay + e.py * fog);
-          ctx.lineTo(e.bx + e.px * fog, e.by + e.py * fog);
-          ctx.moveTo(e.ax - e.px * fog, e.ay - e.py * fog);
-          ctx.lineTo(e.bx - e.px * fog, e.by - e.py * fog);
-        }
-        ctx.stroke();
-      }
-
-      // Median - interstates only, centerline
-      if (kind === "interstate" && showMedians && drawMedian) {
-        ctx.strokeStyle = dayC.median;
-        ctx.lineWidth = MEDIAN_WIDTH;
+        // Asphalt band. Round-capped (see BAND_CAP) so the pavement closes
+        // over every junction; the lane markings below go back to butt caps
+        // so they stop at the node instead of bulging past it into the
+        // intersection.
+        ctx.globalAlpha = k * mult;
+        ctx.lineCap = BAND_CAP;
+        ctx.strokeStyle = lerpRgba(dayC.band, nightC.band, colorT);
+        ctx.lineWidth = half * 2;
         ctx.beginPath();
         for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
         ctx.stroke();
+        ctx.lineCap = "butt";
+
+        // Shoulder outlines, both sides
+        if (drawShoulders) {
+          ctx.strokeStyle = lerpColor(dayC.shoulder, nightC.shoulder, colorT);
+          ctx.lineWidth = SHOULDER_LINE_WIDTH;
+          ctx.beginPath();
+          for (const e of list) {
+            ctx.moveTo(e.ax + e.px * half, e.ay + e.py * half);
+            ctx.lineTo(e.bx + e.px * half, e.by + e.py * half);
+            ctx.moveTo(e.ax - e.px * half, e.ay - e.py * half);
+            ctx.lineTo(e.bx - e.px * half, e.by - e.py * half);
+          }
+          ctx.stroke();
+        }
+
+        // Fog lines, both sides
+        if (drawFog) {
+          ctx.strokeStyle = lerpColor(dayC.fog, nightC.fog, colorT);
+          ctx.lineWidth = FOG_LINE_WIDTH;
+          ctx.beginPath();
+          for (const e of list) {
+            ctx.moveTo(e.ax + e.px * fog, e.ay + e.py * fog);
+            ctx.lineTo(e.bx + e.px * fog, e.by + e.py * fog);
+            ctx.moveTo(e.ax - e.px * fog, e.ay - e.py * fog);
+            ctx.lineTo(e.bx - e.px * fog, e.by - e.py * fog);
+          }
+          ctx.stroke();
+        }
+
+        // Median - interstates only, centerline
+        if (kind === "interstate" && showMedians && drawMedian) {
+          ctx.strokeStyle = dayC.median;
+          ctx.lineWidth = MEDIAN_WIDTH;
+          ctx.beginPath();
+          for (const e of list) { ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); }
+          ctx.stroke();
+        }
       }
     }
     ctx.globalAlpha = 1;
@@ -932,8 +957,9 @@ export function drawWeather(ctx, cells, cull, camera) {
 // City dots, per-frame (moved out of the static bake alongside roads so a
 // wide asphalt band never paints over a big city's dot). Batched by tier
 // color: at most 4 beginPath()/fill() calls for the whole map.
-export function drawCityDots(ctx, graph, cull) {
+export function drawCityDots(ctx, graph, cull, network) {
   const buckets = [[], [], [], []];
+  const dimBuckets = network ? [[], [], [], []] : null;
   for (const name in graph.nodes) {
     const node = graph.nodes[name];
     if (node.t === 0) continue;
@@ -942,9 +968,27 @@ export function drawCityDots(ctx, graph, cull) {
     } else if (node.x < cull.minX || node.x > cull.maxX || node.y < cull.minY || node.y > cull.maxY) {
       continue;
     }
-    buckets[Math.min(3, node.t - 1)].push(node);
+    const tier = Math.min(3, node.t - 1);
+    // Network Expansion: an owned city's dot stays full-strength; every
+    // other real city dims, exactly like drawRoads treats an edge with
+    // neither endpoint owned - still there, still tappable, just visibly
+    // not part of your company's trade network right now.
+    if (network && !network.has(name)) dimBuckets[tier].push(node);
+    else buckets[tier].push(node);
   }
   for (let tier = 0; tier < 4; tier++) {
+    if (dimBuckets && dimBuckets[tier].length) {
+      ctx.globalAlpha = NETWORK_DIM_ALPHA;
+      ctx.fillStyle = CITY_DOT_COLOR[tier];
+      ctx.beginPath();
+      for (const node of dimBuckets[tier]) {
+        const radius = cityDotRadius(node);
+        ctx.moveTo(node.x + radius, node.y);
+        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     const list = buckets[tier];
     if (!list.length) continue;
     ctx.fillStyle = CITY_DOT_COLOR[tier];
@@ -993,7 +1037,7 @@ function labelFont(px) {
   return s;
 }
 
-function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts, forceLabels) {
+function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotation, onRouteCities, cull, parkedCounts, forceLabels, network) {
   ctx.textAlign = "center";
   let lastFont = null;
   for (const name in graph.nodes) {
@@ -1034,6 +1078,9 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
     const font = labelFont(fontPx);
     if (font !== lastFont) { ctx.font = font; lastFont = font; }
     ctx.fillStyle = LABEL_COLOR[node.t] || LABEL_COLOR[4];
+    // Network Expansion: same dim treatment as the city's own dot - an
+    // owned city's name reads at full strength, everything else recedes.
+    ctx.globalAlpha = network && !network.has(name) ? NETWORK_DIM_ALPHA : 1;
     const parked = parkedCounts ? parkedCounts.get(name) : 0;
     if (counterRotation) {
       // Nav view: labels should look like they're standing up off the
@@ -1074,6 +1121,7 @@ function drawCityLabels(ctx, graph, zoom, baseZoom, showAllLabels, counterRotati
       }
     }
   }
+  ctx.globalAlpha = 1;
 }
 
 // Shared by both label orientations. `anchorX` is the right edge of the
@@ -1536,8 +1584,14 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   ctx.drawImage(bgCanvas, 0, 0, bgCanvas.width, bgCanvas.height, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
   const congestion = renderOpts.showCongestion ? tallyCongestion(edgeList, trucks) : null;
-  drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false, congestion);
-  drawCityDots(ctx, graph, roadCull);
+  // Network Expansion: renderOpts.network is a plain Set<string> of owned
+  // city names (or absent/null when a career isn't in network mode) -
+  // main.js builds it fresh each frame the same way it already does for
+  // renderOpts.company, since render.js can't import career.js (see that
+  // field's own doc comment for the import-cycle reasoning this mirrors).
+  const network = renderOpts.network || null;
+  drawRoads(ctx, edgeList, camera, roadCull, colorT, renderOpts.showMedians !== false, congestion, network);
+  drawCityDots(ctx, graph, roadCull, network);
   if (renderOpts.showWeather && renderOpts.weather) drawWeather(ctx, renderOpts.weather, roadCull, camera);
 
   // Darkness overlay: a world-space horizontal gradient sampled across the
@@ -1607,7 +1661,7 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     nodeSeq = [selectedTruck.edge.to, ...selectedTruck.remainingPath.map((e) => e.to)];
     onRouteCities = new Set(nodeSeq);
   }
-  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts, renderOpts.spotlightRoute && renderOpts.spotlightRoute.forceLabels);
+  drawCityLabels(ctx, graph, camera.zoom, camera.baseZoom || camera.zoom, !!renderOpts.showAllLabels, nav ? camera.heading : 0, onRouteCities, roadCull, renderOpts.parkedCounts, renderOpts.spotlightRoute && renderOpts.spotlightRoute.forceLabels, network);
 
   if (nodeSeq) {
     // Built once and stroked twice: a dark casing underneath, then the

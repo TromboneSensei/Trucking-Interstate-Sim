@@ -9,6 +9,7 @@
 import { updateFleet, drainFleetEvents, BASE_TIME_SCALE, resumeFromPlayerStop } from "./fleet.js";
 import { updateWeather } from "./weather.js";
 import { DriverDNA } from "./driver.js";
+import { haversineMiles, findPath } from "./geo.js";
 
 // --- fast-forward ------------------------------------------------------
 //
@@ -657,6 +658,17 @@ function newProfile() {
     completedMissionIds: [],
     nextHiredId: 1, // Phase 11: hired trucks get string ids "H-1", "H-2", ... from THIS counter, never fleet.js's own numeric nextId - see the plan's "Hired Fleet ID Namespace" note
     hiredTrucks: [],
+    // Network Expansion: networkMode/ownedCities/deliveredCities are all
+    // written here so a BRAND NEW career gets them from day one, but are
+    // deliberately read everywhere else as `profile.networkMode === true` /
+    // `profile.ownedCities || []` rather than assumed present - a save from
+    // before this feature existed simply lacks them (same "absent until
+    // first written" convention as profile.logo/companyName), and plays
+    // on completely unrestricted, exactly as it always has. See
+    // convertToNetworkMode() for how an existing career opts in later.
+    networkMode: false,
+    ownedCities: [],
+    deliveredCities: [], // every city this career has ever delivered to - what convertToNetworkMode seeds a legacy career's network from
     lastSettlementGameSeconds: null, // lazily set to the first gameSeconds checkSettlement() ever sees (career start OR a just-loaded save) - see checkSettlement's own doc comment
     log: [], // recent toast-worthy events, capped - see pushLog
   };
@@ -697,6 +709,15 @@ export function startCareer(truck, graph) {
   profile.truckId = truck.id;
   profile.homeCity = truck.currentNode;
   profile.truckName = truck.name;
+  // Network Expansion: every new career starts owning its home city -
+  // free, since it's where the company is founded. A one-city network has
+  // no legal destinations though, so the caller (main.js's Quick Start
+  // path calls autoGrantFirstLane right after this; the wizard calls
+  // grantFirstLane with whatever the player picked) must always follow
+  // this with a second city before the truck can actually get a load.
+  profile.networkMode = true;
+  profile.ownedCities = [truck.currentNode];
+  profile.deliveredCities = [];
   lastCreditedContract = null;
   pushLog(`Signed on as an owner-operator out of ${truck.currentNode}.`);
 }
@@ -932,6 +953,12 @@ export function tickNeeds(truck, gameHours, gameSeconds, rnd = Math.random) {
       profile.level = newLevel;
       pushLog(`Leveled up to ${newLevel} - new upgrade tiers unlocked at the Mechanic.`);
     }
+    // Tracked on every career regardless of networkMode - cheap now, and
+    // it's what convertToNetworkMode() later seeds a legacy career's
+    // network from, so a career that converts mid-way in doesn't have to
+    // start back at one city.
+    if (!profile.deliveredCities) profile.deliveredCities = [];
+    if (!profile.deliveredCities.includes(c.destination)) profile.deliveredCities.push(c.destination);
   }
   if (truck?.agent) truck.agent.recompute();
 }
@@ -1282,6 +1309,9 @@ export function setDispatchCorridor(truckId, cityA, cityB) {
   const entry = profile.hiredTrucks.find((h) => h.id === truckId);
   if (!entry) return { ok: false, reason: "Not a hired truck." };
   if (!cityA || !cityB || cityA === cityB) return { ok: false, reason: "Pick two different cities." };
+  if (profile.networkMode && (!isCityOwned(cityA) || !isCityOwned(cityB))) {
+    return { ok: false, reason: "Both ends of a corridor must be cities you own." };
+  }
   entry.dispatch = { mode: "CORRIDOR", a: cityA, b: cityB };
   pushLog(`${truckId} assigned a recurring ${cityA} ↔ ${cityB} corridor.`);
   return { ok: true };
@@ -1294,6 +1324,231 @@ export function clearDispatch(truckId) {
   delete entry.dispatch;
   pushLog(`${truckId} released back to free-roam dispatch.`);
   return { ok: true };
+}
+
+// --- freight network (Network Expansion) ----------------------------------
+//
+// A load only exists between two cities the company owns - every road,
+// junction, and truck stop in between stays open to drive, fuel at, sleep
+// at, and get towed from (see economy.js's pickDestination `restrictSet`
+// param and fleet.js's own gating at its two contract-offer call sites,
+// both driven by getNetworkAllowedSet below). `networkMode`/`ownedCities`/
+// `deliveredCities` are declared in newProfile() but read everywhere as
+// optional (`profile.networkMode === true`, `profile.ownedCities || []`) -
+// see newProfile's own comment for why this is a deliberate choice over a
+// save-version bump, which would reject every pre-existing save outright.
+const NETWORK_BASE_PRICE = 1400;
+const NETWORK_PRICE_FLOOR = 750;
+const NETWORK_DISTANCE_REF_MILES = 250;
+const NETWORK_DISTANCE_EXP = 1.15; // superlinear: the one thing that keeps distant cheap towns from being an exploit (payout is linear in miles, so price must outpace it)
+const NETWORK_WEIGHT_EXP = 0.9;
+const NETWORK_OWNED_ESCALATOR = 0.15; // each city already owned raises the price of the next by this fraction
+export const NETWORK_CORRIDOR_DISCOUNT = 0.15;
+export const NETWORK_CORRIDOR_MAX_MILES = 400;
+export const NETWORK_CORRIDOR_MAX_HOPS = 6;
+const FIRST_LANE_MIN_MILES = 150;
+const FIRST_LANE_MAX_MILES = 400;
+
+// Every tradeable (non-junction) city on the current graph - the
+// denominator for the FLEET tab's "X / N owned" progress counter.
+export function networkCityCount(graph) {
+  let n = 0;
+  for (const name in graph.nodes) if (graph.nodes[name].t > 0) n++;
+  return n;
+}
+
+// Great-circle distance from `cityName` to whichever city in `ownedList`
+// is nearest - the "reach" term every city's price is measured against,
+// and (chained one hop at a time in corridorQuote) what makes a corridor's
+// stepping-stone discount a real, non-exploitable rebate rather than a
+// free ride.
+function nearestOwnedMiles(graph, cityName, ownedList) {
+  let best = Infinity;
+  for (const owned of ownedList) {
+    const mi = haversineMiles(graph.nodes[cityName], graph.nodes[owned]);
+    if (mi < best) best = mi;
+  }
+  return best;
+}
+
+// Pure pricing formula against a HYPOTHETICAL owned-city list -
+// corridorQuote chains this city-by-city without ever mutating
+// profile.ownedCities until the purchase is actually confirmed, which is
+// what makes a corridor bundle nothing but a discount: every city in it,
+// endpoints included, is still priced by this exact same formula.
+function cityPriceAgainst(graph, cityName, ownedList) {
+  const w = graph.nodes[cityName].w ?? 1;
+  const mi = nearestOwnedMiles(graph, cityName, ownedList);
+  const raw = NETWORK_BASE_PRICE
+    * Math.pow(Math.max(w, 1) / 5, NETWORK_WEIGHT_EXP)
+    * Math.pow(Math.max(mi, 60) / NETWORK_DISTANCE_REF_MILES, NETWORK_DISTANCE_EXP)
+    * (1 + NETWORK_OWNED_ESCALATOR * (ownedList.length - 1));
+  return Math.max(NETWORK_PRICE_FLOOR, Math.round(raw / 50) * 50);
+}
+
+// Public price of buying `cityName` next, against the company's actual
+// current network.
+export function cityPrice(graph, cityName) {
+  return cityPriceAgainst(graph, cityName, profile.ownedCities || []);
+}
+
+export function isCityOwned(cityName) {
+  return !!(profile.ownedCities && profile.ownedCities.includes(cityName));
+}
+
+export function canBuyCity(graph, cityName) {
+  if (!profile.networkMode) return { ok: false, reason: "Network mode isn't active for this career." };
+  const node = graph.nodes[cityName];
+  if (!node || node.t <= 0) return { ok: false, reason: "Not a real city." };
+  if (isCityOwned(cityName)) return { ok: false, reason: "Already owned." };
+  const price = cityPrice(graph, cityName);
+  if (profile.cash < price) return { ok: false, reason: "Can't afford it.", price };
+  return { ok: true, price };
+}
+
+export function buyCity(graph, cityName) {
+  const check = canBuyCity(graph, cityName);
+  if (!check.ok) return check;
+  profile.cash -= check.price;
+  profile.ownedCities.push(cityName);
+  pushLog(`Bought trading rights in ${cityName} for $${check.price.toLocaleString()}.`);
+  return { ok: true, price: check.price };
+}
+
+// Finds the cheapest real corridor from the company's existing network to
+// `targetCity` - tried from every owned city, keeping whichever produces
+// the shortest actual ROAD path (not just straight-line distance), since
+// that's the one a player would recognize as "the" route there.
+function bestCorridorPath(graph, targetCity) {
+  let best = null;
+  for (const anchor of profile.ownedCities || []) {
+    if (anchor === targetCity) continue;
+    const path = findPath(graph, anchor, targetCity);
+    if (!path || !path.length) continue;
+    const totalMiles = path.reduce((s, e) => s + e.miles, 0);
+    if (!best || totalMiles < best.totalMiles) best = { anchor, path, totalMiles };
+  }
+  return best;
+}
+
+// Prices every real (non-junction, not-already-owned) city on the direct
+// road path from your network to `targetCity`, chained one hop at a time
+// through cityPriceAgainst so nothing in the corridor is ever free, then
+// discounts the summed total by NETWORK_CORRIDOR_DISCOUNT. Capped at
+// NETWORK_CORRIDOR_MAX_MILES/_HOPS - not because anything past it is
+// exploitable (it isn't; every city is still individually priced), but
+// because an uncapped Chicago-Denver corridor is an 11-hop, five-figure
+// single tap that would trivialize a whole session's worth of purchase
+// decisions at once. Past the cap, buy the stepping stones one at a time
+// - exactly what the escalating per-city price already rewards anyway.
+export function corridorQuote(graph, targetCity) {
+  if (!profile.networkMode) return { ok: false, reason: "Network mode isn't active for this career." };
+  const node = graph.nodes[targetCity];
+  if (!node || node.t <= 0) return { ok: false, reason: "Not a real city." };
+  if (isCityOwned(targetCity)) return { ok: false, reason: "Already owned." };
+  const best = bestCorridorPath(graph, targetCity);
+  if (!best) return { ok: false, reason: "No route from your network to there." };
+  const hops = best.path.length;
+  if (hops > NETWORK_CORRIDOR_MAX_HOPS || best.totalMiles > NETWORK_CORRIDOR_MAX_MILES) {
+    return { ok: false, reason: `Too far for a corridor (${Math.round(best.totalMiles)}mi, ${hops} hops) - buy cities individually instead.`, hops, totalMiles: Math.round(best.totalMiles) };
+  }
+  const stops = [best.anchor, ...best.path.map((e) => e.to)];
+  const realStops = [];
+  for (let i = 1; i < stops.length; i++) {
+    const n = stops[i];
+    if (graph.nodes[n].t > 0 && !isCityOwned(n) && !realStops.includes(n)) realStops.push(n);
+  }
+  let virtualOwned = [...profile.ownedCities];
+  let sum = 0;
+  const cities = [];
+  for (const name of realStops) {
+    const price = cityPriceAgainst(graph, name, virtualOwned);
+    cities.push({ name, price, tier: graph.nodes[name].t });
+    sum += price;
+    virtualOwned = [...virtualOwned, name];
+  }
+  const bundlePrice = Math.max(NETWORK_PRICE_FLOOR, Math.round((sum * (1 - NETWORK_CORRIDOR_DISCOUNT)) / 10) * 10);
+  return { ok: true, anchor: best.anchor, hops, totalMiles: Math.round(best.totalMiles), cities, sum, bundlePrice, savings: sum - bundlePrice };
+}
+
+export function buyCorridor(graph, targetCity) {
+  const quote = corridorQuote(graph, targetCity);
+  if (!quote.ok) return quote;
+  if (profile.cash < quote.bundlePrice) return { ok: false, reason: "Can't afford it.", ...quote };
+  profile.cash -= quote.bundlePrice;
+  for (const c of quote.cities) profile.ownedCities.push(c.name);
+  pushLog(`Bought the ${quote.anchor} ↔ ${targetCity} corridor (${quote.cities.length} cit${quote.cities.length === 1 ? "y" : "ies"}) for $${quote.bundlePrice.toLocaleString()}.`);
+  return { ok: true, ...quote };
+}
+
+// Quick Start's own founding move: the hub is free (see startCareer), but a
+// one-city network has no legal destinations at all, so the company also
+// needs a first lane. Auto-picks the best tier-2/3 city in a sensible
+// founding-distance band, free - the wizard's own equivalent is a player
+// choice from the same band (see grantFirstLane / wizard-ui.js).
+export function autoGrantFirstLane(graph) {
+  const hub = profile.ownedCities[0];
+  if (!hub) return null;
+  let best = null;
+  for (const name in graph.nodes) {
+    const node = graph.nodes[name];
+    if (node.t !== 2 && node.t !== 3) continue;
+    if (!graph.adjacency[name] || !graph.adjacency[name].length) continue;
+    const mi = haversineMiles(graph.nodes[hub], node);
+    if (mi < FIRST_LANE_MIN_MILES || mi > FIRST_LANE_MAX_MILES) continue;
+    if (!best || node.w > graph.nodes[best].w) best = name;
+  }
+  if (!best) return null;
+  profile.ownedCities.push(best);
+  pushLog(`${best} joins the network as the company's first lane.`);
+  return best;
+}
+
+// Grants a specific city as the free first lane - the wizard's own step,
+// where the player picks rather than the game auto-picking (autoGrantFirstLane).
+export function grantFirstLane(cityName) {
+  if (!profile.ownedCities.includes(cityName)) profile.ownedCities.push(cityName);
+  pushLog(`${cityName} joins the network as the company's first lane.`);
+}
+
+// Converts a legacy (pre-network) career in place: seeds the network from
+// the home city plus everywhere the player has ever delivered to, keeping
+// cash/level/xp/reputation/upgrades/fleet untouched. Reversible -
+// revertToLegacyMode is all "Restart the Map"'s undo needs, since no city
+// is ever un-owned by turning the mode off.
+export function convertToNetworkMode(graph) {
+  const seed = new Set([profile.homeCity, ...(profile.deliveredCities || [])].filter((n) => n && graph.nodes[n] && graph.nodes[n].t > 0));
+  profile.ownedCities = [...seed];
+  if (!profile.ownedCities.length) profile.ownedCities = [profile.homeCity].filter(Boolean);
+  profile.networkMode = true;
+  if (profile.ownedCities.length < 2) autoGrantFirstLane(graph);
+  // A dispatch corridor whose endpoints fall outside the freshly-seeded
+  // network would otherwise strand that hired truck the next time it goes
+  // looking for a load - clear it back to free-roam rather than leaving a
+  // corridor the network can no longer honor.
+  for (const h of profile.hiredTrucks) {
+    if (h.dispatch && h.dispatch.mode === "CORRIDOR" && (!isCityOwned(h.dispatch.a) || !isCityOwned(h.dispatch.b))) {
+      delete h.dispatch;
+    }
+  }
+  pushLog(`Network mode is on - ${profile.ownedCities.length} cit${profile.ownedCities.length === 1 ? "y" : "ies"} seeded from your delivery history.`);
+}
+
+export function revertToLegacyMode() {
+  profile.networkMode = false;
+  pushLog("Network mode is off - the whole map is open for business again.");
+}
+
+// The allowed-destination Set fleet.js's per-tick contract gating reads
+// (see updateFleet's companyNetwork param) - null when networkMode isn't
+// on, which is exactly "unrestricted" everywhere that consumes it.
+// Rebuilt fresh on each call rather than cached: called at most once per
+// updateFleet tick (not once per truck), over an array capped at a few
+// hundred cities, which is not worth the staleness risk of a manually
+// invalidated cache.
+export function getNetworkAllowedSet() {
+  if (!profile.networkMode) return null;
+  return new Set(profile.ownedCities || []);
 }
 
 // --- company identity (Phase 12) -----------------------------------------
