@@ -48,8 +48,18 @@ const booted = await page.evaluate(() => ({
 check(booted.trucks > 0, `sim booted with a fleet (got ${booted.trucks} trucks)`);
 check(!booted.fatal, "no fatal-error overlay after boot");
 
+// A direct DOM click, not page.click(): the career truck can hit a
+// junction requiring player input at any moment once Quick Start below
+// starts a career, and Playwright's real click waits (up to its own
+// timeout) for the tab button to be "visible, enabled and stable" with
+// nothing overlapping it - a decision-overlay popping up over the sheet
+// mid-loop blocks that indefinitely. This is a tab switch, not a touch-
+// target test, so bypassing the actionability check is the correct fix,
+// not a workaround.
+const clickTab = (tab) => page.evaluate((t) => document.querySelector(`.tab-btn[data-tab="${t}"]`).click(), tab);
+
 for (const tab of ["overview", "rankings", "economy", "cb"]) {
-  await page.click(`.tab-btn[data-tab="${tab}"]`);
+  await clickTab(tab);
   await page.waitForTimeout(300);
 }
 check(true, "clicked all spectator tabs");
@@ -60,7 +70,7 @@ await page.click("#btn-quick-start");
 await page.waitForTimeout(800);
 check(await page.evaluate(() => career.isActive()), "Quick Start career is active");
 for (const tab of ["rig", "fleet", "books", "world"]) {
-  await page.click(`.tab-btn[data-tab="${tab}"]`);
+  await clickTab(tab);
   await page.waitForTimeout(300);
 }
 check(true, "clicked all career tabs");

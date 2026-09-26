@@ -26,7 +26,7 @@ const DIST = path.join(ROOT, "dist");
 //   career-ui.js; wizard-ui.js before career-ui.js; main.js last.
 // A new src file MUST be added here - the build fails if one is missing.
 const ORDER = [
-  "data.js", "states-data.js", "geo.js", "driver.js", "products.js", "economy.js",
+  "data.js", "states-data.js", "geo.js", "flight.js", "driver.js", "products.js", "economy.js",
   "weather.js", "render.js", "fleet.js", "career.js", "wizard-ui.js", "cb.js",
   "camera.js", "ui.js", "career-ui.js", "main.js",
 ];
