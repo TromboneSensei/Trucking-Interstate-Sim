@@ -204,7 +204,7 @@ html, body {
   line-height: 1;
   cursor: pointer;
   box-shadow: var(--e2), var(--sheen);
-  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease), opacity var(--dur-3) var(--ease);
 }
 #btn-settings:hover { background: var(--panel-lift); }
 #btn-settings:active { transform: scale(0.94); }
@@ -636,7 +636,7 @@ html, body {
   z-index: 6;
   display: flex;
   flex-direction: column;
-  transition: transform var(--dur-3) var(--ease);
+  transition: transform var(--dur-3) var(--ease), opacity var(--dur-3) var(--ease);
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.5), var(--sheen);
 }
 #bottom-sheet.minimized { transform: translateY(calc(var(--sheet-h) - 62px)); }
@@ -1883,6 +1883,138 @@ body.career-mode #bottom-sheet { border-top-color: var(--go); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #truckstop-content, .fullscreen-content { padding: 13px; }
 }
+
+/* =====================================================================
+   Director Mode (director.js) - after enough idle time, an automated
+   camera cuts between interesting shots of the live sim: a destination
+   pin + caption on a cross-country hop, a caption on every shot, and a
+   "back to your view" chip once the viewer wakes it. body.director fades
+   the ordinary chrome out from underneath rather than hiding it outright,
+   so the map and its traffic stay the entire focus.
+===================================================================== */
+
+#btn-director { background: var(--panel-strong); color: var(--ink); }
+
+/* UI fade: everything here goes fully transparent and inert under
+   body.director. #btn-settings and #bottom-sheet already declare their
+   own `transition` for something else - opacity was APPENDED to those
+   two existing declarations (see each one's own rule above), never
+   layered on as a second `transition`, which would silently replace the
+   first rather than combine with it. The rest get a fresh one here. */
+#hud, #time-readout, #speed-popover, #fps-counter, #daily-digest, #payroll-alert,
+#toast, #decision-overlay, #contract-overlay {
+  transition: opacity var(--dur-3) var(--ease);
+}
+body.director #hud,
+body.director #btn-settings,
+body.director #time-readout,
+body.director #speed-popover,
+body.director #fps-counter,
+body.director #bottom-sheet,
+body.director #daily-digest,
+body.director #payroll-alert,
+body.director #toast,
+body.director #decision-overlay,
+body.director #contract-overlay {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The black cut used entering from FOLLOW_NAV (a rotated, tilted view that
+   can't be smoothly interpolated toward a flat DIRECTOR one). Opacity is
+   driven directly from JS, one value per frame, NOT by a CSS transition -
+   the 180ms-in/220ms-out timing is asymmetric and needs the camera snap to
+   land exactly on the seam between the two, which is far simpler to get
+   right stepping a raw number each frame than fighting a transition's own
+   timing from outside it. */
+#director-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Fully transparent - the only thing it does is catch input. Sits above
+   the sheet/every overlay/toast (6-9) and the settings/truckstop/wizard
+   takeovers (10-11), below only #fatal-error's 100. */
+#director-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  touch-action: none;
+  cursor: pointer;
+}
+
+/* #director-hint / #director-caption / #director-return deliberately have
+   NO `class="hidden"` in index.html - see that markup's own comment. All
+   three rest at opacity 0 here and are shown purely via `.show`. */
+#director-hint {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  z-index: 41;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  padding: 6px 12px;
+  font-family: var(--font-display);
+  font-size: var(--fs-tiny);
+  letter-spacing: 0.06em;
+  color: var(--caution);
+  box-shadow: var(--e2), var(--sheen);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease);
+}
+#director-hint.show { opacity: 1; }
+
+#director-caption {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 41;
+  max-width: min(84vw, 420px);
+  background: rgba(26, 33, 43, 0.78); /* --panel at ~0.78 alpha, so the map keeps showing faintly through it */
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease), transform var(--dur-3) var(--ease);
+}
+#director-caption.show { opacity: 1; transform: none; }
+#director-caption .dc-eyebrow {
+  font-family: var(--font-display);
+  font-size: var(--fs-tiny);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--caution);
+  margin-bottom: 2px;
+}
+#director-caption .dc-line {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  color: var(--ink);
+}
+
+#director-return {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sheet-visible-h) + 16px);
+  transform: translateX(-50%) translateY(6px);
+  z-index: 41;
+  background: var(--panel-strong);
+  color: var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease), transform var(--dur-3) var(--ease);
+}
+#director-return.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; }
 
 /* Honour a system-level request for less motion: keep state changes
    instant rather than animated, but leave the interface otherwise

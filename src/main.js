@@ -11,6 +11,7 @@ import { initUI, openDetailsFor, refreshFollowedTruckDetails, refreshViewedCityD
 import * as career from "./career.js";
 import { initCareerUI, updateCareerHud, renderRigTab, renderFleetTab, renderBooksTab, renderWorldTab, isTruckStopOpen, openTruckStop, refreshTruckStop, closeTruckStop, wasStopDismissed, isCareerUIActive, setCommandTabMode } from "./career-ui.js";
 import { initWizardUI, openWizard } from "./wizard-ui.js";
+import { createDirector } from "./director.js";
 
 const DECISION_TIMEOUT = 11; // seconds
 // The load board gets longer than a junction call: picking a haul is a
@@ -44,6 +45,7 @@ const DEFAULT_SETTINGS = {
   showCongestion: true,
   showWeather: false,
   showRushHour: true,
+  directorIdleSeconds: 45,
   showCBRadio: true,
 };
 
@@ -92,6 +94,15 @@ const el = {
   cbFeed: document.getElementById("cb-feed"),
   cbUnread: document.getElementById("cb-unread"),
   settingCBRadio: document.getElementById("setting-cb-radio"),
+  settingDirectorIdle: document.getElementById("setting-director-idle"),
+  btnDirector: document.getElementById("btn-director"),
+  directorShield: document.getElementById("director-shield"),
+  directorVeil: document.getElementById("director-veil"),
+  directorHint: document.getElementById("director-hint"),
+  directorCaption: document.getElementById("director-caption"),
+  directorCaptionEyebrow: document.querySelector("#director-caption .dc-eyebrow"),
+  directorCaptionLine: document.querySelector("#director-caption .dc-line"),
+  directorReturn: document.getElementById("director-return"),
 };
 
 window.addEventListener("error", (e) => {
@@ -396,6 +407,112 @@ function unfollow() {
   camera.unfollow();
   el.btnNavToggle.classList.add("hidden");
 }
+
+// ---------------------------------------------------------------------
+// Director Mode (director.js) - an automated camera that takes over after
+// enough idle real time, cutting between interesting shots of the live
+// sim. Never runs during a career (see isCareerActive below) or while any
+// modal/decision/truck-stop/wizard is up (isBlocked).
+// ---------------------------------------------------------------------
+function followTruckById(id) {
+  const t = truckById.get(id);
+  if (t) followTruck(t);
+}
+function getFollowSnapshot() {
+  return {
+    followedTruckId: state.followedTruckId,
+    cameraMode: camera.mode,
+    x: camera.x, y: camera.y, zoom: camera.zoom,
+    heading: camera.heading,
+    visualCenterYRatio: camera.visualCenterYRatio,
+  };
+}
+// The "enter" half of #btn-nav-toggle's own click-handled toggle (below),
+// duplicated in miniature rather than shared: that handler flips between
+// FOLLOW and FOLLOW_NAV and owns the button's active state either
+// direction, while this is a one-way restore used only by
+// director.returnToSnapshot() once it has already re-established FOLLOW
+// via followTruckById.
+function enterNavView() {
+  camera.mode = "FOLLOW_NAV";
+  el.btnNavToggle.classList.add("active");
+}
+function isBlocked() {
+  return state.settingsOpen || !!state.decisionTruck || !!state.contractTruck || isTruckStopOpen()
+    || !document.getElementById("wizard-overlay").classList.contains("hidden");
+}
+const director = createDirector({
+  camera, canvas, graph, edgeList,
+  getTrucks: () => trucks, // trucks/settings/weather are REASSIGNED by bootSim, not mutated - getters so director.js never holds a stale reference across a restart
+  getState: () => state,
+  getSettings: () => settings,
+  getWeather: () => weather,
+  isCareerActive: () => career.isActive(),
+  isBlocked,
+  getFollowSnapshot,
+  followTruckById,
+  unfollow,
+  enterNavView,
+  captionEl: el.directorCaption,
+  captionEyebrowEl: el.directorCaptionEyebrow,
+  captionLineEl: el.directorCaptionLine,
+  hintEl: el.directorHint,
+  returnChipEl: el.directorReturn,
+  veilEl: el.directorVeil,
+});
+window.director = director; // test hook (scripts/verify-director.mjs) - not read by any game code
+
+el.btnDirector.addEventListener("click", () => director.start("manual"));
+el.directorReturn.addEventListener("click", () => director.returnToSnapshot());
+
+// The shield only exists to catch input while the director owns the
+// camera - it's invisible (no visual content of its own; #director-veil
+// is the only thing that ever paints black) and z-indexed above
+// everything but #fatal-error. pointerdown calls preventDefault() (which
+// suppresses the synthetic mouse events + click a touch would otherwise
+// still fire) and stop()s the director immediately, but the shield itself
+// stays up and blocking until pointerup/pointercancel - hiding it right
+// away would let that same physical touch's trailing click reach the
+// canvas underneath and select whatever truck happened to be under it.
+let shieldReleasePending = false;
+function wakeDirector() {
+  if (!director.isActive()) return;
+  director.stop("wake");
+}
+el.directorShield.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  shieldReleasePending = true;
+  wakeDirector();
+});
+el.directorShield.addEventListener("pointerup", () => { shieldReleasePending = false; });
+el.directorShield.addEventListener("pointercancel", () => { shieldReleasePending = false; });
+el.directorShield.addEventListener("wheel", (e) => { e.preventDefault(); wakeDirector(); }, { passive: false });
+{
+  // A mouse move alone (no button down) shouldn't wake it - only a
+  // deliberate drag - so this tracks total travel distance from the FIRST
+  // pointermove after the shield appeared, waking once that exceeds a
+  // small threshold, the same "was this actually a drag" test camera.js's
+  // own TAP_MOVE_THRESHOLD uses for its tap-vs-drag distinction.
+  let moveOriginX = null, moveOriginY = null;
+  el.directorShield.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse") return;
+    if (moveOriginX == null) { moveOriginX = e.clientX; moveOriginY = e.clientY; return; }
+    if (Math.hypot(e.clientX - moveOriginX, e.clientY - moveOriginY) > 12) {
+      moveOriginX = null; moveOriginY = null;
+      wakeDirector();
+    }
+  });
+  el.directorShield.addEventListener("pointerleave", () => { moveOriginX = null; moveOriginY = null; });
+}
+// Capture phase + stopImmediatePropagation: without this, the SAME
+// keypress that wakes the director would also reach the decision/contract
+// digit-shortcut listener (below) and resolve whatever panel was pending
+// before the director started, which the player never asked for.
+window.addEventListener("keydown", (e) => {
+  if (!director.isActive()) return;
+  e.stopImmediatePropagation();
+  wakeDirector();
+}, { capture: true });
 
 // Cockpit/Command mode - the Micro/Macro split. Cockpit is the ordinary
 // driving experience (unchanged: FOLLOW camera on the career truck, RIG tab
@@ -851,6 +968,7 @@ function openSettings() {
   el.settingWeather.checked = settings.showWeather;
   el.settingRushHour.checked = settings.showRushHour;
   el.settingCBRadio.checked = settings.showCBRadio;
+  el.settingDirectorIdle.value = String(settings.directorIdleSeconds);
   el.settingsOverlay.classList.remove("hidden");
 }
 
@@ -883,6 +1001,7 @@ el.btnSettingsApply.addEventListener("click", () => {
     showWeather: el.settingWeather.checked,
     showRushHour: el.settingRushHour.checked,
     showCBRadio: el.settingCBRadio.checked,
+    directorIdleSeconds: parseInt(el.settingDirectorIdle.value, 10),
   };
   closeSettings();
   bootSim(newSettings);
@@ -894,6 +1013,7 @@ el.btnSettingsApply.addEventListener("click", () => {
 // everything downstream of it (the pre-rendered background, the fleet,
 // the clock/camera/UI state) gets torn down and rebuilt.
 function bootSim(newSettings) {
+  director.stop("reset"); // the whole fleet is about to be torn down and rebuilt - see exit()'s own "reset" branch for why this is a hard reset, not the normal wake dance
   settings = newSettings;
 
   // Apply & Restart respawns the WHOLE fleet with fresh ids (see below) -
@@ -1178,39 +1298,60 @@ function frame(now) {
     // screen. Backgrounding (Back to Map) already resets commandMode itself
     // (onBackToMap above), so this only ever needs to hide/show the button.
     el.btnModeToggle.classList.toggle("hidden", !isCareerUIActive());
+    // The director never runs during a career (isCareerActive gate in
+    // director.js's own start()) - this only ever needs to hide the
+    // manual-trigger button, matching how COMMAND's own button above hides
+    // outside its relevant mode.
+    el.btnDirector.classList.toggle("hidden", career.isActive());
 
     const followed = getFollowedTruck();
     const isFollowMode = camera.mode === "FOLLOW" || camera.mode === "FOLLOW_NAV";
-    if (isFollowMode && followed) {
-      // includeJitter=false: White Line Fever's fatigue wobble (render.js)
-      // is a cosmetic render-layer offset on the drawn dot. Feeding it into
-      // the follow camera's own target used to low-pass it into a real
-      // screen-space shake - the whole world (every OTHER truck on screen,
-      // fatigued or not) visibly wobbled in sympathy whenever the player's
-      // own truck crossed the fatigue threshold, which read as every truck
-      // "copying" the player.
-      const pose = truckPose(graph, followed, undefined, false);
-      camera.followTarget = pose;
-      // Hold the last known heading while the truck is stopped/between
-      // edges (edge briefly null) rather than snapping to 0 - avoids a
-      // spurious rotation flash right as a truck departs/arrives a city.
-      if (followed.edge) camera.targetHeading = (pose.heading * Math.PI) / 180;
-    } else if (isFollowMode && !followed) {
-      unfollow();
-    } else if (!isFollowMode && state.followedTruckId != null) {
-      // Camera dropped to FREE on its own (a drag on the canvas calls
-      // camera.js's own internal unfollow() directly, decoupled from
-      // this outer unfollow() which owns the HUD button visibility) -
-      // resync state/UI to match rather than leaving a stale NAV VIEW
-      // button showing for a camera that's no longer following.
-      unfollow();
+    // Skipped entirely while DIRECTOR owns the camera: camera.mode is then
+    // neither FOLLOW nor FOLLOW_NAV, and without this guard the
+    // followedTruckId resync branch below would fire on every single
+    // director-driven frame (isFollowMode false, but state.followedTruckId
+    // is whatever it was before ENTERING cleared it - already null by the
+    // time this runs today, but a defensive guard rather than relying on
+    // that ordering never changing).
+    if (!director.isActive()) {
+      if (isFollowMode && followed) {
+        // includeJitter=false: White Line Fever's fatigue wobble (render.js)
+        // is a cosmetic render-layer offset on the drawn dot. Feeding it into
+        // the follow camera's own target used to low-pass it into a real
+        // screen-space shake - the whole world (every OTHER truck on screen,
+        // fatigued or not) visibly wobbled in sympathy whenever the player's
+        // own truck crossed the fatigue threshold, which read as every truck
+        // "copying" the player.
+        const pose = truckPose(graph, followed, undefined, false);
+        camera.followTarget = pose;
+        // Hold the last known heading while the truck is stopped/between
+        // edges (edge briefly null) rather than snapping to 0 - avoids a
+        // spurious rotation flash right as a truck departs/arrives a city.
+        if (followed.edge) camera.targetHeading = (pose.heading * Math.PI) / 180;
+      } else if (isFollowMode && !followed) {
+        unfollow();
+      } else if (!isFollowMode && state.followedTruckId != null) {
+        // Camera dropped to FREE on its own (a drag on the canvas calls
+        // camera.js's own internal unfollow() directly, decoupled from
+        // this outer unfollow() which owns the HUD button visibility) -
+        // resync state/UI to match rather than leaving a stale NAV VIEW
+        // button showing for a camera that's no longer following.
+        unfollow();
+      }
+      // Same idea as the followedTruckId resync just above, for the
+      // corridor/highway spotlight: the moment the camera leaves FRAME mode
+      // - dragging the map, or a fresh followTruck()/frameBox() call moving
+      // it elsewhere - the highlighted-edge set is stale and should stop
+      // dimming the map.
+      if (camera.mode !== "FRAME" && state.spotlightRoute) state.spotlightRoute = null;
     }
-    // Same idea as the followedTruckId resync just above, for the corridor/
-    // highway spotlight: the moment the camera leaves FRAME mode - dragging
-    // the map, or a fresh followTruck()/frameBox() call moving it elsewhere -
-    // the highlighted-edge set is stale and should stop dimming the map.
-    if (camera.mode !== "FRAME" && state.spotlightRoute) state.spotlightRoute = null;
     camera.update();
+    director.update(dt, now);
+    // The shield stays up through a whole tap/click gesture even after
+    // stop() has already flipped isActive() false mid-gesture - see its
+    // pointerdown handler's own comment for why hiding it any earlier lets
+    // the gesture's trailing click fall through to the canvas underneath.
+    el.directorShield.classList.toggle("hidden", !(director.isActive() || shieldReleasePending));
 
     parkedCounts.clear();
     for (const t of trucks) {
@@ -1277,6 +1418,7 @@ function frame(now) {
       timeScale: state.timeScale,
       company: companyRenderOpts,
       network: career.getNetworkAllowedSet(),
+      ...director.renderOpts(),
     });
     lastCongestedSegments = frameStats.congestedSegments;
     el.clock.textContent = formatClock(state.gameSeconds);

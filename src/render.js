@@ -2059,6 +2059,22 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     ctx.stroke();
   }
 
+  // Director Mode's destination pin - a pulsing ring at the world-space
+  // point a cross-country hop is flying toward (director.js's own APEX
+  // hold, and the first part of the flight back in). renderOpts.marker is
+  // null the rest of the time. Screen-constant size (divided by zoom, like
+  // every other fixed-screen-size stroke in this function) rather than a
+  // fixed world size, since it needs to read clearly at both the zoomed-
+  // out country view and the zoomed-in shot it's flying toward.
+  if (renderOpts.marker) {
+    const { x, y, pulse } = renderOpts.marker;
+    ctx.strokeStyle = "#f0a93c"; // --caution
+    ctx.lineWidth = 2 / camera.zoom;
+    ctx.beginPath();
+    ctx.arc(x, y, (8 + 6 * pulse) / camera.zoom, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   ctx.restore();
 
   if (renderOpts.spotlightRoute) {

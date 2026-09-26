@@ -48,6 +48,11 @@
       <button id="btn-back-to-map" class="pill-btn hidden">&larr; MAP</button>
       <button id="btn-nav-toggle" class="pill-btn hidden">NAV VIEW</button>
       <button id="btn-career" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)">&#128666; CAREER</button>
+      <!-- Manual trigger for Director Mode (main.js/director.js) - the
+           auto-idle trigger alone would mean sitting untouched for a full
+           settings.directorIdleSeconds just to see it once. Hidden during a
+           career (director never runs there - see updateCareerHud). -->
+      <button id="btn-director" class="pill-btn" style="background:var(--panel-strong);color:var(--ink)" title="Watch the sim">&#127909; DIRECTOR</button>
       <!-- Cockpit/Command toggle - only ever shown while a career is
            active (see updateCareerHud). Cockpit is the default driving
            view; Command zooms the camera out and swaps the sheet to the
@@ -155,6 +160,16 @@
       <div class="settings-row settings-row-toggle">
         <label for="setting-rush-hour">Rush Hour Traffic</label>
         <label class="switch"><input type="checkbox" id="setting-rush-hour" checked><span class="switch-track"></span></label>
+      </div>
+
+      <div class="settings-row">
+        <label for="setting-director-idle">Director Mode</label>
+        <select id="setting-director-idle">
+          <option value="0">Off</option>
+          <option value="30">After 30s</option>
+          <option value="45" selected>After 45s</option>
+          <option value="90">After 90s</option>
+        </select>
       </div>
 
       <div id="settings-actions">
@@ -279,6 +294,30 @@
   <div id="daily-digest" class="hidden"></div>
   <div id="payroll-alert" class="hidden"></div>
   <div id="toast" class="hidden"></div>
+
+  <!-- Director Mode (director.js) - own small UI, wholly owned by that
+       module (director.js receives these element references via its
+       deps, same pattern as career-ui.js owning its DOM rather than
+       main.js poking it). The hint/caption/return-chip below deliberately
+       carry NO `class="hidden"` - they rest at opacity:0 by CSS default
+       (see style.css) and are shown/hidden purely via a `.show` class
+       toggle, because this app's global `.hidden` is `display:none
+       !important`, which would make a fade impossible no matter what a
+       more specific selector said about opacity. -->
+  <div id="director-veil"></div>
+  <div id="director-hint">&#9679; DIRECTOR &middot; tap anywhere to take over</div>
+  <div id="director-caption">
+    <div class="dc-eyebrow"></div>
+    <div class="dc-line"></div>
+  </div>
+  <button id="director-return" class="pill-btn">&#8617; Back to your view</button>
+  <!-- Transparent, full-screen input shield - the only thing that actually
+       receives pointer/wheel/key input while the director owns the camera
+       (the map/HUD/sheet underneath are still there, just faded and inert).
+       Wiring (pointerdown/wheel/pointermove/keydown -> director.stop) lives
+       in main.js, not here - this element is pure markup. -->
+  <div id="director-shield" class="hidden"></div>
+
   <div id="fatal-error" class="hidden"></div>
 
   <script type="module" src="src/main.js"></script>
