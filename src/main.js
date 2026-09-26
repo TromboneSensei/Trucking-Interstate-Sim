@@ -40,6 +40,7 @@ const DEFAULT_SETTINGS = {
   showDayNight: true,
   showCityLights: true,
   showHeadlights: true,
+  showConvoyTethers: true,
   showCongestion: true,
   showWeather: false,
   showRushHour: true,
@@ -79,6 +80,7 @@ const el = {
   settingDayNight: document.getElementById("setting-day-night"),
   settingCityLights: document.getElementById("setting-city-lights"),
   settingHeadlights: document.getElementById("setting-headlights"),
+  settingConvoyTethers: document.getElementById("setting-convoy-tethers"),
   settingCongestion: document.getElementById("setting-congestion"),
   settingWeather: document.getElementById("setting-weather"),
   settingRushHour: document.getElementById("setting-rush-hour"),
@@ -125,6 +127,13 @@ const parkedCounts = new Map();
 // the renderer already computes it as part of the congestion overlay, so
 // this avoids a second fleet-wide scan just for the HUD number.
 let lastCongestedSegments = 0;
+
+// The full object drawFrame returned last frame - a plain test hook
+// (Playwright reads this by name; see scripts/verify-*.mjs). Nothing in
+// the game itself reads the whole object; individual fields it cares
+// about are destructured out separately below, same as before this was
+// added.
+let lastFrameStats = null;
 
 // Economy history: one sample every ECON_SAMPLE_MIN game-minutes, capped
 // at 48 game-hours. Instantaneous readouts (the Dispatch tiles) can't show
@@ -837,6 +846,7 @@ function openSettings() {
   el.settingDayNight.checked = settings.showDayNight;
   el.settingCityLights.checked = settings.showCityLights;
   el.settingHeadlights.checked = settings.showHeadlights;
+  el.settingConvoyTethers.checked = settings.showConvoyTethers;
   el.settingCongestion.checked = settings.showCongestion;
   el.settingWeather.checked = settings.showWeather;
   el.settingRushHour.checked = settings.showRushHour;
@@ -868,6 +878,7 @@ el.btnSettingsApply.addEventListener("click", () => {
     showDayNight: el.settingDayNight.checked,
     showCityLights: el.settingCityLights.checked,
     showHeadlights: el.settingHeadlights.checked,
+    showConvoyTethers: el.settingConvoyTethers.checked,
     showCongestion: el.settingCongestion.checked,
     showWeather: el.settingWeather.checked,
     showRushHour: el.settingRushHour.checked,
@@ -1249,12 +1260,13 @@ function frame(now) {
       }
     }
 
-    const frameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
+    const frameStats = lastFrameStats = drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCanvas, trucks, followed, {
       showAllLabels: settings.showAllLabels,
       showMedians: settings.showMedians,
       showDayNight: settings.showDayNight,
       showCityLights: settings.showCityLights,
       showHeadlights: settings.showHeadlights,
+      showConvoyTethers: settings.showConvoyTethers,
       showCongestion: settings.showCongestion,
       showWeather: settings.showWeather,
       weather,

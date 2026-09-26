@@ -199,6 +199,21 @@ const HEADLIGHT_SPREAD = 4.6;  // half-width at the far end of the beam
 const HEADLIGHT_COLOR = "rgba(255, 220, 150, 0.16)";
 const headlightPts = [];
 
+// Convoy tether - a thin dashed line from a drafting truck to the truck
+// it's tucked in behind, making fleet.js's Convoy Drafter mechanic (invisible
+// until now: it only ever showed as a chip in the detail panel) visible on
+// the map itself. Flat [followerX, followerY, leaderX, leaderY, ...]
+// quads, same no-allocation-per-frame discipline as headlightPts above.
+const TETHER_COLOR_RGB = "240, 169, 60"; // --caution, #f0a93c
+const tetherPts = [];
+
+// 0 at/below `lo`, 1 at/above `hi`, smoothed (not linear) in between - used
+// to fade convoy tethers in with zoom rather than having them snap on.
+function smoothstep01(lo, hi, x) {
+  const t = Math.max(0, Math.min(1, (x - lo) / (hi - lo)));
+  return t * t * (3 - 2 * t);
+}
+
 // Company beacon (Phase 12) - a small floating badge above every truck
 // that's part of the player's company (the currently-driven rig AND every
 // hired driver - see main.js's renderOpts.company, built only while
@@ -1750,7 +1765,15 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
   companyBeaconStatus.length = 0;
   const company = renderOpts.company || null;
 
+  // Convoy tethers fade in with zoom rather than snapping on - invisible at
+  // state/country zoom (where thousands of them would just be visual
+  // noise), visible once zoomed in far enough to actually follow one.
+  // Computed once per frame, not per truck.
+  const tetherAlpha = renderOpts.showConvoyTethers !== false ? smoothstep01(0.9, 1.6, camera.zoom) * 0.55 : 0;
+  tetherPts.length = 0;
+
   const scratchPos = { x: 0, y: 0, heading: 0 }; // reused across the whole loop - no per-truck allocation
+  const scratchLeaderPos = { x: 0, y: 0, heading: 0 }; // ditto, for a drafting truck's leader's pose
   for (const truck of trucks) {
     // The nav-mode arrow substitutes for this truck's own batched dot (and
     // its headlight cone), but NOT for its beacon or its visibility-list
@@ -1818,6 +1841,42 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
       companyBeaconPts.push(p.x, p.y);
       companyBeaconStatus.push(truck.disabledHoursLeft > 0 ? "disabled" : truck.parkedAt ? "parked" : "hauling");
     }
+    // Convoy tether: this truck (the follower) to whichever truck it's
+    // tucked in behind. Computed regardless of isArrowedSelected, same
+    // reasoning as the beacon just above. The same-edge and not-parked
+    // checks make this robust even if isDrafting/draftLeader were ever
+    // stale again (fleet.js now clears both everywhere the plain boolean
+    // used to go stale - see applyFollowAndPassing and the two park
+    // sites), rather than trusting the flag blindly.
+    if (tetherAlpha > 0.01 && truck.isDrafting && truck.draftLeader
+        && truck.draftLeader.edge === truck.edge && !truck.draftLeader.parkedAt) {
+      truckPose(graph, truck.draftLeader, scratchLeaderPos);
+      tetherPts.push(p.x, p.y, scratchLeaderPos.x, scratchLeaderPos.y);
+    }
+  }
+
+  // One path, one stroke, for every tether on screen - same batching
+  // discipline as the headlight fill below. Drawn before the truck dots so
+  // the dots sit on top of the line rather than the line crossing over them.
+  // Dashes flow toward the leader: lineDashOffset decreasing over time walks
+  // the dash pattern in the direction the path was built (follower -> leader),
+  // which reads as "energy flowing forward into the truck being drafted."
+  // Driven by _renderRealSeconds (wall-clock), not game-seconds, so the
+  // flow rate stays constant regardless of the sim-speed slider.
+  if (tetherPts.length) {
+    ctx.save();
+    ctx.strokeStyle = `rgba(${TETHER_COLOR_RGB}, ${tetherAlpha})`;
+    ctx.lineWidth = 1.6 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 5 / camera.zoom]);
+    ctx.lineDashOffset = -(_renderRealSeconds * 14) / camera.zoom;
+    ctx.beginPath();
+    for (let i = 0; i < tetherPts.length; i += 4) {
+      ctx.moveTo(tetherPts[i], tetherPts[i + 1]);
+      ctx.lineTo(tetherPts[i + 2], tetherPts[i + 3]);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   // One path, one fill, for every headlight on screen - the whole reason
@@ -2019,6 +2078,9 @@ export function drawFrame(ctx, canvas, camera, graph, bgCanvas, edgeList, glowCa
     // truck from (see cbFindSpeaker/cbFindJam) - never a fresh copy, so
     // handing it out costs nothing beyond the array itself.
     visibleTrucks: visibleTruckList,
+    // Convoy tethers actually stroked this frame - 0 whenever tethers are
+    // off, zoomed out, or no drafting pair is on screen. Test-only signal.
+    tethersDrawn: tetherPts.length / 4,
     viewport: nav
       ? { minX: cullCx - cullRadius, maxX: cullCx + cullRadius, minY: cullCy - cullRadius, maxY: cullCy + cullRadius }
       : { minX: cullMinX, maxX: cullMaxX, minY: cullMinY, maxY: cullMaxY },

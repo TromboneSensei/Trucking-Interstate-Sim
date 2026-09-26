@@ -505,6 +505,12 @@ export class Truck {
     // sticky state, so a draft's fuel savings only apply while a
     // qualifying leader is actually being tucked in behind.
     this.isDrafting = false;
+    // The actual truck object being drafted - null whenever isDrafting is
+    // false. Exists for render.js's convoy-tether line (draws
+    // follower->leader), which needs a live reference, not just the
+    // boolean. Cleared alongside isDrafting everywhere that flag is
+    // cleared (see applyFollowAndPassing and both park sites below).
+    this.draftLeader = null;
 
     // Shoulder Rider: a mid-jam shoulder cheat, Outlaws only (see
     // applyFollowAndPassing). Distinct from `lane`/`laneT` - like a
@@ -629,6 +635,13 @@ export class Truck {
     this.laneT = 0;
     this.passingLeaderId = null;
     this.parkedAt = this.currentNode;
+    // applyFollowAndPassing (which owns these two fields) is only ever
+    // called for a truck with truck.edge set - a parked truck never runs
+    // it again, so without this a truck that arrives mid-draft keeps
+    // isDrafting/draftLeader frozen at whatever they were the instant
+    // before parking, for as long as it sits here.
+    this.isDrafting = false;
+    this.draftLeader = null;
     this.milesSinceStop = 0; // a delivery + layover counts as a real stop for breakdown wear
     if (this.agent && !this.autoDriver) {
       // Career mode: a delivery is never auto-resolved. dwellHoursLeft
@@ -915,6 +928,15 @@ function arrivalSpeedCap(graph, truck, cruiseTargetSpeed) {
 // Preserving the exact original iteration order was necessary for a
 // true behavior-preserving optimization here.
 function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, followerMap, cruiseTargetSpeed, rnd) {
+  // Cleared up front, before any early return, and re-set below only if
+  // this tick's conditions actually qualify. Bug this fixed: the old code
+  // only ever WROTE isDrafting from inside the interstate/has-a-group
+  // branch further down, so a truck that left the interstate (hit this
+  // very first check) or hit an edge with no lane group kept whatever
+  // isDrafting/draftLeader it last had - including the 30% fuel discount
+  // in burnPerMile, indefinitely, even on a plain highway.
+  truck.isDrafting = false;
+  truck.draftLeader = null;
   if (truck.edge.kind !== "interstate") return Infinity;
 
   // Shoulder Rider, already engaged: buildLaneGroups excluded this truck
@@ -955,6 +977,7 @@ function applyFollowAndPassing(graph, truck, laneGroups, leaderMap, followerMap,
   truck.isDrafting = !!(truck.driver.isDrafter && truck.lane === 0 && leader
     && leader.speed >= DRAFT_MIN_LEADER_MPH
     && gapToLeader < safeMi * DRAFT_ENGAGE_SAFE_MULT);
+  truck.draftLeader = truck.isDrafting ? leader : null;
   if (truck.isDrafting) return leader.speed;
 
   const blocked = gapToLeader < safeMi * FOLLOW_TRIGGER_MULT + timeGap;
@@ -1375,6 +1398,12 @@ function parkForStop(truck, node, reason, rnd) {
   truck.laneT = 0;
   truck.passingLeaderId = null;
   truck.parkedAt = node;
+  // Same stale-flag fix as _arriveAtDestination just above: a truck
+  // pulling in for a mid-route REST/FUEL stop stops calling
+  // applyFollowAndPassing the instant it parks, so whatever isDrafting/
+  // draftLeader it carried into the stop would otherwise freeze there.
+  truck.isDrafting = false;
+  truck.draftLeader = null;
   truck.stopReason = reason;
   // PLAYER: no dwell to roll (Phase 4's parked branch never counts it
   // down for a "PLAYER" stop anyway - see updateFleet) and no auto-fill
