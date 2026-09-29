@@ -647,7 +647,7 @@ export function roadDetailFactor(camera) {
 // the same thing whether the fleet is 500 trucks or 10000.
 // Each band's `minTrucks` keeps a single truck braking for its own exit
 // from painting a whole segment red.
-const CONGESTION_BANDS = [
+export const CONGESTION_BANDS = [
   { slowdown: 0.15, minTrucks: 3, color: "rgba(245, 182, 52, 0.75)" },
   { slowdown: 0.32, minTrucks: 4, color: "rgba(240, 112, 34, 0.86)" },
   { slowdown: 0.52, minTrucks: 5, color: "rgba(228, 46, 40, 0.94)" },

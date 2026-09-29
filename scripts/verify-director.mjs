@@ -304,5 +304,144 @@ await screenshotApex({ width: 1280, height: 800 }, path.join(SCREENSHOT_DIR, "di
   await browser.close();
 }
 
+// --- Phase 4: the shot catalog --------------------------------------------
+// Retries forceShot for up to `timeoutMs` real time: Bottleneck/Convoy/Lone
+// Hauler candidates depend on live traffic, so a fresh boot may need a few
+// sim seconds before one exists.
+async function forceWithRetry(page, type, timeoutMs = 20000) {
+  const t0 = Date.now();
+  let res = "unavailable";
+  while (Date.now() - t0 < timeoutMs) {
+    res = await page.evaluate((t) => director.debug.forceShot(t), type);
+    if (res === "ok") break;
+    await page.waitForTimeout(1000);
+  }
+  return res;
+}
+async function waitCaptionShown(page) {
+  await page.evaluate(async () => {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 6000) {
+      if (document.getElementById("director-caption").classList.contains("show")) break;
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+  });
+  await page.waitForTimeout(350);
+}
+async function applySettings(page, { fleet, weather }) {
+  await page.evaluate(() => document.getElementById("btn-settings").click());
+  await page.waitForTimeout(200);
+  await page.evaluate(({ fleet, weather }) => {
+    if (fleet) document.getElementById("setting-fleet-size").value = String(fleet);
+    if (weather != null) document.getElementById("setting-weather").checked = weather;
+  }, { fleet, weather });
+  await page.evaluate(() => document.getElementById("btn-settings-apply").click());
+  await page.waitForTimeout(2500);
+}
+
+for (const [type, eyebrows] of [["interchange", ["INTERCHANGE"]], ["bottleneck", ["GRIDLOCK"]], ["convoy", ["CONVOY"]]]) {
+  const { browser, page, errors } = await freshPage();
+  const res = await forceWithRetry(page, type);
+  check(res === "ok", `forceShot('${type}') finds a candidate (got "${res}")`);
+  if (res === "ok") {
+    await waitCaptionShown(page);
+    const snap = await page.evaluate(() => director.debug.snapshot());
+    check(snap.shotType === type, `${type}: shotType is set (got ${snap.shotType})`);
+    check(eyebrows.includes(snap.caption.eyebrow), `${type}: caption eyebrow matches (got "${snap.caption.eyebrow}")`);
+    check(snap.caption.line.length > 0, `${type}: caption line "${snap.caption.line}"`);
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, `director-${type}.png`) });
+  }
+  check(errors.length === 0, `${type}: no page/console errors` + (errors.length ? ":\n  " + errors.join("\n  ") : ""));
+  await browser.close();
+}
+
+// Weather: unavailable when off, available when on.
+{
+  const { browser, page, errors } = await freshPage();
+  const off = await page.evaluate(() => director.debug.forceShot("weather"));
+  check(off === "unavailable", `weather is unavailable while showWeather is off (got "${off}")`);
+  await applySettings(page, { weather: true });
+  const on = await forceWithRetry(page, "weather", 10000);
+  check(on === "ok", `weather is available once showWeather is on (got "${on}")`);
+  if (on === "ok") {
+    await waitCaptionShown(page);
+    const snap = await page.evaluate(() => director.debug.snapshot());
+    check(["SNOW", "RAINSTORM"].includes(snap.caption.eyebrow), `weather: caption eyebrow is SNOW/RAINSTORM (got "${snap.caption.eyebrow}")`);
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, "director-weather.png") });
+  }
+  check(errors.length === 0, "weather: no page/console errors" + (errors.length ? ":\n  " + errors.join("\n  ") : ""));
+  await browser.close();
+}
+
+// Lone Hauler: night only. Set the game clock to 2 AM directly (Settings'
+// start-time dropdown has no 2 AM option).
+{
+  const { browser, page, errors } = await freshPage();
+  const day = await page.evaluate(() => { state.gameSeconds = 12 * 3600; return director.debug.forceShot("lone"); });
+  check(day === "unavailable", `lone hauler is unavailable at midday (got "${day}")`);
+  await page.evaluate(() => { state.gameSeconds = 2 * 3600; });
+  const night = await forceWithRetry(page, "lone", 30000);
+  check(night === "ok", `lone hauler finds a night candidate (got "${night}")`);
+  if (night === "ok") {
+    await waitCaptionShown(page);
+    const snap = await page.evaluate(() => director.debug.snapshot());
+    check(snap.caption.eyebrow === "LONE HAULER", `lone: caption eyebrow (got "${snap.caption.eyebrow}")`);
+    await page.screenshot({ path: path.join(SCREENSHOT_DIR, "director-lone.png") });
+  }
+  check(errors.length === 0, "lone: no page/console errors" + (errors.length ? ":\n  " + errors.join("\n  ") : ""));
+  await browser.close();
+}
+
+// Auto-pick distribution: never the same type twice running, and the
+// heaviest-weighted types outnumber the lightest (Interchange, weight 10).
+{
+  const { browser, page, errors } = await freshPage();
+  await applySettings(page, { weather: true });
+  await page.waitForTimeout(4000); // let jams/convoys form
+  const samples = await page.evaluate(() => director.debug.samplePickTypes(600));
+  let dup = false;
+  for (let i = 1; i < samples.length; i++) if (samples[i] === samples[i - 1]) dup = true;
+  const counts = {};
+  for (const s of samples) counts[s] = (counts[s] || 0) + 1;
+  console.log("pick distribution over", samples.length, counts);
+  check(samples.length === 600, `sampled 600 picks (got ${samples.length})`);
+  check(!dup, "no type is picked twice in a row");
+  check((counts.interchange || 0) < (counts.bottleneck || 0) && (counts.interchange || 0) < (counts.convoy || 0),
+    "Interchange (weight 10) is picked less often than Bottleneck (30) and Convoy (25)");
+  check(errors.length === 0, "distribution: no page/console errors" + (errors.length ? ":\n  " + errors.join("\n  ") : ""));
+  await browser.close();
+}
+
+// Performance budget: the full candidate scan + pick, at a 10,000-truck fleet.
+{
+  const { browser, page, errors } = await freshPage();
+  await applySettings(page, { fleet: 10000, weather: true });
+  await page.waitForTimeout(1500);
+  const n = await page.evaluate(() => trucks.length);
+  check(n === 10000, `fleet is 10,000 trucks (got ${n})`);
+  const picks = [];
+  for (let i = 0; i < 12; i++) {
+    const ms = await page.evaluate(async () => {
+      director.stop("reset");
+      director.debug.setIdleMs(50);
+      const t0 = performance.now();
+      while (performance.now() - t0 < 900) await new Promise((r) => requestAnimationFrame(r));
+      return director.debug.snapshot().lastPickMs;
+    });
+    picks.push(ms);
+    await page.evaluate(() => director.stop("reset"));
+  }
+  picks.sort((a, b) => a - b);
+  const median = picks[Math.floor(picks.length / 2)];
+  console.log("pick ms at 10k trucks:", picks.map((p) => p.toFixed(1)).join(" "), "| median", median.toFixed(1));
+  // The plan's budget is 8 ms. A pick happens once per 14-20 s shot, so an
+  // occasional GC-inflated outlier is invisible; the median is the real
+  // signal, with a loose ceiling on the worst case.
+  check(median < 8, `median pick time < 8ms at 10k trucks (got ${median.toFixed(1)}ms)`);
+  check(picks[picks.length - 1] < 25, `worst pick time < 25ms (got ${picks[picks.length - 1].toFixed(1)}ms)`);
+  check(errors.length === 0, "perf: no page/console errors" + (errors.length ? ":\n  " + errors.join("\n  ") : ""));
+  await browser.close();
+}
+
 console.log(fails === 0 ? "\nDIRECTOR VERIFY PASSED" : `\nDIRECTOR VERIFY FAILED (${fails})`);
 process.exit(fails === 0 ? 0 : 1);
